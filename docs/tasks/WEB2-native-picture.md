@@ -66,6 +66,12 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   rescales from dx11z's logical size to the game's. Mouse moves are also coalesced to one per frame.
   Debug env: `MOUSELOG=1` (mapping), `MOUSEPOS=1` (host vs game position every 5 frames), `R_SWEEP=<frame>`
   (scripted diagonal sweep), window/monitor/DPI line in the log at start.
+- **Exit hung after "Yes".** The shutdown (sub_0053bcb0) sends 0x466 to the window thread with
+  SendNotifyMessageA and waits for the handle at 0x6B7BF8 to clear; PostMessageA/SendNotifyMessageA were
+  stubs that dropped the message, and DestroyWindow never sent WM_DESTROY. Both now go through the guest
+  queue / the guest window procedure; PostQuitMessage queues WM_QUIT (GetMessage -> 0). Exit -> popup "Yes"
+  ends the process (exit code 0). Script: `R_CLICK=...,2700:615:466,3000:306:244` after creating a player.
+- Mouse buttons are also visible through DirectInput (DIMOUSESTATE: deltas + buttons) and GetAsyncKeyState.
 - The host cursor is hidden over the client area (the game draws its own); the process is per-monitor
   DPI-aware.
 - Watchdog (`NFSU2_WATCHDOG=<s>`, default 15): now fed by pageflip, PU limit (SPEED2's flow global removed),
@@ -88,4 +94,4 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   hover, clicks, player creation). Next: sound (DirectSound -> WASAPI/XAudio2), then WEB2n.
 - 2026-11-04 (2): user test: slow/jerky frontend and a lagging cursor -> Present without the guest lock,
   stall #3 fixed (guest spin-loop hook, fair GIL), host cursor hidden. User: jerks gone, cursor still slow ->
-  double mouse mapping fixed (2026-11-04 (3)), waiting for the user's re-test.
+  double mouse mapping fixed (2026-11-04 (3)), user OK. Exit hang fixed (4).

@@ -62,6 +62,7 @@ static void PushMsg(uint32_t m, uint32_t w, uint32_t l) {
 // the cursor in the game's logical coordinates (GetCursorPos, mouse messages)
 static int g_mx = 320, g_my = 240;
 static uint32_t MapMouse(LPARAM l);
+static uint32_t g_mbtn;          // mouse buttons as forwarded to the guest (bit 0 left, 1 right, 2 middle)
 extern "C" void metal_game_size(unsigned* w, unsigned* h);
 static void PushKey(unsigned dik, bool down) {
     if (g_kq_tail - g_kq_head >= 256) g_kq_head++;          // full: drop the oldest
@@ -542,6 +543,15 @@ void r_draw(const char* n, const uint32_t* a) {
 }
 
 const uint8_t* host_dik_state(void) { return g_dik; }
+uint32_t host_mouse_buttons(void) { return g_mbtn; }
+int host_vk_down(int vk) { return g_win && GetForegroundWindow() == g_win && (GetAsyncKeyState(vk) & 0x8000) ? 1 : 0; }
+// DIMOUSESTATE: relative motion since the last call (game pixels) + buttons
+void host_mouse_state(int32_t* dx, int32_t* dy, uint32_t* buttons) {
+    static int lx = -1, ly = -1;
+    if (lx < 0) { lx = g_mx; ly = g_my; }
+    *dx = g_mx - lx; *dy = g_my - ly; lx = g_mx; ly = g_my;
+    *buttons = g_mbtn;
+}
 void metal_get_cursor(int* x, int* y) { *x = g_mx; *y = g_my; }
 // called by the runtime's PeekMessage/GetMessage (GIL held): host messages
 // in, the guest window's key messages out into its queue
@@ -562,6 +572,12 @@ void kbd_pump(void) {
             s_moveFrame = g_frames;
         }
         const WinMsg& e = g_wq[g_wq_head++ & 255];
+        // the button state the game sees through DirectInput / GetAsyncKeyState,
+        // in step with the messages it gets (real and scripted ones)
+        switch (e.m) {
+        case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: g_mbtn |= 1; break; case WM_LBUTTONUP: g_mbtn &= ~1u; break;
+        case WM_RBUTTONDOWN: g_mbtn |= 2; break; case WM_RBUTTONUP: g_mbtn &= ~2u; break;
+        case WM_MBUTTONDOWN: g_mbtn |= 4; break; case WM_MBUTTONUP: g_mbtn &= ~4u; break; }
         win32_post_message(e.m, e.w, e.l);
         if (getenv("KBDLOG")) fprintf(stderr, "[kbd] -> guest queue msg 0x%x wp 0x%x lp 0x%x (frame %ld)\n", e.m, e.w, e.l, g_frames);
     }

@@ -1574,7 +1574,17 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
             wm_push(0x0007u, 0u, 0u);   /* WM_SETFOCUS     */
             wm_push(0x000Fu, 0u, 0u);   /* WM_PAINT        */
         } }
-    else if (!strcmp(n,"DestroyWindow")) r=1;
+    else if (!strcmp(n,"DestroyWindow")){
+        /* the game's shutdown (sub_0053bcb0) waits for its WM_DESTROY handler
+         * to clear the window handle at 0x6B7BF8: deliver WM_DESTROY and
+         * WM_NCDESTROY synchronously, as Windows does */
+        uint32_t hw = A(c,0);
+        if (g_wndproc){
+            uint32_t a1[4] = { hw, 0x0002u, 0u, 0u }; call_guest(c, g_wndproc, 4, a1);
+            uint32_t a2[4] = { hw, 0x0082u, 0u, 0u }; call_guest(c, g_wndproc, 4, a2);
+        }
+        fprintf(stderr, "  [window] DestroyWindow(0x%08x) -> WM_DESTROY delivered%c", hw, 10);
+        r=1; }
     else if (!strcmp(n,"GetDesktopWindow")) r=0x00B00000u;
     else if (!strcmp(n,"GetActiveWindow")||!strcmp(n,"GetForegroundWindow")) r=0x00B00001u;
     else if (!strcmp(n,"LoadIconA")||!strcmp(n,"LoadCursorA")) r=0x00B10001u;
@@ -1639,7 +1649,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
                 MR32(pm)=g_hwnd; MR32(pm+4)=m; MR32(pm+8)=wp; MR32(pm+12)=lp;
                 MR32(pm+16)=0; MR32(pm+20)=0; MR32(pm+24)=0; }
             g_wm_sent++;
-            r=1;
+            r = (m == 0x0012u && !strcmp(n,"GetMessageA")) ? 0u : 1u;   /* WM_QUIT */
         } else {
             if (pm){ mem_commit(pm,28); memset(g_mem+pm,0,28); MR32(pm)=g_hwnd; }
             r = !strcmp(n,"GetMessageA") ? 1u : 0u;   /* GetMessage 0 = WM_QUIT */
@@ -1654,13 +1664,25 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
                     fprintf(stderr, "[kbd] dispatched msg 0x%x wp 0x%x lp 0x%x -> 0x%x (tid %u)%c", args[1], args[2], args[3], r, cur_tid(c), 10); }
         }
     }
+    else if (!strcmp(n,"PostMessageA")||!strcmp(n,"SendNotifyMessageA")||!strcmp(n,"PostThreadMessageA")){
+        /* into the one guest queue (the window thread pumps it).  The game's
+         * shutdown sends 0x466 this way (sub_0053a8e0) and waits for the
+         * window thread to destroy the window: dropped, Exit hung. */
+        wm_push(A(c,1), A(c,2), A(c,3)); r=1; }
+    else if (!strcmp(n,"PostQuitMessage")){ wm_push(0x0012u, A(c,0), 0u); r=0; }
     else if (!strcmp(n,"TranslateMessage")
-           ||!strcmp(n,"DefWindowProcA")||!strcmp(n,"PostMessageA")
-           ||!strcmp(n,"SendMessageA")||!strcmp(n,"PostQuitMessage")) r=0;
+           ||!strcmp(n,"DefWindowProcA")||!strcmp(n,"SendMessageA")) r=0;
     else if (!strcmp(n,"ReleaseCapture")||!strcmp(n,"SetCapture")) r=1;
     else if (!strcmp(n,"IsIconic")) r=0;
     else if (!strcmp(n,"GetKeyboardState")){ uint32_t p=A(c,0); if(p){mem_commit(p,256);memset(g_mem+p,0,256);} r=1; }
-    else if (!strcmp(n,"GetAsyncKeyState")) r=0;
+    else if (!strcmp(n,"GetAsyncKeyState")){
+        /* mouse buttons as forwarded to the guest, keys of the renderer
+         * window (weak: headless = all up) */
+        extern uint32_t host_mouse_buttons(void) __attribute__((weak));
+        extern int host_vk_down(int) __attribute__((weak));
+        uint32_t vk = A(c,0) & 0xFFu, b = host_mouse_buttons ? host_mouse_buttons() : 0u; r = 0;
+        if (vk == 1u || vk == 2u || vk == 4u){ if (b & (vk == 1u ? 1u : vk == 2u ? 2u : 4u)) r = 0x8000u; }
+        else if (host_vk_down && host_vk_down((int)vk)) r = 0x8000u; }
     /* --- synchronization --- */
     else if (!strcmp(n,"CreateEventA")){
         uint32_t h=obj_new(OB_EVENT); Obj*o=obj_get(h);

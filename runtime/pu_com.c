@@ -231,6 +231,7 @@ static uint32_t di_call(CPU *c, uint32_t self, int m, const uint32_t *a){
 /* the renderer window's keyboard (renderer/thrash_dx11.cpp); weak: headless = nothing pressed */
 const uint8_t *host_dik_state(void) __attribute__((weak));
 int host_key_event(int peek, uint32_t *ofs, uint32_t *data, uint32_t *ts, uint32_t *seq) __attribute__((weak));
+void host_mouse_state(int32_t *dx, int32_t *dy, uint32_t *buttons) __attribute__((weak));
 
 static uint32_t didev_call(CPU *c, uint32_t self, int m, const uint32_t *a){
     (void)c;
@@ -251,7 +252,11 @@ static uint32_t didev_call(CPU *c, uint32_t self, int m, const uint32_t *a){
         if (p && n && n <= 4096u){ mem_commit(p, n); memset(g_mem + p, 0, n);
             /* WEB2: the renderer window's keys (DIK codes, 0x80 = down) */
             const uint8_t *k = kb && host_dik_state ? host_dik_state() : 0;
-            if (k) memcpy(g_mem + p, k, n < 256u ? n : 256u); }
+            if (k) memcpy(g_mem + p, k, n < 256u ? n : 256u);
+            /* DIMOUSESTATE: lX, lY, lZ, rgbButtons[4] (0x80 = down) */
+            if (!kb && host_mouse_state && n >= 16u){ int32_t dx, dy; uint32_t b; host_mouse_state(&dx, &dy, &b);
+                MR32(p) = (uint32_t)dx; MR32(p + 4) = (uint32_t)dy;
+                for (int i = 0; i < 3; i++) g_mem[p + 12 + i] = (b >> i & 1u) ? 0x80 : 0; } }
         return S_OK; }
     case 10: {                                  /* GetDeviceData(this, cbObj, rgdod, pdwInOut, flags) */
         uint32_t cb = a[1], dst = a[2], pio = a[3], fl = a[4];
