@@ -69,3 +69,38 @@ with no trap and no unknown import on the way.
     dx11z for WEB2;
   - NFSU2-only (stub): language_registry, overrides_report, hfr_*, roam_game_parked, discord_*, audio_set_muted,
     kbd_pump, d3dx_hle_report, autotest_frame/note_unimpl, g_srv_* (server.dll module tables: stub modinfo).
+
+2026-11-04 evening: **the frontend runs headless** (done-when met).
+- Links and runs: `./link_native.sh`, then
+  `NFS5_SAVEDIR=<scratch> ALARM=60 out/nfs5_native.exe out/PORSCHE.EXE <clean install>/Porsche.exe`.
+  Result (fresh profile, 60 s): ~950 frames of the frontend, ~115 THRASH draws per frame, 78 textures, 783 files
+  opened (FEData controls, garage model, saves), **0 traps, 0 unresolved indirect calls**; the only imports still
+  answered by the generic stub are Winsock (WEB2n).
+- New files:
+  - `runtime/thrash_hle.c`: the 40 THRASH entry points as extra "imports" (`g_pu_imp`, found by GetProcAddress's
+    name search; values from our dx11z wrapper: about struct, 10 video modes, state defaults, window/lock
+    descriptors), headless (counts, 16 ms pacing on pageflip). Also `gimme.dll!ConvertFile` (cdecl).
+  - `runtime/pu_com.c`: DirectSound (+3D buffer/listener; silent, play cursor on the real clock, one-shot buffers
+    end), DirectSoundCapture (none), DirectInput 5 keyboard + mouse (nothing pressed), `call_guest`.
+  - `runtime/pu_imports.c` + `pu_imports2.inc`: DINPUT/DSOUND/DDRAW creation, mrbupd, GetDeviceCaps/GetDC,
+    CharUpperA, GetKeyboardType, file mappings (named memory and read-only file copies), CompareString,
+    SystemParametersInfo, GetKeyState, GetStockObject, RegFlushKey.
+  - `res.c`, `modheap.c` copied from upstream unchanged.
+- Fixes found on the way (all PU-vs-SPEED2 differences):
+  - DSOUND `#6` is DirectSoundCaptureCreate (3 args), not DirectSoundEnumerateA (2): call site 0x58F39E.
+  - Clock: PU's TIMER_init waits on its own timeSetEvent callbacks before any frame; the virtual per-Present clock
+    stalled it -> wall clock by default (`VCLOCK=frame` = old). Its service thread needs a real
+    `WaitForMultipleObjectsEx` (was a stub: the thread exited, "FAILED TO INITIALIZE WINDOWS MULTIMEDIA TIMER").
+  - Files: `_set_fmode(_O_BINARY)` (UCRT text mode cut reads at 0x1A: "SHAPE_clut - INVALID SHAPE TYPE").
+  - Virtual game folder `C:\NFS5` (was `C:\NFSU2`); GetModuleFileName `C:\NFS5\PORSCHE.EXE`.
+  - Registry defaults as a real install after 3D Setup (`Thrash Driver`=dx, `Group`=D3D, `Thrash Resolution`=640x480,
+    `Hardware Acceleration`=1 ...); the runtime's registry file is `$NFS5_SAVEDIR/registry.txt` (was `~/.nfsu2_registry`).
+  - `GetMessageA` blocks on an empty queue (PU's window thread 0x53B8D0 is a plain GetMessage loop; it spun).
+  - DirectSound/DirectInput objects are re-created after the game releases them (it probes EAX, drops DS, re-creates).
+- Open (WEB2 and later):
+  - Frame rate: 15 fps fresh profile, ~5 fps with an existing profile; 2-3 M QueryPerformanceCounter calls/s
+    (the game's limiter spinning). Profile in WEB2 (frame pacing against the real driver + eipsample).
+  - Movies (`FeData\movies\*.mad`), `music\zzzymus.viv`, the 928/959/GT2/GT3 models and `garaged/l.fsh` are not in
+    the clean install (CD content); the game skips them.
+  - ConvertFile (driver picture) returns "not converted".
+  - Winsock HLE (WEB2n), audio output, input, the window: WEB2.

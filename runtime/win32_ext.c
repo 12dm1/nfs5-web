@@ -1231,8 +1231,9 @@ static const char *reg_path(void){
     /* NFSU2_REGFILE=<path>: lets test runs use their own registry file */
     const char *rf = getenv("NFSU2_REGFILE");
     if (rf && *rf){ snprintf(pth, sizeof pth, "%s", rf); return pth; }
-    const char *h = getenv("HOME");
-    snprintf(pth, sizeof pth, "%s/.nfsu2_registry", h ? h : ".");
+    /* nfs5-web: next to the saves (NFS5_SAVEDIR), not in the home folder */
+    const char *h = getenv("NFS5_SAVEDIR");
+    snprintf(pth, sizeof pth, "%s/registry.txt", h && *h ? h : ".");
     return pth;
 }
 static void reg_load(void){
@@ -1435,8 +1436,17 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         else if (!strcasecmp(vn,"~MHz")){
             const char *e = getenv("NFSU2_TSC_MHZ"); dval = e && *e ? (uint32_t)strtoul(e,0,0) : 3000u; have_d=1; }
         else if (!strcasecmp(vn,"Language"))      sval=language_registry();   /* runtime/language.c */
-        else if (!strcasecmp(vn,"Install Dir"))   sval="C:\\NFSU2";
-        else if (!strcasecmp(vn,"CD Drive"))      sval="C:\\NFSU2";
+        /* nfs5-web: PU's HKLM\...\Need For Speed - Porsche Unleashed after its
+         * installer and 3D Setup (values as on a real install; "dx" + "z" = the
+         * THRASH driver name, served by thrash_hle.c) */
+        else if (!strcasecmp(vn,"Install Dir"))   sval="C:\\NFS5";
+        else if (!strcasecmp(vn,"CD Drive"))      sval="C:\\";
+        else if (!strcasecmp(vn,"Thrash Driver")) sval="dx";
+        else if (!strcasecmp(vn,"Thrash Resolution")) sval="640x480";
+        else if (!strcasecmp(vn,"Group"))         sval="D3D";
+        else if (!strcasecmp(vn,"3D Card") || !strcasecmp(vn,"3D Device Description")) sval="nfs5-web";
+        else if (!strcasecmp(vn,"D3D Device") || !strcasecmp(vn,"Triple Buffer")){ dval=0; have_d=1; }
+        else if (!strcasecmp(vn,"Hardware Acceleration")){ dval=1; have_d=1; }
         else if (!strcasecmp(vn,"StreamingInstall")){ dval=0; have_d=1; }
         else if (!strcasecmp(vn,"VERSION"))       sval="1.2.0.0";
         else if (!strcasecmp(vn,"SIZE")){ dval=0; have_d=1; }
@@ -1555,7 +1565,9 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
          * that (a mouse move over the page) runs one frame of an inactive
          * game, whose streams nothing refills: unmuted, the mixer would play
          * their stale buffers, a movie's last second over and over. */
-        if (remove && !strcmp(n,"GetMessageA") && g_wmq_head == g_wmq_tail && lifecycle_may_park()){
+        /* nfs5-web: PU pumps messages on its own window thread (0x53B8D0), a
+         * plain GetMessage loop: it must block on an empty queue, as on Windows */
+        if (remove && !strcmp(n,"GetMessageA") && g_wmq_head == g_wmq_tail){
             void audio_set_muted(int);
             audio_set_muted(1);
             guest_yield_begin();
@@ -1563,7 +1575,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
                 struct timespec ts = { 0, 5000000L }; nanosleep(&ts, 0);
                 guest_yield_end();
                 kbd_pump(); lifecycle_pump();
-                if (g_wmq_head != g_wmq_tail || !lifecycle_may_park()) break;
+                if (g_wmq_head != g_wmq_tail) break;
                 guest_yield_begin();
             }
             if (!lifecycle_game_parked()) audio_set_muted(0);
@@ -1803,7 +1815,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
           nanosleep(&ts,0); }
         guest_yield_end();
         r=0; }
-    else if (!strcmp(n,"WaitForMultipleObjects")){
+    else if (!strcmp(n,"WaitForMultipleObjects") || !strcmp(n,"WaitForMultipleObjectsEx")){   /* nfs5-web: Ex (PU timer thread): same first 4 args, alertable ignored */
         uint32_t cnt=A(c,0), parr=A(c,1), waitall=A(c,2), ms=A(c,3);
         (void)waitall;
         ts_set(TS_WAITM, cnt && parr && mem_is_committed(parr+3) ? MR32(parr) : 0u);

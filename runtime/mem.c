@@ -125,7 +125,8 @@ static LONG CALLBACK veh_fault(EXCEPTION_POINTERS *ep){
     if (InterlockedExchange(&g_in_handler, 1)){ fprintf(stderr, "\n*** a second fault inside the handler - exiting\n"); _exit(4); }
     void *pc = ep->ExceptionRecord->ExceptionAddress;
     uint32_t ffn = guest_fn_from_host(pc);
-    fprintf(stderr, "\n*** HOST EXCEPTION 0x%08lx at %p%s", code, pc, ffn ? "" : "\n");
+    fprintf(stderr, "\n*** HOST EXCEPTION 0x%08lx at %p (exe+0x%llx)%s", code, pc,
+            (unsigned long long)((uint8_t*)pc - (uint8_t*)GetModuleHandleA(0)), ffn ? "" : "\n");
     if (ffn) fprintf(stderr, " in guest function sub_%08x\n", ffn);
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2){
         uint8_t *p = (uint8_t*)ep->ExceptionRecord->ExceptionInformation[1];

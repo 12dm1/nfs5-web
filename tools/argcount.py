@@ -97,7 +97,7 @@ for (s,m),n in seg_sites.most_common(8): print(f"    {s}: {m:8s} {n}")
 # cross-check against known correct values
 KNOWN={
  # nfs5-web: PORSCHE.EXE imports nfsu2-web's list lacks (stdcall bytes/4 the callee pops)
- 'DirectDrawEnumerateA':2,'DirectInputCreateA':4,'#6':2,          # DSOUND #6 = DirectSoundEnumerateA
+ 'DirectDrawEnumerateA':2,'DirectInputCreateA':4,'#6':3,          # DSOUND #6 = DirectSoundCaptureCreate (guid, ppDSC, outer); call site 0x58F39E builds a DSCBUFFERDESC
  'CreateProcessA':10,'SetEnvironmentVariableW':2,'FormatMessageA':7,'GetCommProperties':2,
  'WaitForMultipleObjectsEx':5,'PulseEvent':1,'DisableThreadLibraryCalls':1,'OpenSemaphoreA':3,
  'OpenMutexA':3,'OpenFileMappingA':3,'GetCommModemStatus':2,'GetVolumeInformationA':8,

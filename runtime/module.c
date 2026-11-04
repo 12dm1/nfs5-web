@@ -296,7 +296,7 @@ uint32_t module_proc(uint32_t h, uint32_t nm, uint32_t *err){
 int module_file_name(uint32_t h, char *out, int n){
     GuestMod *m = by_handle(h);
     if (!m || !m->mapped) return 0;
-    snprintf(out, (size_t)n, "C:\\NFSU2\\%s", m->info->name);
+    snprintf(out, (size_t)n, "C:\\NFS5\\%s", m->info->name);
     return 1;
 }
 

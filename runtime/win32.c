@@ -45,9 +45,8 @@ int winsock_call(CPU*, const char*, const char*, uint32_t*);   /* ws2_32, netapi
 void winsock_report(void);
 uint64_t win32_ext_threads(void);
 uint64_t win32_ext_threads_exited(void);
-uint32_t com_direct3dcreate9(void);
-uint32_t com_directinput8create(uint32_t);
-uint32_t com_directsoundcreate(uint32_t);
+int pu_call(CPU*, const ImpEnt*, uint32_t*);   /* nfs5-web: pu_imports.c */
+extern const ImpEnt g_pu_imp[]; extern const uint32_t g_pu_imp_count;   /* thrash_hle.c */
 void com_init(void);
 int g_bt_on = 0;
 
@@ -155,6 +154,13 @@ void vclock_tick(void){
 _Atomic uint64_t g_vclock_freeze = 0;
 uint64_t host_us(void){
     { uint64_t fz = atomic_load(&g_vclock_freeze); if (__builtin_expect(fz != 0, 0)) return fz; }
+    /* nfs5-web: the virtual clock below advances per D3D9 Present (SPEED2);
+     * PU's frames are THRASH_pageflip and its boot waits on its own
+     * timeSetEvent callbacks before the first frame, so PU runs on the wall
+     * clock unless VCLOCK=frame (WEB2 decides whether PU needs the virtual one). */
+    { static int wall = -1;
+      if (wall < 0){ const char *e = getenv("VCLOCK"); wall = !(e && !strcmp(e, "frame")); }
+      if (wall){ static uint64_t t0; uint64_t t = real_us(); if (!t0) t0 = t; return t - t0 + 1000000ull; } }
     uint64_t base = atomic_load(&g_vclock_base);
     uint64_t rb   = atomic_load(&g_real_base);
     uint64_t now  = real_us();
@@ -382,7 +388,7 @@ static int module_known(uint32_t p){
     const char *b = nm;
     for (const char *q = nm; *q; q++) if (*q == '\\' || *q == '/') b = q + 1;
     size_t l = strlen(b);
-    if (!strcasecmp(b, "speed2.exe") || !strcasecmp(b, "speed2")) return 1;
+    if (!strcasecmp(b, "porsche.exe") || !strcasecmp(b, "porsche")) return 1;
     for (uint32_t i = 0; i < g_nimps; i++){            /* the exe's and server.dll's imports */
         const char *d = g_imps[i].dll; size_t dl = strlen(d);
         if (!strcasecmp(b, d)) return 1;
@@ -487,7 +493,9 @@ int win32_call(CPU *c, uint32_t idx){
      * Its time() comes from GetSystemTimeAsFileTime: real UTC as well (the
      * HLE's own is a counter that advances per call, which would end
      * StopServer's 10 s wait after 1,000 polls instead of 10 s). */
-    if (idx >= g_imp_count && !strcmp(n,"GetTickCount")) r = real_ms();
+    /* nfs5-web: THRASH driver entry points first (per-draw calls skip the name chain) */
+    if (idx >= g_imp_count + g_srv_imp_count && pu_call(c, e, &r)) { }
+    else if (idx >= g_imp_count && !strcmp(n,"GetTickCount")) r = real_ms();
     else if (idx >= g_imp_count && !strcmp(n,"GetSystemTimeAsFileTime")){
         uint32_t p = ARG(c,0);
         if (p){ struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
@@ -497,7 +505,7 @@ int win32_call(CPU *c, uint32_t idx){
     else if (idx == qpc_idx || (qpc_idx == 0xFFFFFFFFu && !strcmp(n,"QueryPerformanceCounter") && (qpc_idx = idx, 1))
              || (idx >= g_imp_count && !strcmp(n,"QueryPerformanceCounter"))){
         if (ENVC("QPCWHO")) qpc_who(c);
-        if (c->eip == 0x43bdfeu) qpc_spin_sleep(c);
+        /* nfs5-web: SPEED2 frame-limiter QPC spin hack (ret 0x43BDFE) removed */
         uint64_t v = host_qpc(); uint32_t p=ARG(c,0);
         if(p){ MR32(p)=(uint32_t)v; MR32(p+4)=(uint32_t)(v>>32); } r=1; }
     /* A lifted DLL's own heaps (server.dll's CRT: HeapCreate from that DLL)
@@ -612,7 +620,7 @@ int win32_call(CPU *c, uint32_t idx){
         { static uint32_t seen = 0; if (f < 32u && !(seen & (1u << f))){ seen |= 1u << f;
             fprintf(stderr,"[hle] IsProcessorFeaturePresent(%u) -> %u (from 0x%08x)\n", f, r, c->eip); } } }
     else if (!strcmp(n,"GetModuleFileNameA")){ uint32_t p=ARG(c,1),sz=ARG(c,2);
-        const char*s="C:\\\\NFSU2\\\\SPEED2.EXE"; char ms[300];
+        const char*s="C:\\NFS5\\PORSCHE.EXE"; char ms[300];
         if (module_file_name(ARG(c,0), ms, sizeof ms)) s = ms;   /* server.dll: C:\NFSU2\server.dll */
         uint32_t l=(uint32_t)strlen(s);
         if(p&&sz){ if(l>=sz) l=sz-1; memcpy(g_mem+p,s,l); MR8(p+l)=0; } r=l; }
@@ -732,10 +740,7 @@ int win32_call(CPU *c, uint32_t idx){
         fprintf(stderr,"\n*** GUEST MESSAGEBOX ***\n  title: %s\n  text : %s\n***\n",
                 cap?(char*)(g_mem+cap):"(none)", txt?(char*)(g_mem+txt):"(none)");
         r = 1; }
-    else if (!strcmp(n,"Direct3DCreate9")) r = com_direct3dcreate9();
-    else if (!strcmp(n,"DirectInput8Create")) r = com_directinput8create(ARG(c,3));
-    else if (!strcmp(n,"DirectSoundCreate") || (!strcmp(n,"#1") && !strcasecmp(e->dll,"DSOUND.dll")))
-        r = com_directsoundcreate(ARG(c,1));
+    else if (pu_call(c, e, &r)) { /* nfs5-web: THRASH driver, DirectX 5-7 creation, mrbupd (pu_imports.c) */ }
     else if (!strcmp(n,"SetConsoleCtrlHandler")) r = 1;
     else if (!strcmp(n,"RtlUnwind"))             r = 0;
     else if (!strcmp(n,"RaiseException")){
@@ -778,10 +783,13 @@ int win32_call(CPU *c, uint32_t idx){
 }
 
 void win32_init(void){
-    g_nimps = g_imp_count + g_srv_imp_count;
+    /* nfs5-web: after the exe's and server.dll's imports, the THRASH driver's
+     * entry points (thrash_hle.c), found by GetProcAddress's name search */
+    g_nimps = g_imp_count + g_srv_imp_count + g_pu_imp_count;
     g_imps = calloc(g_nimps ? g_nimps : 1, sizeof *g_imps);
     memcpy(g_imps, g_imp, g_imp_count * sizeof *g_imps);
     if (g_srv_imp_count) memcpy(g_imps + g_imp_count, g_srv_imp, g_srv_imp_count * sizeof *g_imps);
+    memcpy(g_imps + g_imp_count + g_srv_imp_count, g_pu_imp, g_pu_imp_count * sizeof *g_imps);
     stat_ = calloc(g_nimps ? g_nimps : 1, sizeof *stat_);
     heap_init();
     g_hk = calloc(g_nimps ? g_nimps : 1, 1);
@@ -790,7 +798,7 @@ void win32_init(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
     tick0 = (uint64_t)ts.tv_sec*1000 + ts.tv_nsec/1000000;
     g_cmdline = gheap_alloc(1, 64, 1);
-    strcpy((char*)(g_mem+g_cmdline), "SPEED2.EXE");
+    strcpy((char*)(g_mem+g_cmdline), "PORSCHE.EXE");
     /* fill the IAT with magic addresses */
     for (uint32_t i=0;i<g_imp_count;i++) MR32(g_imp[i].iat) = IMP_MAGIC + i;
     com_init();

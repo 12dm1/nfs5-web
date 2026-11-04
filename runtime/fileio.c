@@ -34,7 +34,7 @@ void fileio_set_root(const char *exe_path){
 
 /* Turn a Windows path into a real path.
  *   "C:\\NFSU2\\TRACKS\\X.BUN" | "TRACKS\\X.BUN" | ".\\X" -> <root>/TRACKS/X.BUN
- * The virtual game folder is "C:\\NFSU2", so that prefix is dropped.
+ * The virtual game folder is "C:\\NFS5", so that prefix is dropped.
  * Components are resolved case-insensitively.                          */
 /* For opens meant for writing, create the missing parent folders (on Windows
  * the game creates them separately; here the whole path must be ready). */
@@ -72,7 +72,7 @@ static void rel_of(const char *win, char *rel, size_t relsz){
     const char *p = win;
     if (p[0] && p[1]==':') p += 2;                       /* drive letter   */
     while (*p=='\\' || *p=='/') p++;
-    if (!strncasecmp(p,"NFSU2",5) && (p[5]=='\\'||p[5]=='/'||p[5]==0)){
+    if (!strncasecmp(p,"NFS5",4) && (p[4]=='\\'||p[4]=='/'||p[4]==0)){   /* nfs5-web: virtual folder C:\\NFS5 */
         p += 5; while (*p=='\\'||*p=='/') p++;           /* virtual root   */
     }
     while (p[0]=='.' && (p[1]=='\\'||p[1]=='/')) p += 2;
@@ -403,6 +403,18 @@ static FH *fh_get(uint32_t h){
     FH *f=&g_fh[h-FH_BASE]; return f->used?f:0;
 }
 int fileio_is_handle(uint32_t h){ return fh_get(h)!=0; }
+/* nfs5-web: a file mapping's contents (pu_imports2.inc, CreateFileMappingA of
+ * a file): the file's size, and a read at an offset into guest memory. */
+int64_t fileio_handle_size(uint32_t h){
+    FH *f = fh_get(h); if (!f || f->fd < 0) return -1;
+    struct stat st; return fstat(f->fd, &st) == 0 ? (int64_t)st.st_size : -1;
+}
+int64_t fileio_read_at(uint32_t h, uint32_t dst, uint32_t len, int64_t off){
+    FH *f = fh_get(h); if (!f || f->fd < 0) return -1;
+    mem_commit(dst, len);
+    ssize_t got = pread(f->fd, g_mem + dst, len, (off_t)off);
+    return got < 0 ? -1 : (int64_t)got;
+}
 int fileio_open_handles(void){ int n = 0; for (int k = 1; k < FH_MAX; k++) n += g_fh[k].used; return n; }
 /* Per-thread last error for failing calls (win32.c, TEB+0x34). */
 void win32_set_last_error(CPU *, uint32_t);
@@ -790,7 +802,7 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
         int abs_ = (src[0] && src[1] == ':') || src[0] == '\\' || src[0] == '/';
         if (abs_ && src[0] != '\\' && src[0] != '/') snprintf(full, sizeof full, "%s", src);
         else if (abs_) snprintf(full, sizeof full, "C:%s", src);
-        else snprintf(full, sizeof full, "C:\\NFSU2\\%s", src);
+        else snprintf(full, sizeof full, "C:\\NFS5\\%s", src);
         for (char *q = full; *q; q++) if (*q == '/') *q = '\\';
         uint32_t len = (uint32_t)strlen(full);
         if (!buf || nb < len + 1) r = len + 1;
@@ -808,7 +820,7 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
          * We return the virtual root; resolve() maps it to the game folder.
          * If it comes back empty the game cannot find its save/profile folder. */
         uint32_t pp=A(c,4);
-        if (pp){ mem_commit(pp, 260); snprintf((char*)(g_mem+pp), 260, "C:\\NFSU2"); }
+        if (pp){ mem_commit(pp, 260); snprintf((char*)(g_mem+pp), 260, "C:\\NFS5"); }
         r=0; }
     else if (!strcmp(n,"CreateDirectoryA")){
         char real[1024]; resolve_w(GS(A(c,0)), real, sizeof real);

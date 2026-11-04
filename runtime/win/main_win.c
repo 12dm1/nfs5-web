@@ -17,6 +17,7 @@
 #include <setjmp.h>
 #include <pthread.h>
 #include <windows.h>
+#include <fcntl.h>
 
 extern jmp_buf g_exit_jmp; extern int g_exit_code, g_exit_armed; extern int g_bt_on;
 void dispatch_init(void); void dispatch_report(void);
@@ -43,6 +44,7 @@ static CPU cpu; static CPU *const c = &cpu;
 static void all_reports(void){
     static int done; if (done) return; done = 1;
     win32_report();
+    { void thrash_report(void), com_report(void); thrash_report(); com_report(); }
     dispatch_report();
     fflush(stderr);
 }
@@ -88,6 +90,7 @@ int main(int argc, char **argv){
     const char *exe = argc > 1 ? argv[1] : "PORSCHE.EXE";
     const char *root = argc > 2 ? argv[2] : exe;
     setvbuf(stderr, 0, _IONBF, 0);
+    _set_fmode(_O_BINARY);                  /* the runtime's open()/fopen() are POSIX: no CRLF or ^Z translation */
 
     mem_init(); mem_fault_handler_install();
     if (mem_load_pe(exe)) return 1;
