@@ -127,14 +127,16 @@ static void PumpHostWindow() {
 // client pixels -> the game's logical screen (640x480 in the frontend);
 // the picture fills the client area (DX11 output stretched to it)
 static uint32_t MapMouse(LPARAM l) {
-    RECT rc; GetClientRect(g_win, &rc);
-    const int cw = rc.right > 0 ? rc.right : 1, ch = rc.bottom > 0 ? rc.bottom : 1;
-    // the game's own screen size (THRASH state, what GetSystemMetrics tells it);
-    // g_dx.logical* is not it (320x240 after the frontend's setvideomode)
+    // dx11z's window subclass (DX11_WindowProc) has already mapped the client
+    // point to its logical size (g_dx.logicalW/H) before this window procedure
+    // sees it; scaling by the client size again halved every coordinate (the
+    // game cursor moved at half speed and never got past the screen's middle).
+    // Only rescale from that logical size to the game's own screen size.
+    const int sw = g_dx.logicalW > 0 ? g_dx.logicalW : 640, sh = g_dx.logicalH > 0 ? g_dx.logicalH : 480;
     unsigned gw = 640, gh = 480; metal_game_size(&gw, &gh);
     const int lw = (int)gw, lh = (int)gh;
-    int x = (short)LOWORD(l) * lw / cw, y = (short)HIWORD(l) * lh / ch;
-    if (getenv("KBDLOG")) fprintf(stderr, "[mouse] client %d,%d of %dx%d -> %d,%d of %dx%d%c", (short)LOWORD(l), (short)HIWORD(l), cw, ch, x, y, lw, lh, 10);
+    int x = (short)LOWORD(l) * lw / sw, y = (short)HIWORD(l) * lh / sh;
+    if (getenv("MOUSELOG")) fprintf(stderr, "[mouse] %d,%d of %dx%d -> %d,%d of %dx%d%c", (short)LOWORD(l), (short)HIWORD(l), sw, sh, x, y, lw, lh, 10);
     x = x < 0 ? 0 : x >= lw ? lw - 1 : x; y = y < 0 ? 0 : y >= lh ? lh - 1 : y;
     g_mx = x; g_my = y;
     return (uint32_t)(x & 0xFFFF) | ((uint32_t)y << 16);
@@ -204,6 +206,15 @@ int r_init(int w, int h) {
     int iw = 0, ih = 0; char mode[32] = {};
     ReadDisplayIni(&iw, &ih, mode, sizeof mode);
     if (!g_win) { g_win = CreateHostWindow(iw > 0 ? iw : 1280, ih > 0 ? ih : 960); g_winThread = GetCurrentThreadId(); }
+    if (g_win) {   // the geometry the mouse mapping depends on
+        RECT rc, wr; GetClientRect(g_win, &rc); GetWindowRect(g_win, &wr);
+        MONITORINFO mi = {sizeof mi}; GetMonitorInfoA(MonitorFromWindow(g_win, MONITOR_DEFAULTTONEAREST), &mi);
+        typedef UINT (WINAPI *GDFW)(HWND); GDFW gd = (GDFW)(void*)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForWindow");
+        fprintf(stderr, "[dx11] window: client %ldx%ld, frame %ld,%ld..%ld,%ld, monitor %ldx%ld (work %ldx%ld), dpi %u\n",
+                rc.right, rc.bottom, wr.left, wr.top, wr.right, wr.bottom,
+                mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                mi.rcWork.right - mi.rcWork.left, mi.rcWork.bottom - mi.rcWork.top, gd ? gd(g_win) : 0u);
+    }
     if (!g_win) { fprintf(stderr, "[dx11] CreateWindow failed (%lu)\n", GetLastError()); return 0; }
     DX11_ConfigureMsaa(ReadDisplayIniInt("msaa", 1), ReadDisplayIniInt("alpha_to_coverage", 1) != 0);
     if (!DX11_Init(g_dx, g_win, w, h)) { fprintf(stderr, "[dx11] DX11_Init failed (see dx11z.log)\n"); return 0; }
@@ -362,6 +373,21 @@ static void ScriptedClicks() {
 
 void r_pageflip(void) {
     g_frames++;
+    if (getenv("MOUSEPOS") && g_frames % 5 == 0) {
+        const uint8_t* gx = g_mem + 0x006A6448u; const uint8_t* gy = g_mem + 0x006A6444u;
+        fprintf(stderr, "[mousepos] frame %ld: host %d,%d  guest handler %d,%d  queued %u%c", g_frames, g_mx, g_my,
+                gx ? *(const int*)gx : -1, gy ? *(const int*)gy : -1, g_wq_tail - g_wq_head, 10);
+    }
+    // R_SWEEP=<frame>: the mouse from 0,0 to 639,479 in 100 frames, 3 moves a frame (like a 300 Hz mouse)
+    if (const char* e = getenv("R_SWEEP")) {
+        long f0 = atol(e);
+        if (g_frames >= f0 && g_frames < f0 + 100)
+            for (int k = 1; k <= 3; k++) {
+                const long t = (g_frames - f0) * 3 + k;           // 1..300
+                const int x = (int)(639 * t / 300), y = (int)(479 * t / 300);
+                g_mx = x; g_my = y; PushMsg(WM_MOUSEMOVE, 0, (uint32_t)x | ((uint32_t)y << 16));
+            }
+    }
     ScriptedClicks();
     ScriptedKeys();
     ShotIfWanted();
@@ -524,7 +550,17 @@ int win32_msg_room(void);
 void kbd_pump(void) {
     if (!g_win) return;
     if (GetCurrentThreadId() == g_winThread) PumpHostWindow();
+    // Mouse moves as Windows delivers them: coalesced, the latest position
+    // only, at most one per frame.  The frontend's cursor takes about one
+    // move event per tick, so a 1000 Hz mouse made it trail further and
+    // further behind (it looked slow and never reached the bottom).
+    static long s_moveFrame = -1;
     while (g_wq_head != g_wq_tail && win32_msg_room() > 8) {
+        if (g_wq[g_wq_head & 255].m == WM_MOUSEMOVE) {
+            while (g_wq_tail - g_wq_head > 1 && g_wq[(g_wq_head + 1) & 255].m == WM_MOUSEMOVE) g_wq_head++;
+            if (s_moveFrame == g_frames) break;               // next frame
+            s_moveFrame = g_frames;
+        }
         const WinMsg& e = g_wq[g_wq_head++ & 255];
         win32_post_message(e.m, e.w, e.l);
         if (getenv("KBDLOG")) fprintf(stderr, "[kbd] -> guest queue msg 0x%x wp 0x%x lp 0x%x (frame %ld)\n", e.m, e.w, e.l, g_frames);

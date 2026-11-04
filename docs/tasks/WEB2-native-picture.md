@@ -60,6 +60,12 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   so the game cursor lagged behind the real one). `r_pageflip` releases the lock around `DX11_Present`;
   THRASH calls are serialized by a renderer mutex in `thrash_hle.c` (a waiter releases the guest lock).
   Timer ticks 1833 -> 3201 per 25 s.
+- **Half-speed game cursor = double mouse mapping.** dx11z's window subclass (`DX11_WindowProc`) already maps
+  client points to its logical size; `MapMouse` scaled by the client size again, so a real move to 1270,950
+  reached the game as 317,237 (scripted moves bypass the window and looked fine). `MapMouse` now only
+  rescales from dx11z's logical size to the game's. Mouse moves are also coalesced to one per frame.
+  Debug env: `MOUSELOG=1` (mapping), `MOUSEPOS=1` (host vs game position every 5 frames), `R_SWEEP=<frame>`
+  (scripted diagonal sweep), window/monitor/DPI line in the log at start.
 - The host cursor is hidden over the client area (the game draws its own); the process is per-monitor
   DPI-aware.
 - Watchdog (`NFSU2_WATCHDOG=<s>`, default 15): now fed by pageflip, PU limit (SPEED2's flow global removed),
@@ -81,4 +87,5 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   animate, ~150 fps unthrottled); both "6 frames" stalls fixed; mouse + keyboard reach the frontend (button
   hover, clicks, player creation). Next: sound (DirectSound -> WASAPI/XAudio2), then WEB2n.
 - 2026-11-04 (2): user test: slow/jerky frontend and a lagging cursor -> Present without the guest lock,
-  stall #3 fixed (guest spin-loop hook, fair GIL), host cursor hidden. Waiting for the user's re-test.
+  stall #3 fixed (guest spin-loop hook, fair GIL), host cursor hidden. User: jerks gone, cursor still slow ->
+  double mouse mapping fixed (2026-11-04 (3)), waiting for the user's re-test.
