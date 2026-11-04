@@ -7,9 +7,10 @@
  *
  * PU (2000, DirectX 6/7 era) talks COM only to DirectSound (+ 3D buffers and
  * the listener) and DirectInput 5.  Direct3D/DirectDraw sit behind the THRASH
- * driver (thrash_hle.c).  WEB1 is headless: sound buffers play silently with
- * a play cursor on the real clock (the game's mixer thread and the movie
- * player pace themselves on it), input devices report "nothing pressed".
+ * driver (thrash_hle.c).  Sound buffers have a play cursor on the real clock
+ * (the game's mixer thread and the movie player pace themselves on it);
+ * WEB2: pu_audio_render mixes the playing buffers by that same clock for the
+ * host's audio output (win/audio_wasapi.c; later WebAudio).
  *
  * Object layout (guest memory): 16-byte header in front (refcount, iface),
  * then [obj+0] vtable, [obj+4..] fields per interface (see the OBJ_* macros). */
@@ -125,6 +126,18 @@ static uint64_t now_us(void){
     return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u;
 }
 
+/* WEB2 sound: every live sound buffer, for the host mixer (pu_audio_render) */
+#include <pthread.h>
+#include <math.h>
+#define SBUF_MAX 256
+static uint32_t g_sbuf[SBUF_MAX]; static int g_nsbuf;
+static pthread_mutex_t g_amx = PTHREAD_MUTEX_INITIALIZER;
+static void sbuf_add(uint32_t b){ pthread_mutex_lock(&g_amx); if (g_nsbuf < SBUF_MAX) g_sbuf[g_nsbuf++] = b; pthread_mutex_unlock(&g_amx); }
+static void sbuf_del(uint32_t b){ pthread_mutex_lock(&g_amx);
+    for (int i = 0; i < g_nsbuf; i++) if (g_sbuf[i] == b){ g_sbuf[i] = g_sbuf[--g_nsbuf]; break; }
+    pthread_mutex_unlock(&g_amx); }
+static uint32_t g_ds_level;      /* SetCooperativeLevel: 3 = DSSCL_WRITEPRIMARY */
+
 static uint32_t com_new(uint32_t iface, uint32_t extra){
     if (!g_vtab[iface]){
         unsigned n = g_if[iface].n;
@@ -149,6 +162,7 @@ static uint32_t com_release(uint32_t o){
     if (r == 0) return 0;
     if (--r == 0){
         uint32_t iface = CH_IFACE(o);
+        if (iface == IF_DSBUF) sbuf_del(o);
         if (iface == IF_DSBUF && BUF_DATA(o) && !BUF_OWNER(o)){ gheap_free(g_gh_gbuf, BUF_DATA(o)); g_buf_bytes -= BUF_SIZE(o); }
         if (iface == IF_DSBUF && BUF_OWNER(o)) com_release(BUF_OWNER(o));
         g_com_bytes -= 20u + CH_SIZE(o);
@@ -321,6 +335,7 @@ static uint32_t ds_call(CPU *c, uint32_t self, int m, const uint32_t *a){
             BUF_SIZE(b) = bytes; ds_set_format(b, wfx);
         }
         BUF_DATA(b) = gheap_alloc(g_gh_gbuf, BUF_SIZE(b) + 64u, 1); g_buf_bytes += BUF_SIZE(b);
+        sbuf_add(b);
         if (g_trace) fprintf(stderr, "[com] CreateSoundBuffer flags=0x%x bytes=%u bps=%u -> 0x%08x\n",
                              flags, BUF_SIZE(b), BUF_BPS(b), b);
         if (pp) MR32(pp) = b;
@@ -340,9 +355,10 @@ static uint32_t ds_call(CPU *c, uint32_t self, int m, const uint32_t *a){
         memcpy(g_mem + b + 4, g_mem + src + 4, BUF_EXTRA - 4);
         BUF_STATE(b) = 0; BUF_POS(b) = 0;
         uint32_t root = BUF_OWNER(src) ? BUF_OWNER(src) : src;
-        BUF_OWNER(b) = root; CH_REF(root)++;
+        BUF_OWNER(b) = root; CH_REF(root)++; sbuf_add(b);
         if (pp) MR32(pp) = b;
         return S_OK; }
+    case 6: g_ds_level = a[2]; return S_OK;  /* SetCooperativeLevel(this, hwnd, level) */
     case 8: { uint32_t p = a[1]; if (p) MR32(p) = 4u; return S_OK; }   /* GetSpeakerConfig: stereo */
     }
     (void)c; (void)self;
@@ -485,7 +501,8 @@ uint32_t pu_directinputcreate(uint32_t ver, uint32_t pp){
     return S_OK;
 }
 uint32_t pu_directsoundcreate(uint32_t pp){
-    if (!com_is(g_ds, IF_DS) || !CH_REF(g_ds)){ g_ds = com_new(IF_DS, 4u); fprintf(stderr, "[com] DirectSoundCreate -> 0x%08x (silent, real-time cursors)\n", g_ds); }
+    if (!com_is(g_ds, IF_DS) || !CH_REF(g_ds)){ g_ds = com_new(IF_DS, 4u); fprintf(stderr, "[com] DirectSoundCreate -> 0x%08x (real-time cursors, host mixer)\n", g_ds);
+        void audio_host_start(void) __attribute__((weak)); if (audio_host_start) audio_host_start(); }
     else CH_REF(g_ds)++;
     if (pp) MR32(pp) = g_ds;
     return S_OK;
@@ -504,4 +521,68 @@ void com_report(void){
         for (unsigned m = 0; m < g_if[i].n && m < 32; m++)
             if (g_calls[i][m]) fprintf(stderr, "    %-24s %-26s %llu\n", g_if[i].name, g_if[i].m[m].name,
                                        (unsigned long long)g_calls[i][m]);
+}
+
+/* ---- WEB2: the host mixer ----------------------------------------------- *
+ * Called by the host audio thread (no guest lock): renders `frames` stereo
+ * float frames at `rate` Hz of what the playing buffers hold at the times
+ * `t_ahead_us` from now on -- the same clock the play cursors run on, so what
+ * is heard is what the game's cursor says is playing.  Volume (1/100 dB),
+ * pan, SetFrequency, 8/16-bit, mono/stereo; 3D parameters not yet. */
+static volatile int g_audio_muted;
+void audio_set_muted(int on){ g_audio_muted = on; }
+static double db_gain(int32_t v){ if (v >= 0) return 1.0; if (v <= -10000) return 0.0; return pow(10.0, v / 2000.0); }
+void pu_audio_render(float *out, int frames, int rate, int64_t t_ahead_us){
+    static double s_t = -1;                  /* mixer time of the next frame, us */
+    memset(out, 0, sizeof(float) * 2u * (size_t)frames);
+    const double now = (double)now_us() + (double)t_ahead_us;
+    if (s_t < 0 || fabs(s_t - now) > 40000.0) s_t = now;   /* start / after a stall: resync */
+    else s_t += (now - s_t) * 0.01;                         /* follow the clock's drift gently */
+    const double dt = 1e6 / rate;
+    static int dbg = -1; static double s_dbg; if (dbg < 0) dbg = getenv("AUDIODBG") != 0;
+    if (dbg && now - s_dbg > 1e6){ s_dbg = now;
+        pthread_mutex_lock(&g_amx);
+        for (int k = 0; k < g_nsbuf; k++){ const uint32_t b = g_sbuf[k]; uint64_t e = 0;
+            for (uint32_t i = 0; i + 1 < BUF_SIZE(b) && BUF_DATA(b); i += 2) e += (uint64_t)abs((int)*(const int16_t*)(g_mem + BUF_DATA(b) + i));
+            fprintf(stderr, "[audiodbg] buf 0x%08x flags 0x%x state %u size %u bps %u vol %d level %u muted %d energy %llu%c", b, BUF_FLAGS(b), BUF_STATE(b), BUF_SIZE(b), BUF_BPS(b), (int)BUF_VOL(b), g_ds_level, g_audio_muted, (unsigned long long)e, 10); }
+        pthread_mutex_unlock(&g_amx); }
+    if (!g_audio_muted){
+        pthread_mutex_lock(&g_amx);
+        for (int k = 0; k < g_nsbuf; k++){
+            const uint32_t b = g_sbuf[k];
+            const uint32_t st = BUF_STATE(b), sz = BUF_SIZE(b), data = BUF_DATA(b);
+            if (!(st & 1u) || !sz || !data) continue;
+            if ((BUF_FLAGS(b) & 1u) && g_ds_level != 3u) continue;     /* primary: only with WRITEPRIMARY */
+            const uint32_t fmt = BUF_FMT(b);
+            const int ch = MR16(fmt + 2) == 2 ? 2 : 1, bits = MR16(fmt + 14) == 8 ? 8 : 16;
+            const uint32_t al = BUF_ALIGN(b) ? BUF_ALIGN(b) : (uint32_t)(ch * bits / 8), bps = BUF_BPS(b);
+            const uint32_t nfr = sz / al; if (!nfr || !bps) continue;
+            uint32_t hi, lo; do { hi = BUF_T0HI(b); lo = BUF_T0LO(b); } while (hi != BUF_T0HI(b));
+            const double t0 = (double)((uint64_t)hi << 32 | lo), pos0 = (double)BUF_POS(b) / al;
+            const double fps = (double)bps / al;                    /* source frames per second */
+            const double g = db_gain((int32_t)BUF_VOL(b)), pan = (double)(int32_t)BUF_PAN(b);
+            const double gl = g * (pan > 0 ? db_gain((int32_t)-pan) : 1.0), gr = g * (pan < 0 ? db_gain((int32_t)pan) : 1.0);
+            if (gl <= 0 && gr <= 0) continue;
+            const int loop = (st & 2u) != 0;
+            const uint8_t *src = g_mem + data;
+            for (int i = 0; i < frames; i++){
+                const double t = s_t + i * dt;
+                if (t < t0) continue;                               /* started after this frame */
+                double f = (t - t0) * 1e-6 * fps + pos0;
+                if (!loop && f >= nfr - 1) break;                   /* one-shot ran out */
+                f = fmod(f, (double)nfr);
+                const uint32_t i0 = (uint32_t)f, i1 = (i0 + 1u) % nfr; const float w = (float)(f - i0);
+                float l0, r0, l1, r1;
+                if (bits == 16){ const int16_t *p0 = (const int16_t*)(src + i0 * al), *p1 = (const int16_t*)(src + i1 * al);
+                    l0 = p0[0] / 32768.f; r0 = ch == 2 ? p0[1] / 32768.f : l0; l1 = p1[0] / 32768.f; r1 = ch == 2 ? p1[1] / 32768.f : l1; }
+                else { const uint8_t *p0 = src + i0 * al, *p1 = src + i1 * al;
+                    l0 = (p0[0] - 128) / 128.f; r0 = ch == 2 ? (p0[1] - 128) / 128.f : l0; l1 = (p1[0] - 128) / 128.f; r1 = ch == 2 ? (p1[1] - 128) / 128.f : l1; }
+                out[2 * i]     += (float)gl * (l0 + (l1 - l0) * w);
+                out[2 * i + 1] += (float)gr * (r0 + (r1 - r0) * w);
+            }
+        }
+        pthread_mutex_unlock(&g_amx);
+        for (int i = 0; i < 2 * frames; i++) out[i] = out[i] > 1.f ? 1.f : out[i] < -1.f ? -1.f : out[i];
+    }
+    s_t += frames * dt;
 }

@@ -1,8 +1,7 @@
 # WEB2: native picture, input, sound (Windows x64)
 
 Goal: the lifted PORSCHE.EXE (WEB1) draws its frontend in a D3D11 window through dx11z, reads keyboard and
-mouse from that window, and plays sound. Status: picture + mouse/keyboard work; sound not started (see
-"Progress").
+mouse from that window, and plays sound. Status: picture + mouse/keyboard work; sound plays (WASAPI); see "Progress".
 
 ## Design
 
@@ -28,6 +27,13 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
     mapped from the client area to the logical screen; `GetCursorPos` = the last mapped position.
   - DirectInput keyboard: `GetDeviceState` = the window's DIK state, `GetDeviceData` = a buffered event ring
     (for the race; the frontend does not poll DirectInput).
+- **Sound**: `pu_audio_render` (pu_com.c) mixes every playing DirectSound buffer from guest memory by the
+  same clock the play cursors run on (volume, pan, SetFrequency, 8/16-bit, mono/stereo; linear resampling;
+  3D parameters not yet). PU mixes in software into one looping 32 kHz stream buffer (51200 bytes).
+  Host output: `runtime/win/audio_wasapi.c` (shared mode, 48 kHz float, AUTOCONVERTPCM, event-driven, 30 ms
+  buffer). `NFS5_NOAUDIO=1` / headless = off; `NFS5_AUDIODUMP=<file.wav>` = the mix to a WAV file instead of
+  the device (silent autotests); `AUDIODBG=1` = buffer states once a second. The browser build will call the
+  same mixer from WebAudio.
 - **Autotest hooks** (env): `R_SHOT=<frame>,...` (readback statistics on stderr + `out/shot_<n>.bmp`),
   `R_KEYS=<frame>:<DIK>,...` (held 4 frames, WM_KEY*/WM_CHAR + DirectInput), `R_CLICK=<frame>:<x>:<y>,...`
   (move 10 frames before, button held 20 frames; 3 frames is too short for the frontend), `R_MOVEONLY=1`,
@@ -85,6 +91,10 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   script: `R_CLICK=900:300:350,1300:300:166,1800:300:398` + `R_KEYS` -> `SaveData/<name>.sav`.
 - Open: scripted typing loses characters (A..F typed 10 frames apart -> name "8EF"; the leading "8" also
   appears in the real install's profiles); check with real typing before digging.
+- The GetMessageA wait muted the sound (SPEED2 only waits there when inactive); PU's window thread waits there
+  all the time -> removed.
+- `nfs5_clean` has no menu music (`gamedata/music/zzzymus.viv`, CD): for a local test it can be put into the
+  save folder overlay (`$NFS5_SAVEDIR/gamedata/music/`), never into git.
 - `nfs5_clean` has no `FeData/movies` (the movies are on the CD): the main menu oval stays without video.
 
 ## Progress
@@ -95,3 +105,5 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
 - 2026-11-04 (2): user test: slow/jerky frontend and a lagging cursor -> Present without the guest lock,
   stall #3 fixed (guest spin-loop hook, fair GIL), host cursor hidden. User: jerks gone, cursor still slow ->
   double mouse mapping fixed (2026-11-04 (3)), user OK. Exit hang fixed (4).
+- 2026-11-04 (5): sound: host mixer + WASAPI; menu music verified in a WAV dump (steady level, no
+  discontinuities). Waiting for the user's listening test.

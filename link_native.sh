@@ -23,7 +23,7 @@ done
 for p in $pids; do wait "$p" || { echo "runtime compile error"; exit 1; }; done
 # WEB2: the THRASH renderer (dx11z core, C++); RENDER=0 builds the headless program
 CXX="${CC%clang}clang++"
-LIBS="-lws2_32 -lwinmm -lpsapi -lpthread"
+LIBS="-lws2_32 -lwinmm -lpsapi -lpthread -lole32"
 rm -f "$OUT"/rt/r_*.o
 if [ "${RENDER:-1}" != 0 ]; then
   mkdir -p "$OUT/r"; pids=""

@@ -1630,8 +1630,8 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         /* nfs5-web: PU pumps messages on its own window thread (0x53B8D0), a
          * plain GetMessage loop: it must block on an empty queue, as on Windows */
         if (remove && !strcmp(n,"GetMessageA") && g_wmq_head == g_wmq_tail){
-            void audio_set_muted(int);
-            audio_set_muted(1);
+            /* PU: no muting here -- its window thread (sub_0053b8d0) waits
+             * in GetMessageA all the time, the sound would never play */
             guest_yield_begin();
             for (;;){
                 struct timespec ts = { 0, 5000000L }; nanosleep(&ts, 0);
@@ -1640,7 +1640,6 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
                 if (g_wmq_head != g_wmq_tail) break;
                 guest_yield_begin();
             }
-            if (!lifecycle_game_parked()) audio_set_muted(0);
         }
         if (g_wmq_head != g_wmq_tail){
             if (remove) wm_pop(&m,&wp,&lp);
