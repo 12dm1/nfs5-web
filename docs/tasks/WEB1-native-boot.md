@@ -1,13 +1,11 @@
 # WEB1: native boot (Windows x64, no picture)
 
 Goal: the lifted PORSCHE.EXE runs as a Windows x64 program on the runtime and its frontend logic reaches the
-main menu (log only; THRASH is a stub). Status: started 2026-11-04.
+main menu (log only; THRASH is a stub). Status: in progress (see "Progress" at the end).
 
 ## Decisions
 
-- **Toolchain: Visual Studio 18 clang, MSVC target** (`x86_64-pc-windows-msvc`), not mingw. WEB2 links dx11z
-  (MSVC C++, D3D11) into the same program, and one ABI keeps that simple. (Downloading llvm-mingw was also refused
-  by the session's permission classifier as external code.)
+- **Toolchain: llvm-mingw** (`deps/llvm-mingw-20261020-ucrt-x86_64`, clang 23, UCRT, winpthreads; downloaded with the user's permission). It covers pthread/unistd/dirent/clock_gettime itself, so the POSIX shim is small; dx11z will be built from source with the same toolchain. (Superseded first choice: Visual Studio 18 clang, MSVC target (`x86_64-pc-windows-msvc`).)
 - **POSIX subset as a shim** (`runtime/win/posix_*.h/.c`) over Win32, so the nfsu2-web runtime files stay close
   to upstream and diffs stay readable. Measured use in the core (win32, win32_ext, fileio, mem, heap, dispatch,
   module, genexec, lifecycle, debug, watchdog, winsock): ~70 functions.
@@ -49,3 +47,25 @@ main menu (log only; THRASH is a stub). Status: started 2026-11-04.
 
 The log shows the frontend's main menu being built (layout/screen files loaded, THRASH frame calls in a loop)
 with no trap and no unknown import on the way.
+
+## Progress
+
+2026-11-04:
+- `runtime/win/posix_compat.h` (force-included) + Windows branches in mem.c (VirtualAlloc 4 GB, VEH fault
+  report), heap.c (SRWLOCK, PU ranges), dispatch.c (rdtsc on QPC), win32_ext.c (waitable-timer sleep, disk space,
+  tm_gmtoff), fileio.c, module.c: the 12 core files compile.
+- `tools/argcount.py`: real stdcall counts for all 39 PU imports nfsu2-web did not know (mrbupd.dll = cdecl);
+  `gen/all/impargs.c` has 238 entries, none guessed.
+- debug.c: NFSU2 mod hook chain and SPEED2 debug sites replaced by a weak `pu_hook()`; dispatch.c: SPEED2 EFXSTAT
+  range removed; `runtime/pu_stubs.c`: weak stand-ins (COM bridge, profile hooks, audio clock, autotest).
+- `runtime/win/main_win.c` (entry 0x5A2D1A, TEB/PEB, guest stack 0x7F000000..0x7FF00000) + `link_native.sh`.
+- Link: 46 undefined symbols left, by group:
+  - generic upstream files still to copy: `res.c` (PE resources), `modheap.c` (module heaps), `winsock.c`
+    (Winsock HLE; WEB2n), `call_guest`/`com_scratch` (in upstream com.c);
+  - **PU COM layer to write** (`runtime/pu_com.c`): com_init, com_forget_cpu, com_mem_stats, com_scratch,
+    call_guest, and the DirectDraw / DirectSound / DirectInput 5 objects behind DirectDrawCreate,
+    DirectSoundCreate, DirectInputCreateA; upstream com.c is the model for the vtable bridges (0xE0000000+);
+  - window/graphics host (`metal_*`: frames, game size, cursor, mem stats, quit) -> headless stubs for WEB1,
+    dx11z for WEB2;
+  - NFSU2-only (stub): language_registry, overrides_report, hfr_*, roam_game_parked, discord_*, audio_set_muted,
+    kbd_pump, d3dx_hle_report, autotest_frame/note_unimpl, g_srv_* (server.dll module tables: stub modinfo).

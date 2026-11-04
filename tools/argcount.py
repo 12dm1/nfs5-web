@@ -96,6 +96,18 @@ for (s,m),n in seg_sites.most_common(8): print(f"    {s}: {m:8s} {n}")
 
 # cross-check against known correct values
 KNOWN={
+ # nfs5-web: PORSCHE.EXE imports nfsu2-web's list lacks (stdcall bytes/4 the callee pops)
+ 'DirectDrawEnumerateA':2,'DirectInputCreateA':4,'#6':2,          # DSOUND #6 = DirectSoundEnumerateA
+ 'CreateProcessA':10,'SetEnvironmentVariableW':2,'FormatMessageA':7,'GetCommProperties':2,
+ 'WaitForMultipleObjectsEx':5,'PulseEvent':1,'DisableThreadLibraryCalls':1,'OpenSemaphoreA':3,
+ 'OpenMutexA':3,'OpenFileMappingA':3,'GetCommModemStatus':2,'GetVolumeInformationA':8,
+ 'GetLogicalDriveStringsA':2,'ReleaseDC':2,'GetWindowDC':1,'GetKeyState':1,'keybd_event':4,
+ 'CharUpperA':1,'GetKeyboardType':1,'FindWindowA':2,'AdjustWindowRectEx':4,'CallNextHookEx':4,
+ 'SetWindowsHookExA':4,'SendNotifyMessageA':4,'UnhookWindowsHookEx':1,'RegisterClassA':1,
+ 'SystemParametersInfoA':4,'GetFileVersionInfoA':4,'VerQueryValueA':4,'GetFileVersionInfoSizeA':2,
+ '__WSAFDIsSet':2,
+ # mrbupd.dll (EA updater): cdecl, the caller cleans up (add esp,N after each call): nothing popped
+ 'mrbInitUpdate':0,'mrbIsRepairNeeded':0,'mrbIsUpdateAvailable':0,'mrbIsPrepareNeeded':0,'mrbTermUpdate':0,
  'GetVersion':0,'GetVersionExA':1,'GetVersionExW':1,'GetModuleHandleA':1,'GetModuleHandleW':1,
  'GetModuleFileNameA':3,'GetModuleFileNameW':3,'GetProcAddress':2,'LoadLibraryA':1,'LoadLibraryW':1,
  'FreeLibrary':1,'GetCommandLineA':0,'GetCommandLineW':0,'GetStartupInfoA':1,'GetStartupInfoW':1,

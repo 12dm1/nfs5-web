@@ -24,8 +24,7 @@ static void icall_note(CPU *c, uint32_t addr);
  * dispatch_indirect, which finds them here. */
 static int g_diag;
 static int diag_watched(uint32_t a){
-    extern int g_efx_stat;
-    return (g_icall_want && a == g_icall_want) || (g_efx_stat && a - 0x650000u < 0x40000u);
+    return g_icall_want && a == g_icall_want;      /* nfs5-web: SPEED2's EFXSTAT range removed */
 }
 static guest_fn diag_fn(uint32_t a){
     uint32_t lo = 0, hi = g_fn_count;
@@ -48,7 +47,7 @@ void dispatch_init(void){
     if (g_dtab_ready) return;
     g_dtab_ready = 1;
     g_backtrace_fn = (void(*)(struct CPU*,int))guest_backtrace;
-    { extern int g_efx_stat; const char *e = getenv("ICALL");
+    { const int g_efx_stat = 0; const char *e = getenv("ICALL");
       g_icall_want = e ? (uint32_t)strtoul(e,0,0) : 0;
       g_diag = g_icall_want || g_efx_stat; }
     uint32_t dup = 0, oob = 0;
@@ -166,13 +165,6 @@ void dispatch_indirect(CPU *c, uint32_t addr){
         if (win32_call(c, addr - 0xF0000000u) < 0) g_guest_exited = 1;
         return;
     }
-    /* EFXSTAT: inventory of the D3DX effect vtable calls (d3dx_hle.c) */
-    { extern int g_efx_stat; extern void efx_stat_note(CPU *c, uint32_t addr);
-      if (g_efx_stat && addr - 0x650000u < 0x40000u) efx_stat_note(c, addr); }
-    /* with EFXSTAT the effect methods are not in the table: their calls into
-     * D3DX may change an effect (d3dx_hle.c, stage 9's epoch) */
-    { extern uint32_t g_fx_epoch;
-      if (addr - 0x650000u < 0x40000u && addr != 0x0066acd2u && addr != 0x0066ac17u && addr != 0x0065adcbu) g_fx_epoch++; }
     uint32_t off = addr - TEXT_BASE;
     if (off < TEXT_SIZE){
         guest_fn f = g_dtab[off];
