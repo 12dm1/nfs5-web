@@ -49,6 +49,14 @@ static inline struct tm *nfs5_gmtime_r(const time_t *t, struct tm *o){ return gm
 static inline long nfs5_gmtoff(struct tm t){ struct tm a = t, b = t; return (long)(_mkgmtime(&a) - mktime(&b)); }
 #define TM_GMTOFF(t) nfs5_gmtoff(t)
 
+/* nanosleep: winpthreads' sleeps in whole 15.6 ms ticks unless some program
+ * has raised the system timer resolution (a 1 ms sleep measured 14.9 ms,
+ * Sleep(1) 1.9 ms): every runtime wait loop that polls with 1 ms naps ran up
+ * to 15x too slow, the frontend took minutes to load.  A high-resolution
+ * waitable timer instead (runtime/win/sleep_win.c). */
+int nfs5_nanosleep(const struct timespec *req, struct timespec *rem);
+#define nanosleep nfs5_nanosleep
+
 /* pause(): park the thread for good */
 #define pause() (sleep(0x7FFFFFFFu), 0)
 

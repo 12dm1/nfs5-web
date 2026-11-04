@@ -228,6 +228,10 @@ static uint32_t di_call(CPU *c, uint32_t self, int m, const uint32_t *a){
     return S_OK;
 }
 
+/* the renderer window's keyboard (renderer/thrash_dx11.cpp); weak: headless = nothing pressed */
+const uint8_t *host_dik_state(void) __attribute__((weak));
+int host_key_event(int peek, uint32_t *ofs, uint32_t *data, uint32_t *ts, uint32_t *seq) __attribute__((weak));
+
 static uint32_t didev_call(CPU *c, uint32_t self, int m, const uint32_t *a){
     (void)c;
     int kb = DEV_KIND(self) == 1;
@@ -242,13 +246,26 @@ static uint32_t didev_call(CPU *c, uint32_t self, int m, const uint32_t *a){
                 MR32(p + 16) = kb ? 128u : 3u;  /* buttons */
         }
         return S_OK; }
-    case 9: {                                   /* GetDeviceState(this, cb, data): nothing pressed */
+    case 9: {                                   /* GetDeviceState(this, cb, data) */
         uint32_t n = a[1], p = a[2];
-        if (p && n && n <= 4096u){ mem_commit(p, n); memset(g_mem + p, 0, n); }
+        if (p && n && n <= 4096u){ mem_commit(p, n); memset(g_mem + p, 0, n);
+            /* WEB2: the renderer window's keys (DIK codes, 0x80 = down) */
+            const uint8_t *k = kb && host_dik_state ? host_dik_state() : 0;
+            if (k) memcpy(g_mem + p, k, n < 256u ? n : 256u); }
         return S_OK; }
     case 10: {                                  /* GetDeviceData(this, cbObj, rgdod, pdwInOut, flags) */
-        uint32_t pio = a[3];
-        if (pio) MR32(pio) = 0;
+        uint32_t cb = a[1], dst = a[2], pio = a[3], fl = a[4];
+        uint32_t want = pio ? MR32(pio) : 0, got = 0;
+        if (kb && host_key_event){
+            /* DIDEVICEOBJECTDATA: ofs (DIK), data (0x80 down), timestamp, sequence */
+            uint32_t ofs, data, ts, seq;
+            while (got < want && host_key_event((fl & 1u) ? (int)got : -1, &ofs, &data, &ts, &seq)){   /* DIGDD_PEEK */
+                if (dst && cb >= 16u){ uint32_t e = dst + got * cb;
+                    MR32(e) = ofs; MR32(e + 4) = data; MR32(e + 8) = ts; MR32(e + 12) = seq; }
+                got++;
+            }
+        }
+        if (pio) MR32(pio) = got;
         return S_OK; }
     case 5: return E_NOTIMPL;                   /* GetProperty: as for a device without the property */
     case 15: {                                  /* GetDeviceInfo(this, DIDEVICEINSTANCEA*) */

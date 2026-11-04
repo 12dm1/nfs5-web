@@ -588,7 +588,7 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
                 static int said = 0;
                 if (!said++) fprintf(stderr, "  [file] virtual empty \"foobar\" (disk check skipped)\n");
             } }
-        { static int shown=0; if ((getenv("VERBOSE")||getenv("FILELIST")) && (shown<200 || flags != O_RDONLY)){ shown++;
+        { static int shown=0; if ((getenv("VERBOSE")||getenv("FILELIST")) && (shown<200 || getenv("FILELISTALL") || flags != O_RDONLY)){ shown++;
             fprintf(stderr,"  [file] CreateFileA(\"%s\") -> \"%s\"  %s\n",
                     GS(pn), real, fd>=0?"OPEN":"FAILED"); } }
         if (fd<0){ g_file_fail++; r=INVALID_HANDLE; set_err(c, wblock ? 5u : errno_to_win(errno));

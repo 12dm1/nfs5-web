@@ -128,6 +128,26 @@ static LONG CALLBACK veh_fault(EXCEPTION_POINTERS *ep){
     fprintf(stderr, "\n*** HOST EXCEPTION 0x%08lx at %p (exe+0x%llx)%s", code, pc,
             (unsigned long long)((uint8_t*)pc - (uint8_t*)GetModuleHandleA(0)), ffn ? "" : "\n");
     if (ffn) fprintf(stderr, " in guest function sub_%08x\n", ffn);
+    { HMODULE m = 0; char mn[MAX_PATH] = "?";
+      if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)pc, &m) && m)
+          GetModuleFileNameA(m, mn, sizeof mn);
+      fprintf(stderr, "*** in module %s +0x%llx\n", mn, (unsigned long long)((uint8_t*)pc - (uint8_t*)m)); }
+    {   /* host call chain (exe frames: llvm-symbolizer --obj=out/nfs5_native.exe 0x140000000+off) */
+        CONTEXT ctx = *ep->ContextRecord;
+        fprintf(stderr, "*** host stack:");
+        for (int i = 0; i < 20 && ctx.Rip; i++){
+            HMODULE m = 0; char mn[MAX_PATH] = "?";
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)ctx.Rip, &m) && m)
+                GetModuleFileNameA(m, mn, sizeof mn);
+            const char *b = strrchr(mn, '\\'); b = b ? b + 1 : mn;
+            fprintf(stderr, "\n      %s+0x%llx", b, (unsigned long long)(ctx.Rip - (DWORD64)m));
+            DWORD64 base = 0;
+            PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(ctx.Rip, &base, NULL);
+            if (!f){ ctx.Rip = *(DWORD64 *)ctx.Rsp; ctx.Rsp += 8; }
+            else { void *hd; DWORD64 ef; RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, f, &ctx, &hd, &ef, NULL); }
+        }
+        fprintf(stderr, "\n");
+    }
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2){
         uint8_t *p = (uint8_t*)ep->ExceptionRecord->ExceptionInformation[1];
         const char *op = ep->ExceptionRecord->ExceptionInformation[0] == 1 ? "write" : "read";

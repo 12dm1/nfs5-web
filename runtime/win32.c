@@ -308,6 +308,7 @@ static void qpc_spin_sleep(CPU *c){
 static void qpc_who(CPU *c){
     static int init = 0; static uint64_t tot = 0;
     if (!init){ init = 1; atexit(qpc_report); }
+    if ((tot & 0x7FFFFFu) == 0x7FFFFFu) qpc_report();
     if ((++tot & 0xFFFFFu) == 0){ long metal_frames(void);
         fprintf(stderr, "  [qpc] %llu M calls, frame %ld\n", (unsigned long long)(tot >> 20), metal_frames()); }
     uint32_t tid = (c->fs_base && mem_is_committed(c->fs_base+0x24u)) ? MR32(c->fs_base+0x24u) : 0u;
@@ -470,6 +471,7 @@ int win32_caller_module(void){ return tl_imp_mod; }
 /* Real monotonic milliseconds (server.dll's GetTickCount, see win32_call). */
 static uint32_t real_ms(void){ return (uint32_t)(real_us() / 1000ull) + 1000u; }
 
+static int8_t *g_fast;     /* per import: 1 = name chain, 2 = EnterCriticalSection, 3 = LeaveCriticalSection */
 int win32_call(CPU *c, uint32_t idx){
     if (idx >= g_nimps) return 0;
     const ImpEnt *e = &g_imps[idx];
@@ -481,6 +483,17 @@ int win32_call(CPU *c, uint32_t idx){
     int handled = 1;
     const char *n = e->name;
     uint32_t r = 0;
+
+    /* nfs5-web: Enter/LeaveCriticalSection sit ~400 strcmps down the name
+     * chain; PU calls them ~1 M times a second while it loads a profile.
+     * Served by import index (g_fast, filled in win32_init). */
+    if (g_fast[idx] > 1 && trace_n >= trace_max){
+        uint32_t win32_cs_fast(CPU *c, int enter);
+        c->eax = win32_cs_fast(c, g_fast[idx] == 2);
+        c->esp += 4u * (uint32_t)e->nargs;
+        tl_imp_mod = prev_mod;
+        return 1;
+    }
 
     /* QueryPerformanceCounter is the most frequent call (frame limiter); to
      * skip the name chain's ~20 strcmps the import index is cached on the
@@ -767,8 +780,10 @@ int win32_call(CPU *c, uint32_t idx){
     if (g_bt_on && (!strcmp(n,"GetModuleFileNameA")||!strcmp(n,"ExitProcess")||!strcmp(n,"RaiseException")))
         guest_backtrace(c, 14);
     if (trace_n < trace_max)
-        fprintf(stderr, "  [%4u] %-14s %-32s (%d arg) %s-> 0x%08x\n",
-                ++trace_n, e->dll, n, e->nargs, handled?"":"[STUB] ", r);
+        fprintf(stderr, "  [%4u] %-14s %-32s (%d arg) %s-> 0x%08x  t=%llu ms tid=%u ret=0x%08x a0=0x%x\n",
+                ++trace_n, e->dll, n, e->nargs, handled?"":"[STUB] ", r, (unsigned long long)(real_us() / 1000u),
+                (c->fs_base && mem_is_committed(c->fs_base + 0x24u)) ? MR32(c->fs_base + 0x24u) : 0u, c->eip,
+                e->nargs ? ARG(c, 0) : 0u);
     else trace_n++;
     netlog(c, e, r, handled);
     if (idx >= g_imp_count && !strncasecmp(e->dll, "ws2_32", 6)){
@@ -793,6 +808,9 @@ void win32_init(void){
     stat_ = calloc(g_nimps ? g_nimps : 1, sizeof *stat_);
     heap_init();
     g_hk = calloc(g_nimps ? g_nimps : 1, 1);
+    g_fast = calloc(g_nimps ? g_nimps : 1, 1);
+    for (uint32_t i = 0; i < g_nimps; i++)
+        g_fast[i] = !strcmp(g_imps[i].name, "EnterCriticalSection") ? 2 : !strcmp(g_imps[i].name, "LeaveCriticalSection") ? 3 : 1;
     for (uint32_t i=0;i<g_nimps;i++) g_hk[i] = (int8_t)heap_api_kind(g_imps[i].name);
     g_hk_heapalloc = heap_api_kind("HeapAlloc");
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
@@ -812,6 +830,14 @@ void win32_report(void){
     fprintf(stderr,"\n=== WIN32 LAYER ===\n");
     fprintf(stderr,"  import calls in total : %llu\n",(unsigned long long)g_win32_calls);
     fprintf(stderr,"  not implemented       : %llu\n",(unsigned long long)g_win32_unimpl);
+    if (getenv("IMPCOUNT")){              /* every import by call count */
+        static uint32_t ord[8192]; uint32_t m = 0;
+        for (uint32_t i = 0; i < g_nimps && m < 8192; i++) if (stat_[i].calls) ord[m++] = i;
+        for (uint32_t a = 0; a < m; a++) for (uint32_t b = a + 1; b < m; b++)
+            if (stat_[ord[b]].calls > stat_[ord[a]].calls){ uint32_t t = ord[a]; ord[a] = ord[b]; ord[b] = t; }
+        for (uint32_t a = 0; a < m; a++)
+            fprintf(stderr, "  [imp] %12llu  %s!%s\n", (unsigned long long)stat_[ord[a]].calls, g_imps[ord[a]].dll, g_imps[ord[a]].name);
+    }
     /* the most called unimplemented ones */
     fprintf(stderr,"  guest threads : %llu started, %llu exited\n",
             (unsigned long long)win32_ext_threads(),(unsigned long long)win32_ext_threads_exited());

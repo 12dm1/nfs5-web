@@ -658,7 +658,7 @@ void frame_pace(void){
  *
  * The GIL MUST BE RELEASED while waiting for the lock, or it deadlocks.  */
 #define MAXCS 512
-static struct { uint32_t key; pthread_mutex_t m; int used; uint32_t owner; int depth; } g_cs[MAXCS];
+static struct { uint32_t key; pthread_mutex_t m; int used; uint32_t owner; int depth; volatile long waiters, acq; } g_cs[MAXCS];
 static int g_cs_used = 0;
 /* watchdog.c: critical sections held right now */
 int win32_cs_held(uint32_t *key, uint32_t *owner, int *depth, int max){
@@ -707,6 +707,7 @@ static void cs_owned(pthread_mutex_t *m, uint32_t tid, int d){
     g_cs[i].depth += d;
     g_cs[i].owner = g_cs[i].depth > 0 ? (tid ? tid : g_cs[i].owner) : 0u;
 }
+static void cs_enter(CPU *c, pthread_mutex_t *m); static void cs_leave(pthread_mutex_t *m);
 uint32_t call_guest(CPU *c, uint32_t fn, int nargs, const uint32_t *args);
 static uint32_t g_wndproc = 0;
 static uint32_t g_hwnd    = 0x00B00001u;
@@ -974,6 +975,10 @@ static void thread_report(void){
                     " critical sections %d of %d\n",
             (unsigned long long)g_threads_started, (unsigned long long)g_threads_exited,
             (unsigned long long)g_teb_reused, g_teb_next, g_nstk_free, g_cs_used, MAXCS);
+    for (int i = 0; i < MAXCS; i++)
+        if (g_cs[i].used && (g_cs[i].waiters > 0 || g_cs[i].depth > 0))
+            fprintf(stderr, "    section 0x%08x: owner tid %u depth %d, %ld waiting, %ld hand-overs\n",
+                    g_cs[i].key, g_cs[i].owner, g_cs[i].depth, g_cs[i].waiters, g_cs[i].acq);
 #ifdef __wasm__
     win32_gil_report();
 #endif
@@ -1597,7 +1602,9 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         uint32_t pm=A(c,0);
         if (g_wndproc && pm && mem_is_committed(pm+15)){
             uint32_t args[4] = { MR32(pm), MR32(pm+4), MR32(pm+8), MR32(pm+12) };
-            if (args[1]){ g_wm_dispatched++; r = call_guest(c, g_wndproc, 4, args); }
+            if (args[1]){ g_wm_dispatched++; r = call_guest(c, g_wndproc, 4, args);
+                if (getenv("KBDLOG") && ((args[1] >= 0x100u && args[1] <= 0x109u) || (args[1] >= 0x200u && args[1] <= 0x20Au)))
+                    fprintf(stderr, "[kbd] dispatched msg 0x%x wp 0x%x lp 0x%x -> 0x%x (tid %u)%c", args[1], args[2], args[3], r, cur_tid(c), 10); }
         }
     }
     else if (!strcmp(n,"TranslateMessage")
@@ -1810,10 +1817,16 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         uint32_t ms=A(c,0);
         ts_set(TS_SLEEP, ms);
         guest_yield_begin();
+        uint64_t t0 = gil_now_us();
         { struct timespec ts={ (time_t)(ms/1000u), (long)((ms%1000u)*1000000u) };
           if(!ms) ts.tv_nsec = 200000L;
           nanosleep(&ts,0); }
+        uint64_t t1 = gil_now_us();
         guest_yield_end();
+        { static int lg = -1; if (lg < 0) lg = getenv("SLEEPLOG") != 0;
+          uint64_t t2 = gil_now_us();
+          if (lg && t2 - t0 > 20000u) fprintf(stderr, "  [sleep] SleepEx(%u) slept %.1f ms, waited for the lock %.1f ms (ret 0x%08x)\n",
+                                             ms, (t1 - t0) / 1000.0, (t2 - t1) / 1000.0, c->eip); }
         r=0; }
     else if (!strcmp(n,"WaitForMultipleObjects") || !strcmp(n,"WaitForMultipleObjectsEx")){   /* nfs5-web: Ex (PU timer thread): same first 4 args, alertable ignored */
         uint32_t cnt=A(c,0), parr=A(c,1), waitall=A(c,2), ms=A(c,3);
@@ -1986,18 +1999,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         (void)cs_for(A(c,0)); r=1; }
     else if (!strcmp(n,"EnterCriticalSection")){
         pthread_mutex_t *m = cs_for(A(c,0));
-        if (m){
-            g_cs_enter++;
-            if (pthread_mutex_trylock(m) != 0){
-                g_cs_contended++;
-                ts_set(TS_CS, A(c,0));
-                guest_yield_begin();          /* release the GIL while waiting */
-                pthread_mutex_lock(m);
-                guest_yield_end();
-            }
-            tl_cs_depth++;
-            cs_owned(m, cur_tid(c), +1);
-        }
+        if (m) cs_enter(c, m);
         r=1; }
     else if (!strcmp(n,"TryEnterCriticalSection")){
         pthread_mutex_t *m = cs_for(A(c,0));
@@ -2005,11 +2007,59 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         if (m){ if (pthread_mutex_trylock(m)==0){ tl_cs_depth++; cs_owned(m, cur_tid(c), +1); } else r=0; } }
     else if (!strcmp(n,"LeaveCriticalSection")){
         pthread_mutex_t *m = cs_for(A(c,0));
-        if (m && tl_cs_depth > 0){ tl_cs_depth--; cs_owned(m, 0, -1); pthread_mutex_unlock(m); }
+        if (m) cs_leave(m);
         r=1; }
     else if (!strcmp(n,"DeleteCriticalSection")) r=1;
     else return 0;                       /* not this layer's business */
     *out = r;
+    return 1;
+}
+/* the same two calls for win32.c's by-index fast path */
+/* Enter/Leave with a fair hand-over.  A guest thread that leaves a section
+ * and enters it again at once (PU's main thread polling a flag that the
+ * sound thread sets under the same section) used to win the host mutex
+ * every time: the waiter, woken by the unlock, found it taken again and
+ * starved -- the frontend hung after 6 frames in some runs.  Now the last
+ * Leave of a section someone waits for releases the GIL until a waiter has
+ * taken the section (at most 2 ms), as Windows would have run that thread. */
+static size_t cs_index(pthread_mutex_t *m){ return (size_t)(((char *)m - (char *)&g_cs[0].m) / (ptrdiff_t)sizeof g_cs[0]); }
+static void cs_enter(CPU *c, pthread_mutex_t *m){
+    size_t i = cs_index(m);
+    g_cs_enter++;
+    if (pthread_mutex_trylock(m) != 0){
+        g_cs_contended++;
+        ts_set(TS_CS, A(c,0));
+        if (i < MAXCS) __atomic_add_fetch(&g_cs[i].waiters, 1, __ATOMIC_SEQ_CST);
+        guest_yield_begin();          /* release the GIL while waiting */
+        pthread_mutex_lock(m);
+        if (i < MAXCS){ __atomic_sub_fetch(&g_cs[i].waiters, 1, __ATOMIC_SEQ_CST); __atomic_add_fetch(&g_cs[i].acq, 1, __ATOMIC_SEQ_CST); }
+        guest_yield_end();
+    }
+    tl_cs_depth++;
+    cs_owned(m, cur_tid(c), +1);
+}
+static void cs_leave(pthread_mutex_t *m){
+    if (tl_cs_depth <= 0) return;
+    size_t i = cs_index(m);
+    tl_cs_depth--; cs_owned(m, 0, -1);
+    int last = i < MAXCS && g_cs[i].depth <= 0;
+    long gen = i < MAXCS ? __atomic_load_n(&g_cs[i].acq, __ATOMIC_SEQ_CST) : 0;
+    int hand = last && __atomic_load_n(&g_cs[i].waiters, __ATOMIC_SEQ_CST) > 0 && !tl_cs_depth && !tl_noyield;
+    pthread_mutex_unlock(m);
+    if (hand){
+        guest_yield_begin();
+        struct timespec t0, t; clock_gettime(CLOCK_MONOTONIC, &t0);
+        do { sched_yield(); clock_gettime(CLOCK_MONOTONIC, &t); }
+        while (__atomic_load_n(&g_cs[i].acq, __ATOMIC_SEQ_CST) == gen &&
+               __atomic_load_n(&g_cs[i].waiters, __ATOMIC_SEQ_CST) > 0 &&
+               (t.tv_sec - t0.tv_sec) * 1000000000LL + (t.tv_nsec - t0.tv_nsec) < 2000000LL);
+        guest_yield_end();
+    }
+}
+uint32_t win32_cs_fast(CPU *c, int enter){
+    pthread_mutex_t *m = cs_for(A(c,0));
+    if (!m) return 1;
+    if (enter) cs_enter(c, m); else cs_leave(m);
     return 1;
 }
 uint64_t win32_ext_threads(void){ return g_threads_started; }

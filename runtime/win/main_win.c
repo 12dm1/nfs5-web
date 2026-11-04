@@ -91,6 +91,19 @@ int main(int argc, char **argv){
     const char *root = argc > 2 ? argv[2] : exe;
     setvbuf(stderr, 0, _IONBF, 0);
     _set_fmode(_O_BINARY);                  /* the runtime's open()/fopen() are POSIX: no CRLF or ^Z translation */
+    /* 1 ms timer resolution, as the game had on Windows 9x/XP (its loader
+     * and frontend Sleep(1) between steps), and no timer power throttling:
+     * Windows 11 ignores the resolution request of a process without a
+     * visible window otherwise (headless runs).  The runtime's own nanosleep
+     * does not depend on it (runtime/win/sleep_win.c). */
+    { PROCESS_POWER_THROTTLING_STATE pt = {0};
+      pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+      pt.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION | PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+      pt.StateMask = 0;
+      typedef BOOL (WINAPI *SPI)(HANDLE, int, LPVOID, DWORD);
+      SPI spi = (SPI)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessInformation");
+      if (spi) spi(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt); }
+    { extern unsigned __stdcall timeBeginPeriod(unsigned); timeBeginPeriod(1); }
 
     mem_init(); mem_fault_handler_install();
     if (mem_load_pe(exe)) return 1;

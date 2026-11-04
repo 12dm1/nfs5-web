@@ -21,5 +21,22 @@ for f in runtime/win/*.c; do
   "$CC" $OPT -g -c -w -include win/posix_compat.h -Iruntime -Igen/all "$f" -o "$OUT/rt/win_$(basename "$f" .c).o" & pids="$pids $!"
 done
 for p in $pids; do wait "$p" || { echo "runtime compile error"; exit 1; }; done
-"$CC" $OPT -g -o out/nfs5_native.exe "$OUT"/gen/*.o "$OUT"/rt/*.o -lws2_32 -lwinmm -lpsapi -lpthread -Wl,--stack,16777216 -Wl,--error-limit=0 2>&1 | tee out/link.log
+# WEB2: the THRASH renderer (dx11z core, C++); RENDER=0 builds the headless program
+CXX="${CC%clang}clang++"
+LIBS="-lws2_32 -lwinmm -lpsapi -lpthread"
+rm -f "$OUT"/rt/r_*.o
+if [ "${RENDER:-1}" != 0 ]; then
+  mkdir -p "$OUT/r"; pids=""
+  for f in renderer/*.cpp renderer/dx11z/*.cpp; do
+    o="$OUT/r/$(basename "$f" .cpp).o"
+    if [ ! "$o" -nt "$f" ] || [ -n "$(find renderer -name '*.h' -newer "$o" 2>/dev/null | head -1)" ]; then
+      "$CXX" -std=c++17 $OPT -g1 -c -w -Irenderer "$f" -o "$o" & pids="$pids $!"
+    fi
+  done
+  for p in $pids; do wait "$p" || { echo "renderer compile error"; exit 1; }; done
+  cp "$OUT"/r/*.o "$OUT/rt/" 2>/dev/null; for o in "$OUT"/r/*.o; do mv "$OUT/rt/$(basename "$o")" "$OUT/rt/r_$(basename "$o")"; done
+  LIBS="$LIBS -ld3d11 -ldxgi -ld3dcompiler -luser32 -lgdi32 -static"   # libc++/libunwind inside the exe
+  CC="$CXX"
+fi
+"$CC" $OPT -g -o out/nfs5_native.exe "$OUT"/gen/*.o "$OUT"/rt/*.o $LIBS -Wl,--stack,16777216 -Wl,--error-limit=0 2>&1 | tee out/link.log
 echo "link OK -> out/nfs5_native.exe"

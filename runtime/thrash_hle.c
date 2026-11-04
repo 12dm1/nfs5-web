@@ -127,6 +127,37 @@ static void pace(void){
     last = now;
 }
 
+/* WEB2: the drawing side on dx11z's D3D11 core (renderer/thrash_dx11.cpp);
+ * weak, so a build without the renderer (or NFS5_HEADLESS=1) stays headless */
+__attribute__((weak)) int r_init(int w, int h){ (void)w; (void)h; return 0; }
+void r_restore(void) __attribute__((weak));
+void r_setvideomode(int w, int h, int bpp) __attribute__((weak));
+void r_setstate(int id, int v) __attribute__((weak));
+int  r_getstate(int id) __attribute__((weak));
+void r_window(int idx) __attribute__((weak));
+void r_clearwindow(void) __attribute__((weak));
+void r_flushwindow(void) __attribute__((weak));
+void r_clip(int x1, int y1, int x2, int y2) __attribute__((weak));
+void r_pageflip(void) __attribute__((weak));
+void r_unlockwindow(uint32_t pixels, int w, int h, int pitch) __attribute__((weak));
+int  r_readrect(int x, int y, int w, int h, uint32_t buf) __attribute__((weak));
+uint32_t r_talloc(int w, int h, int fmt, int flags, int mips) __attribute__((weak));
+void r_tfree(uint32_t t) __attribute__((weak));
+void r_tupdate(uint32_t t, uint32_t data, int palette) __attribute__((weak));
+void r_tupdaterect(uint32_t t, int mip, int x, int y, int w, int h, int pitch, uint32_t data, int fmt) __attribute__((weak));
+void r_treset(void) __attribute__((weak));
+void r_settexture(uint32_t t) __attribute__((weak));
+void r_draw(const char *n, const uint32_t *a) __attribute__((weak));
+static int g_rend;          /* 1: the D3D11 renderer is up */
+
+/* the game's pixel format table (0x5DF16C, 5 dwords per THRASH format):
+ * entry 0 (ARGB1555) is left zero by the EXE and dx7z fills it; a zero
+ * bits-per-pixel divides by zero (wrapper THRASH_init does the same) */
+static void patch_format_table(void){
+    uint32_t t = 0x005DF16Cu;
+    if (!MR32(t)){ MR32(t) = 16; MR32(t + 4) = 1; MR32(t + 8) = 5; MR32(t + 12) = 5; MR32(t + 16) = 5; }
+}
+
 #define ARG(i) MR32(c->esp + 4u * (uint32_t)(i))
 int thrash_call(CPU *c, const char *name, uint32_t *r){
     if (strncmp(name, "_THRASH_", 8)) return 0;
@@ -134,24 +165,34 @@ int thrash_call(CPU *c, const char *name, uint32_t *r){
     const char *n = name + 8;
     g_calls++;
     *r = 0;
-    if (!strncmp(n, "draw", 4)){ g_draws++; return 1; }
+    if (!strncmp(n, "draw", 4)){ g_draws++; if (g_rend) r_draw(n, (const uint32_t *)(g_mem + c->esp)); return 1; }
     if      (!strcmp(n, "about@0")){ *r = about(); fprintf(stderr, "[thrash] about -> 0x%08x\n", *r); }
-    else if (!strcmp(n, "init@0")){ state_init(); *r = 1; fprintf(stderr, "[thrash] init (hwnd 0x%x)\n", g_state[ST_HWND]); }
+    else if (!strcmp(n, "init@0")){
+        state_init(); if (!getenv("NO_FMTPATCH")) patch_format_table(); *r = 1;
+        const char *hl = getenv("NFS5_HEADLESS");
+        if (!(hl && *hl && *hl != '0') && !g_rend){
+            g_rend = r_init((int)g_state[ST_SCREEN_W], (int)g_state[ST_SCREEN_H]);
+            if (!g_rend) fprintf(stderr, "[thrash] no D3D11 renderer: headless\n");
+        }
+        fprintf(stderr, "[thrash] init (hwnd 0x%x)%s\n", g_state[ST_HWND], g_rend ? " -> D3D11" : ""); }
     else if (!strcmp(n, "is@0")) *r = 1;
-    else if (!strcmp(n, "restore@0")){ *r = 1; fprintf(stderr, "[thrash] restore\n"); }
+    else if (!strcmp(n, "restore@0")){ *r = 1; if (g_rend){ r_restore(); g_rend = 0; } fprintf(stderr, "[thrash] restore\n"); }
     else if (!strcmp(n, "selectdisplay@4")) *r = 1;
     else if (!strcmp(n, "setvideomode@12")){
         uint32_t i = ARG(0);
         if (i < 1 || i > 10) *r = 0;
-        else { g_state[ST_SCREEN_W] = k_modes[i][0]; g_state[ST_SCREEN_H] = k_modes[i][1]; *r = 1; }
+        else { g_state[ST_SCREEN_W] = k_modes[i][0]; g_state[ST_SCREEN_H] = k_modes[i][1]; *r = 1;
+               if (g_rend) r_setvideomode((int)k_modes[i][0], (int)k_modes[i][1], (int)k_modes[i][2]); }
         fprintf(stderr, "[thrash] setvideomode(%u, %u, %u) -> %u  (%ux%u %u bpp)\n", i, ARG(1), ARG(2), *r,
                 i <= 10 ? k_modes[i][0] : 0, i <= 10 ? k_modes[i][1] : 0, i <= 10 ? k_modes[i][2] : 0); }
     else if (!strcmp(n, "setstate@8")){ uint32_t id = ARG(0); if (id < NSTATE) g_state[id] = ARG(1); *r = 1;
+        if (g_rend && id != ST_HWND && id != ST_WINDOW_DESC) r_setstate((int)id, (int)ARG(1));
         if (g_log) fprintf(stderr, "[thrash] setstate(0x%x, 0x%x)\n", id, ARG(1)); }
     else if (!strcmp(n, "getstate@4")){ uint32_t id = ARG(0); *r = id < NSTATE ? g_state[id] : 0;
+        if (g_rend && id != ST_HWND && id != ST_WINDOW_DESC) *r = (uint32_t)r_getstate((int)id);
         if (g_log) fprintf(stderr, "[thrash] getstate(0x%x) -> 0x%x\n", id, *r); }
     else if (!strcmp(n, "window@4")){ uint32_t h = ARG(0);
-        if (h <= 7){ g_curwin = h; window_desc(h); } *r = 1; }
+        if (h <= 7){ g_curwin = h; window_desc(h); if (g_rend) r_window((int)h); } *r = 1; }
     else if (!strcmp(n, "createwindow@16") || !strcmp(n, "destroywindow@4")) *r = 1;
     else if (!strcmp(n, "getwindowtexture@4")) *r = 0;
     else if (!strcmp(n, "lockwindow@0")){
@@ -162,16 +203,28 @@ int thrash_call(CPU *c, const char *name, uint32_t *r){
         MR32(d + 20) = g_curwin == 1 ? 0u : 1u; MR32(d + 24) = 3;
         *r = d; }
     else if (!strcmp(n, "pageflip@0")){
-        g_frames++; pace();
+        g_frames++;
+        if (g_rend) r_pageflip(); else pace();
         if (g_frames <= 3 || g_frames % 300 == 0)
             fprintf(stderr, "[thrash] frame %ld: %llu draws, %u textures, %llu uploads, %ux%u\n", g_frames,
                     (unsigned long long)g_draws, g_ntex, (unsigned long long)g_tex_up,
                     g_state[ST_SCREEN_W], g_state[ST_SCREEN_H]); }
-    else if (!strcmp(n, "talloc@20")){ *r = ++g_ntex;
+    else if (!strcmp(n, "talloc@20")){ *r = g_rend ? r_talloc((int)ARG(0), (int)ARG(1), (int)ARG(2), (int)ARG(3), (int)ARG(4)) : g_ntex + 1u; ++g_ntex;
         if (g_log) fprintf(stderr, "[thrash] talloc(%u, %u, fmt %u, flags 0x%x, mips %u) -> %u\n",
                            ARG(0), ARG(1), ARG(2), ARG(3), ARG(4), *r); }
-    else if (!strcmp(n, "tupdate@12") || !strcmp(n, "tupdaterect@36")) g_tex_up++;
-    else if (!strcmp(n, "readrect@20")) *r = 1;
+    else if (!strcmp(n, "tupdate@12")){ g_tex_up++; if (g_rend) r_tupdate(ARG(0), ARG(1), (int)ARG(2)); }
+    else if (!strcmp(n, "tupdaterect@36")){ g_tex_up++;
+        if (g_rend) r_tupdaterect(ARG(0), (int)ARG(1), (int)ARG(2), (int)ARG(3), (int)ARG(4), (int)ARG(5), (int)ARG(6), ARG(7), (int)ARG(8)); }
+    else if (!strcmp(n, "readrect@20")) *r = g_rend ? (uint32_t)r_readrect((int)ARG(0), (int)ARG(1), (int)ARG(2), (int)ARG(3), ARG(4)) : 1u;
+    else if (g_rend && !strcmp(n, "tfree@4")) r_tfree(ARG(0));
+    else if (g_rend && !strcmp(n, "treset@0")) r_treset();
+    else if (g_rend && !strcmp(n, "settexture@4")) r_settexture(ARG(0));
+    else if (g_rend && !strcmp(n, "clearwindow@0")) r_clearwindow();
+    else if (g_rend && !strcmp(n, "flushwindow@0")) r_flushwindow();
+    else if (g_rend && !strcmp(n, "clip@16")) r_clip((int)ARG(0), (int)ARG(1), (int)ARG(2), (int)ARG(3));
+    else if (g_rend && !strcmp(n, "unlockwindow@4")){
+        uint32_t d = ARG(0);
+        if (d == g_lockdesc && g_lockbuf) r_unlockwindow(g_lockbuf, (int)g_lockw, (int)g_lockh, (int)(g_lockw * 2u)); }
     /* clearwindow, flushwindow, unlockwindow, clip, sync, idle, tfree, treset, settexture, writerect: nothing */
     return 1;
 }
