@@ -96,6 +96,9 @@ static void wd_report(double stalled, uint32_t flow){
     if (!n) fprintf(stderr, "  critical sections held: none\n");
     for (int k = 0; k < n; k++)
         fprintf(stderr, "  critical section 0x%08x held by tid %u (depth %d)\n", key[k], owner[k], depth[k]);
+    { extern uint64_t g_fy_calls, g_fy_hand; long win32_gil_waiting(void), win32_gil_gen(void);
+      fprintf(stderr, "  GIL: %ld waiting, generation %ld; fair yields %llu, hand-overs %llu%c", win32_gil_waiting(), win32_gil_gen(),
+              (unsigned long long)g_fy_calls, (unsigned long long)g_fy_hand, 10); }
     fprintf(stderr, "[watchdog] end of report\n\n");
     pthread_mutex_unlock(&g_wd_mx);
 }
@@ -137,10 +140,10 @@ static void *wd_main(void *arg){
             atomic_store(&g_wd_present_us, wd_now_us());   /* the limit restarts on return */
             reported = 0; continue; }
         double stalled = wd_since_s(wd_now_us(), last);
-        uint32_t flow = mem_is_committed(0x8654a4u) ? MR32(0x8654a4u) : 0u;
-        double l = (flow == 3u || flow == 6u) ? lim : (lim > 20.0 ? lim : 20.0);
+        uint32_t flow = 0;                       /* nfs5-web: SPEED2's game-flow global does not exist in PU */
+        double l = lim;
         if (stalled < l){ reported = 0; continue; }
-        if (!reported){ reported = 1; wd_report(stalled, flow); }
+        if (reported < 3 && stalled >= l + 3.0 * reported){ reported++; wd_report(stalled, flow); }   /* 3 reports, 3 s apart */
     }
     return 0;
 }

@@ -48,6 +48,23 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   Fix: the last Leave of a section with waiters releases the GIL until a waiter took it (max 2 ms,
   `cs_enter/cs_leave` in `win32_ext.c`). 0 stalls in 22 runs after it (before ~1 in 8); the thread report
   now lists sections that are held or waited for, should it come back.
+- **"6 frames" stall #3 (~1 in 4 runs after #1/#2) = a pure guest spin loop.** sub_00533C20 waits for a job
+  with `while (!done) sub_00567F70(job)`: no import call, so the guest lock was never handed over and the
+  thread finishing the job waited for it forever (watchdog: all threads "waiting for the GIL", fair-yield
+  counter frozen). Fix: instruction hook at 0x533CB1 (`gen.sh` HOOKS, `runtime/pu_hooks.c`) calls
+  `guest_fair_yield`. Plus: the native GIL counts waiters and hands over for real when one has waited > 1 ms
+  (winpthreads' mutex let the releasing thread re-take it), and fair yields are allowed inside critical
+  sections (PU spins inside one waiting for the timer callback). 0 stalls in 24 runs since.
+- **Slow, jerky frontend = Present with the guest lock held.** The vsync wait blocked the timer callback
+  (the game's clock: 73 instead of ~130 ticks/s), the sound thread and the window thread (mouse messages,
+  so the game cursor lagged behind the real one). `r_pageflip` releases the lock around `DX11_Present`;
+  THRASH calls are serialized by a renderer mutex in `thrash_hle.c` (a waiter releases the guest lock).
+  Timer ticks 1833 -> 3201 per 25 s.
+- The host cursor is hidden over the client area (the game draws its own); the process is per-monitor
+  DPI-aware.
+- Watchdog (`NFSU2_WATCHDOG=<s>`, default 15): now fed by pageflip, PU limit (SPEED2's flow global removed),
+  3 reports 3 s apart, with GIL waiters / fair-yield / hand-over counters.
+- `gen.sh` also runs `tools/argcount.py` (it deleted `gen/all/impargs.c` before).
 - PACODE's CPU-MHz measurement (sub_00555FA0, 5 x 0.2 s QPC busy wait) runs ~7 times at start: ~7 s of
   start-up. Not changed yet (candidate: short-circuit).
 - Enter/LeaveCriticalSection are served by import index (`g_fast` in `win32.c`): 23 M -> 44 k strcmp chains.
@@ -63,3 +80,5 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
 - 2026-11-04: renderer links and runs (D3D11 window, frontend picture: ~87 % non-black frames, menus
   animate, ~150 fps unthrottled); both "6 frames" stalls fixed; mouse + keyboard reach the frontend (button
   hover, clicks, player creation). Next: sound (DirectSound -> WASAPI/XAudio2), then WEB2n.
+- 2026-11-04 (2): user test: slow/jerky frontend and a lagging cursor -> Present without the guest lock,
+  stall #3 fixed (guest spin-loop hook, fair GIL), host cursor hidden. Waiting for the user's re-test.

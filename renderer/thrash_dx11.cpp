@@ -62,6 +62,7 @@ static void PushMsg(uint32_t m, uint32_t w, uint32_t l) {
 // the cursor in the game's logical coordinates (GetCursorPos, mouse messages)
 static int g_mx = 320, g_my = 240;
 static uint32_t MapMouse(LPARAM l);
+extern "C" void metal_game_size(unsigned* w, unsigned* h);
 static void PushKey(unsigned dik, bool down) {
     if (g_kq_tail - g_kq_head >= 256) g_kq_head++;          // full: drop the oldest
     g_kq[g_kq_tail++ & 255] = {dik, down ? 0x80u : 0u, GetTickCount(), ++g_kq_seq};
@@ -100,6 +101,9 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_KILLFOCUS:
         memset(g_dik, 0, sizeof g_dik);
         break;
+    case WM_SETCURSOR:
+        if (LOWORD(l) == HTCLIENT) { SetCursor(nullptr); return TRUE; }   // the game draws its own cursor
+        break;
     case WM_SYSCOMMAND:
         if ((w & 0xFFF0) == SC_KEYMENU) return 0;             // Alt alone: no menu loop
         break;
@@ -125,8 +129,12 @@ static void PumpHostWindow() {
 static uint32_t MapMouse(LPARAM l) {
     RECT rc; GetClientRect(g_win, &rc);
     const int cw = rc.right > 0 ? rc.right : 1, ch = rc.bottom > 0 ? rc.bottom : 1;
-    const int lw = g_dx.logicalW > 0 ? g_dx.logicalW : 640, lh = g_dx.logicalH > 0 ? g_dx.logicalH : 480;
+    // the game's own screen size (THRASH state, what GetSystemMetrics tells it);
+    // g_dx.logical* is not it (320x240 after the frontend's setvideomode)
+    unsigned gw = 640, gh = 480; metal_game_size(&gw, &gh);
+    const int lw = (int)gw, lh = (int)gh;
     int x = (short)LOWORD(l) * lw / cw, y = (short)HIWORD(l) * lh / ch;
+    if (getenv("KBDLOG")) fprintf(stderr, "[mouse] client %d,%d of %dx%d -> %d,%d of %dx%d%c", (short)LOWORD(l), (short)HIWORD(l), cw, ch, x, y, lw, lh, 10);
     x = x < 0 ? 0 : x >= lw ? lw - 1 : x; y = y < 0 ? 0 : y >= lh ? lh - 1 : y;
     g_mx = x; g_my = y;
     return (uint32_t)(x & 0xFFFF) | ((uint32_t)y << 16);
@@ -176,6 +184,8 @@ static void PrepareIni() {
 // ---------------------------------------------------------------- driver side
 
 extern "C" {
+void guest_wait_begin(void);
+void guest_wait_end(void);
 
 // THRASH_init: the device on a new host window; the game's own size states.
 int r_init(int w, int h) {
@@ -355,7 +365,13 @@ void r_pageflip(void) {
     ScriptedClicks();
     ScriptedKeys();
     ShotIfWanted();
+    // the GPU wait without the guest lock: the game's timer, sound and window
+    // threads would otherwise stall for the whole vsync wait every frame
+    // (frontend animations ran slow and jerky, the cursor lagged)
+    static int np = -1; if (np < 0) np = getenv("NOPRESENTYIELD") != 0;
+    if (!np) guest_wait_begin();
     DX11_Present(g_dx);
+    if (!np) guest_wait_end();
     PumpHostWindow();
 }
 

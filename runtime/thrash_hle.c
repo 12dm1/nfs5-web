@@ -1,3 +1,4 @@
+#include <pthread.h>
 /* nfs5-web: the THRASH driver as host functions (WEB1: headless).
  *
  * PU's renderer is a driver DLL (THRASH_opendll: LoadLibraryA of
@@ -159,8 +160,22 @@ static void patch_format_table(void){
 }
 
 #define ARG(i) MR32(c->esp + 4u * (uint32_t)(i))
+static int thrash_call_locked(CPU *c, const char *name, uint32_t *r);
+/* One thread at a time in the renderer: r_pageflip releases the guest lock
+ * while Present waits for the GPU (so the timer, sound and window threads
+ * keep running), and another guest thread may call THRASH meanwhile.  A
+ * caller that has to wait releases the guest lock too (no deadlock with the
+ * presenting thread, which wants it back). */
+static pthread_mutex_t g_rmx = PTHREAD_MUTEX_INITIALIZER;
+void guest_wait_begin(void); void guest_wait_end(void);
 int thrash_call(CPU *c, const char *name, uint32_t *r){
     if (strncmp(name, "_THRASH_", 8)) return 0;
+    if (pthread_mutex_trylock(&g_rmx) != 0){ guest_wait_begin(); pthread_mutex_lock(&g_rmx); guest_wait_end(); }
+    int k = thrash_call_locked(c, name, r);
+    pthread_mutex_unlock(&g_rmx);
+    return k;
+}
+static int thrash_call_locked(CPU *c, const char *name, uint32_t *r){
     if (g_log < 0) g_log = getenv("THRASHLOG") ? 1 : 0;
     const char *n = name + 8;
     g_calls++;
@@ -204,6 +219,7 @@ int thrash_call(CPU *c, const char *name, uint32_t *r){
         *r = d; }
     else if (!strcmp(n, "pageflip@0")){
         g_frames++;
+        { void watchdog_on_present(void); watchdog_on_present(); }
         if (g_rend) r_pageflip(); else pace();
         if (g_frames <= 3 || g_frames % 300 == 0)
             fprintf(stderr, "[thrash] frame %ld: %llu draws, %u textures, %llu uploads, %ux%u\n", g_frames,

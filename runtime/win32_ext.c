@@ -79,9 +79,29 @@ static WStat g_wstat[64];
  * allocators shared by the lifted code safe, and keeps the instruction trace
  * consistent.  The lock is released only in blocking calls (Sleep/Wait*). */
 #ifndef __wasm__
+/* nfs5-web: waiters are counted and every acquisition bumps a generation,
+ * so that guest_fair_yield can hand the lock over for real: winpthreads'
+ * mutex lets the releasing thread take it again before the woken waiter
+ * runs, and PU's threads poll each other's flags in tight loops (the main
+ * thread spun 290 M Enter/LeaveCriticalSection in 25 s while the sound
+ * thread never got the lock: the "6 frames" hang). */
 static pthread_mutex_t g_guest = PTHREAD_MUTEX_INITIALIZER;
-#define gil_acquire(who) pthread_mutex_lock(&g_guest)
-#define gil_acquire_frame(who) pthread_mutex_lock(&g_guest)
+static volatile long g_gil_waiting, g_gil_gen;
+uint64_t g_fy_calls, g_fy_hand;
+long win32_gil_waiting(void){ return g_gil_waiting; }
+long win32_gil_gen(void){ return g_gil_gen; }
+static volatile int64_t g_gil_wait_t0;          /* when the current wait began (ns, monotonic) */
+static int64_t gil_ns(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec; }
+static void gil_acquire_native(void){
+    if (pthread_mutex_trylock(&g_guest) != 0){
+        if (__atomic_add_fetch(&g_gil_waiting, 1, __ATOMIC_SEQ_CST) == 1) g_gil_wait_t0 = gil_ns();
+        pthread_mutex_lock(&g_guest);
+        __atomic_sub_fetch(&g_gil_waiting, 1, __ATOMIC_SEQ_CST);
+    }
+    __atomic_add_fetch(&g_gil_gen, 1, __ATOMIC_SEQ_CST);
+}
+#define gil_acquire(who) gil_acquire_native()
+#define gil_acquire_frame(who) gil_acquire_native()
 #define gil_keep_for_mutex() 0
 #define gil_release()    pthread_mutex_unlock(&g_guest)
 #endif
@@ -758,7 +778,12 @@ static int mutex_take_now(Obj *o, uint32_t me){
 }
 
 void guest_fair_yield(void){
-    if (tl_cs_depth || tl_noyield) return;    /* never yield inside a critical section */
+    /* nfs5-web: also inside a critical section.  The sections are real host
+     * mutexes now (a thread that wants one waits for it without the guest
+     * lock), and Windows preempts a thread inside a section all the time:
+     * PU's main thread spins inside one waiting for a value the timer
+     * callback writes; without a yield there the timer never ran. */
+    if (tl_noyield) return;
     static _Thread_local uint32_t n = 0;
     if ((++n & 0x3FFu) != 0) return;          /* once every 1024 calls */
 #ifdef __wasm__
@@ -780,6 +805,24 @@ void guest_fair_yield(void){
     guest_yield_begin();
     guest_yield_end();
 #else
+    g_fy_calls++;
+    static int ng = -1; if (ng < 0) ng = getenv("NOGILHAND") != 0;
+    if (!ng && __atomic_load_n(&g_gil_waiting, __ATOMIC_SEQ_CST) > 0 && gil_ns() - g_gil_wait_t0 > 1000000LL){
+        /* someone has waited for more than 1 ms: let them have it (until a new
+         * acquisition, max 2 ms); a shorter wait is left to the mutex, a
+         * hand-over each time halved the frame rate */
+        g_gil_wait_t0 = gil_ns();
+        long g = __atomic_load_n(&g_gil_gen, __ATOMIC_SEQ_CST);
+        g_fy_hand++;
+        guest_yield_begin();
+        struct timespec t0, t; clock_gettime(CLOCK_MONOTONIC, &t0);
+        do { sched_yield(); clock_gettime(CLOCK_MONOTONIC, &t); }
+        while (__atomic_load_n(&g_gil_gen, __ATOMIC_SEQ_CST) == g &&
+               __atomic_load_n(&g_gil_waiting, __ATOMIC_SEQ_CST) > 0 &&
+               (t.tv_sec - t0.tv_sec) * 1000000000LL + (t.tv_nsec - t0.tv_nsec) < 2000000LL);
+        guest_yield_end();
+        return;
+    }
     guest_yield_begin();
     sched_yield();
     /* NOTE: there used to be a nanosleep(50us) here every time.  On macOS a
@@ -975,6 +1018,10 @@ static void thread_report(void){
                     " critical sections %d of %d\n",
             (unsigned long long)g_threads_started, (unsigned long long)g_threads_exited,
             (unsigned long long)g_teb_reused, g_teb_next, g_nstk_free, g_cs_used, MAXCS);
+#ifndef __wasm__
+    fprintf(stderr, "    GIL: %ld waiting, generation %ld; fair yields %llu, hand-overs %llu%c", g_gil_waiting, g_gil_gen,
+            (unsigned long long)g_fy_calls, (unsigned long long)g_fy_hand, 10);
+#endif
     for (int i = 0; i < MAXCS; i++)
         if (g_cs[i].used && (g_cs[i].waiters > 0 || g_cs[i].depth > 0))
             fprintf(stderr, "    section 0x%08x: owner tid %u depth %d, %ld waiting, %ld hand-overs\n",
@@ -2044,7 +2091,8 @@ static void cs_leave(pthread_mutex_t *m){
     tl_cs_depth--; cs_owned(m, 0, -1);
     int last = i < MAXCS && g_cs[i].depth <= 0;
     long gen = i < MAXCS ? __atomic_load_n(&g_cs[i].acq, __ATOMIC_SEQ_CST) : 0;
-    int hand = last && __atomic_load_n(&g_cs[i].waiters, __ATOMIC_SEQ_CST) > 0 && !tl_cs_depth && !tl_noyield;
+    static int nh = -1; if (nh < 0) nh = getenv("NOCSHAND") != 0;
+    int hand = !nh && last && __atomic_load_n(&g_cs[i].waiters, __ATOMIC_SEQ_CST) > 0 && !tl_cs_depth && !tl_noyield;
     pthread_mutex_unlock(m);
     if (hand){
         guest_yield_begin();

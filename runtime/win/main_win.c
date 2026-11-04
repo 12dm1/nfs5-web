@@ -104,6 +104,14 @@ int main(int argc, char **argv){
       SPI spi = (SPI)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessInformation");
       if (spi) spi(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt); }
     { extern unsigned __stdcall timeBeginPeriod(unsigned); timeBeginPeriod(1); }
+    /* DPI: one coordinate space for the renderer's window.  Unaware, with
+     * display scaling, mouse messages arrived in scaled units while
+     * GetClientRect gave pixels (a message at 1000,800 came in as 500,400):
+     * the game's cursor moved at half speed and never reached the bottom. */
+    { typedef BOOL (WINAPI *SDAC)(HANDLE);
+      SDAC f = (SDAC)(void *)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
+      if (!f){ HMODULE u = LoadLibraryA("user32.dll"); f = u ? (SDAC)(void *)GetProcAddress(u, "SetProcessDpiAwarenessContext") : 0; }
+      if (f) f((HANDLE)(intptr_t)-4);       /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */ }
 
     mem_init(); mem_fault_handler_install();
     if (mem_load_pe(exe)) return 1;
