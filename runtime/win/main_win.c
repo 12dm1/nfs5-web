@@ -159,7 +159,7 @@ int main(int argc, char **argv){
         pthread_attr_setstacksize(&at, 256u * 1024u * 1024u);
         pthread_t th;
         int pe = pthread_create(&th, &at, guest_main_thread, 0); if (pe != 0){
-            fprintf(stderr, "could not start the guest main thread\n"); return 1; }
+            fprintf(stderr, "could not start the guest main thread (error %d)\n", pe); return 1; }
         pthread_join(th, 0);
     }
     lifecycle_drain_writes(5.0);
