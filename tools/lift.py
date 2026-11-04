@@ -1826,6 +1826,8 @@ class Lifter:
                 if m=='jmp':
                     o0=i.operands[0]
                     if o0.type==X86_OP_IMM and self.in_text(o0.imm):
+                        # a backward branch = a loop: the preemption point (see GUEST_BACKEDGE in cpu.h)
+                        if o0.imm <= i.address: body.append("    GUEST_BACKEDGE();")
                         body.append(f"    goto L_{o0.imm:08x};"); continue
                     if o0.type==X86_OP_IMM:
                         self.oob_branch = getattr(self,'oob_branch',0)+1
@@ -1860,7 +1862,7 @@ class Lifter:
                     _t=i.operands[0].imm
                     body.append(f"    c->ecx--;")
                     if self.in_text(_t):
-                        body.append(f"    if(c->ecx != 0u{extra}) goto L_{_t:08x};")
+                        body.append(f"    if(c->ecx != 0u{extra}) {{ GUEST_BACKEDGE(); goto L_{_t:08x}; }}" if _t <= i.address else f"    if(c->ecx != 0u{extra}) goto L_{_t:08x};")
                     else:
                         body.append(f"    if(c->ecx != 0u{extra}) DISPATCH_TAIL(c, 0x{_t & 0xffffffff:x}u)")
                     nxt=i.address+i.size
@@ -1869,7 +1871,7 @@ class Lifter:
                 if m.startswith('j') and m[1:] in CC and i.operands[0].type==X86_OP_IMM:
                     _t=i.operands[0].imm
                     if self.in_text(_t):
-                        body.append(f"    if({CC[m[1:]]}) goto L_{_t:08x};")
+                        body.append(f"    if({CC[m[1:]]}) {{ GUEST_BACKEDGE(); goto L_{_t:08x}; }}" if _t <= i.address else f"    if({CC[m[1:]]}) goto L_{_t:08x};")
                     else:
                         self.oob_branch = getattr(self,'oob_branch',0)+1
                         body.append(f"    if({CC[m[1:]]}) {{ unsupported_insn(c, 0x{i.address:x}u, \"branch-out\"); POP32(c->eip); return; }}")

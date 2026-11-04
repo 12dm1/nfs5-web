@@ -86,7 +86,7 @@ static WStat g_wstat[64];
  * thread spun 290 M Enter/LeaveCriticalSection in 25 s while the sound
  * thread never got the lock: the "6 frames" hang). */
 static pthread_mutex_t g_guest = PTHREAD_MUTEX_INITIALIZER;
-static volatile long g_gil_waiting, g_gil_gen;
+volatile long g_gil_waiting; static volatile long g_gil_gen;
 uint64_t g_fy_calls, g_fy_hand;
 long win32_gil_waiting(void){ return g_gil_waiting; }
 long win32_gil_gen(void){ return g_gil_gen; }

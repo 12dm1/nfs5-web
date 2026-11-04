@@ -86,6 +86,10 @@ static void *guest_main_thread(void *unused){
     return 0;
 }
 
+/* TICKLOG=1: the game's own clocks every 2 s (they are written by the timer callback) */
+static DWORD WINAPI ticklog_thread(LPVOID u){ (void)u; for (;;){ Sleep(2000);
+    fprintf(stderr, "[ticklog] tick %u  ms %u%c", *(uint32_t*)(g_mem + 0x6b7c7cu), *(uint32_t*)(g_mem + 0x6b7c40u), 10); } }
+
 int main(int argc, char **argv){
     const char *exe = argc > 1 ? argv[1] : "PORSCHE.EXE";
     const char *root = argc > 2 ? argv[2] : exe;
@@ -114,6 +118,7 @@ int main(int argc, char **argv){
       if (f) f((HANDLE)(intptr_t)-4);       /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */ }
 
     mem_init(); mem_fault_handler_install();
+    if (getenv("TICKLOG")) CloseHandle(CreateThread(0, 0, ticklog_thread, 0, 0, 0));
     if (mem_load_pe(exe)) return 1;
     mem_commit(TEB_BASE, 0x20000);
     mem_commit(STACK_LO, STACK_HI - STACK_LO);
@@ -153,7 +158,7 @@ int main(int argc, char **argv){
         pthread_attr_t at; pthread_attr_init(&at);
         pthread_attr_setstacksize(&at, 256u * 1024u * 1024u);
         pthread_t th;
-        if (pthread_create(&th, &at, guest_main_thread, 0) != 0){
+        int pe = pthread_create(&th, &at, guest_main_thread, 0); if (pe != 0){
             fprintf(stderr, "could not start the guest main thread\n"); return 1; }
         pthread_join(th, 0);
     }

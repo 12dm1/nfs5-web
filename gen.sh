@@ -11,7 +11,7 @@ SRC="${1:-$NFS5_EXE}"
 PY="${PY:-python}"
 export JTSWITCH="${JTSWITCH:-1}"
 # instruction hooks served by runtime/pu_hooks.c
-export HOOKS="${HOOKS:-0x533cb1}"
+export HOOKS="${HOOKS:-}"   # guest_hook sites (runtime/pu_hooks.c): none now, loops yield by themselves (GUEST_BACKEDGE)
 mkdir -p out gen/all
 "$PY" tools/exe.py prepare "$SRC" out/PORSCHE.EXE
 "$PY" tools/relocs.py out/PORSCHE.EXE

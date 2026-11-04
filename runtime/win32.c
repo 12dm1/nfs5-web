@@ -815,8 +815,11 @@ void win32_init(void){
     g_hk_heapalloc = heap_api_kind("HeapAlloc");
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
     tick0 = (uint64_t)ts.tv_sec*1000 + ts.tv_nsec/1000000;
-    g_cmdline = gheap_alloc(1, 64, 1);
-    strcpy((char*)(g_mem+g_cmdline), "PORSCHE.EXE");
+    /* NFS5_ARGS: the game's KEY=VALUE arguments (argv overrides fe.txt), e.g. "fe=0 nointromovies=1" */
+    { const char *ga = getenv("NFS5_ARGS"); size_t n = ga ? strlen(ga) : 0;
+      g_cmdline = gheap_alloc(1, (uint32_t)(n + 64), 1);
+      strcpy((char*)(g_mem+g_cmdline), "PORSCHE.EXE");
+      if (n){ strcat((char*)(g_mem+g_cmdline), " "); strcat((char*)(g_mem+g_cmdline), ga); } }
     /* fill the IAT with magic addresses */
     for (uint32_t i=0;i<g_imp_count;i++) MR32(g_imp[i].iat) = IMP_MAGIC + i;
     com_init();

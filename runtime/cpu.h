@@ -4,6 +4,16 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+
+/* The preemption point of lifted code, on every backward branch.  Guest threads
+ * run one at a time under the guest lock, and Windows would preempt a thread
+ * spinning on a flag; lifted code has to do it itself: PU has pure-guest wait
+ * loops (no import call, so no fair yield) on flags and clocks that another
+ * guest thread writes, and they hung for good (job wait 0x533CB1, tick wait
+ * sub_0053c380, the race start).  Costs one load of a global per loop turn. */
+extern volatile long g_gil_waiting;
+void guest_fair_yield(void);
+#define GUEST_BACKEDGE() do { if (__builtin_expect(g_gil_waiting != 0, 0)) guest_fair_yield(); } while (0)
 /* PU: no split-screen relocation */
 
 /* Guest memory base. Guest 32-bit address -> host address in one ARM64 instruction:

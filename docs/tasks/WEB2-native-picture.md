@@ -34,6 +34,10 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   buffer). `NFS5_NOAUDIO=1` / headless = off; `NFS5_AUDIODUMP=<file.wav>` = the mix to a WAV file instead of
   the device (silent autotests); `AUDIODBG=1` = buffer states once a second. The browser build will call the
   same mixer from WebAudio.
+- **Race**: `NFS5_ARGS="fe=0 nointromovies=1 car[0].aidrive=1"` = the game's KEY=VALUE arguments (argv overrides
+  fe.txt): direct AI-driven race, no menus. Needs `SaveData/XXhud1XX.hud` + `XXhud2XX.hud` in the save folder:
+  the first frontend run writes them, without them fe=0 crashes in sub_0041eff0 (null object + 0x188).
+  `TICKLOG=1` = the game's clock (0x6B7C7C) every 2 s.
 - **Autotest hooks** (env): `R_SHOT=<frame>,...` (readback statistics on stderr + `out/shot_<n>.bmp`),
   `R_KEYS=<frame>:<DIK>,...` (held 4 frames, WM_KEY*/WM_CHAR + DirectInput), `R_CLICK=<frame>:<x>:<y>,...`
   (move 10 frames before, button held 20 frames; 3 frames is too short for the frontend), `R_MOVEONLY=1`,
@@ -61,6 +65,11 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   `guest_fair_yield`. Plus: the native GIL counts waiters and hands over for real when one has waited > 1 ms
   (winpthreads' mutex let the releasing thread re-take it), and fair yields are allowed inside critical
   sections (PU spins inside one waiting for the timer callback). 0 stalls in 24 runs since.
+- **Preemption: `GUEST_BACKEDGE` (cpu.h, emitted by tools/lift.py on every backward branch).** The third pure
+  guest wait (the tick wait sub_0053c380 at race start, then another in the race load: clock frozen at 424, 891)
+  made it clear this is a class: guest threads run one at a time and lifted code never gets preempted. A loop
+  turn now checks `g_gil_waiting` (one load) and calls `guest_fair_yield` if someone waits. The hooks are gone.
+  Note for WEB3: the same macro must work in the wasm build.
 - **Slow, jerky frontend = Present with the guest lock held.** The vsync wait blocked the timer callback
   (the game's clock: 73 instead of ~130 ticks/s), the sound thread and the window thread (mouse messages,
   so the game cursor lagged behind the real one). `r_pageflip` releases the lock around `DX11_Present`;
@@ -106,4 +115,8 @@ mouse from that window, and plays sound. Status: picture + mouse/keyboard work; 
   stall #3 fixed (guest spin-loop hook, fair GIL), host cursor hidden. User: jerks gone, cursor still slow ->
   double mouse mapping fixed (2026-11-04 (3)), user OK. Exit hang fixed (4).
 - 2026-11-04 (5): sound: host mixer + WASAPI; menu music verified in a WAV dump (steady level, no
-  discontinuities). Waiting for the user's listening test.
+  discontinuities). User: sound and music OK.
+- 2026-11-05: first native race (Coastal, AI drives): 5215 frames in 70 s (~75 fps), ~230 draws a frame, picture
+  96-98 % non-black, clock steady. Not checked yet: driving by keyboard, race sound, end of race. One start in 18
+  failed once with "could not start the guest main thread" (256 MB host stack, cause unknown; the error code
+  is printed now).
