@@ -1,0 +1,21 @@
+# Byte patches applied to Porsche.exe v3.5 (English) before it is lifted to C.
+# tools/apply_patches.py checks every "old" run against the EXE and refuses on a mismatch.
+#
+# Format: VA  old-bytes  new-bytes  # comment      (hex, no spaces inside a run)
+#
+# These 11 runs are the difference between the official v3.5 EXE (nfspu_v35.zip,
+# SHA-256 e4684948...66bb) and the PORSCHE.EXE the PC mod (nfspu_nglide) has run on
+# since 2015. Their origin is a community patch set; the meaning below is from the
+# disassembly and still has to be confirmed in-game (WEB1).
+
+0046059E  75          EB                # jne -> jmp after an x87 compare: [esi+144h] = 2 is never set (TODO: identify)
+00471B6B  9090909090  E8774D0400        # new entry 471B6B: call 4B68E7 (clears byte 628A28), then falls into 471B70
+004B6839  33          2E                # the init call at 4B6838 goes to 471B6B instead of 471B70
+004B68E7  9090909090909090  C605288A620000C3  # mov byte [628A28h], 0 ; ret   (in the alignment padding)
+004D2996  0F856201    E9630100          # case 0x62 of a frontend message switch always takes the default (TODO: identify)
+004D299B  00          90                #   (rest of the jne -> jmp rewrite)
+004D3435  10          20                # frontend 640x480 mode: 16 -> 32 bits per pixel
+004DD614  10          20                # frontend 640x480 mode: 16 -> 32 bits per pixel
+004DD714  10          20                # frontend 640x480 mode: 16 -> 32 bits per pixel
+0055609E  08          06                # jne target 5560A7 -> 5560A5
+005560A5  8BC18D0480  B80000007F        # return 7F000000h instead of value*5 (presumably the CPU clock measurement that overflows on fast CPUs)

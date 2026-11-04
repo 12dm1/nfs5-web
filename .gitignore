@@ -1,0 +1,22 @@
+# Everything derived from the game stays local (README: nothing from the game in git)
+gen/
+out/
+deps/
+data/
+*.exe
+*.EXE
+*.dll
+*.DLL
+*.icd
+*.ICD
+*.zip
+*.viv
+*.crp
+*.fsh
+*.bnk
+*.wasm
+# Python / editors
+__pycache__/
+*.pyc
+.venv/
+.vscode/
