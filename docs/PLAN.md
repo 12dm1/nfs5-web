@@ -12,7 +12,7 @@ reverse-engineering notes; this repository takes code from it feature by feature
 |---|---|---|
 | WEB1 native boot | lifted C + runtime (Win32, files, threads, guest lock, dispatcher; from nfsu2-web where it is generic) as a Windows x64 program, THRASH stubbed | the frontend's game logic runs to the main menu (log only) |
 | WEB2 native picture | the same program with dx11z as its THRASH renderer (D3D11, native) | menus and a race on screen, race_test-style autotest passes |
-| WEB2n network smoke test | the game's IP mode through the runtime's Winsock | two native instances in one race via the N1 server |
+| WEB2n network smoke test (IP mode PASS, docs/tasks/WEB2n-network.md) | the game's IP mode through the runtime's Winsock | two native instances in one race; N1 server with the online step |
 | WEB3 browser | wasi-sdk build; dx11z's renderer on WebGPU (frame records in shared memory, encoder on the page); DirectSound -> AudioWorklet ring; DirectInput 5 -> keyboard/Gamepad API; files via I/O worker + OPFS cache; COOP/COEP server with a password | a race in Chrome |
 
 The native build stays for good (debugging, autotests), as the Mac build does in nfsu2-web.

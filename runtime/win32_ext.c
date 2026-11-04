@@ -908,6 +908,25 @@ static uint32_t obj_new(ObKind k){
     return H_BASE + o->gen * OBJ_MAX + (uint32_t)i;
 }
 /* CloseHandle / RegCloseKey: free the slot when the last handle is closed */
+/* Named mutexes / semaphores (PU's local queues, 0x582CF0..): one process here, so a name
+ * is looked up in the object table.  A new handle to the existing object. */
+void win32_set_last_error(CPU *c, uint32_t e);
+static uint32_t named_open(CPU *c, ObKind k, uint32_t pname, int open){
+    if (!pname || !MR8(pname)) return 0;
+    const char *nm = (const char *)(g_mem + pname);
+    uint32_t r = 0;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 1; i < g_obj_n; i++) if (g_obj[i].kind == k && !strncmp(g_obj[i].name, nm, sizeof g_obj[i].name - 1)){
+        __atomic_fetch_add(&g_obj[i].refs, 1, __ATOMIC_SEQ_CST); r = H_BASE + g_obj[i].gen * OBJ_MAX + (uint32_t)i; break; }
+    pthread_mutex_unlock(&g_lock);
+    if (r && !open) win32_set_last_error(c, 183u);    /* ERROR_ALREADY_EXISTS */
+    return r;
+}
+static void named_set(Obj *o, uint32_t pname){
+    if (!o) return;
+    o->name[0] = 0;
+    if (pname) snprintf(o->name, sizeof o->name, "%s", (const char *)(g_mem + pname));
+}
 static void obj_close(uint32_t h){
     int si = obj_slot(h);
     if (si < 0) return;
@@ -1695,8 +1714,13 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         if(o){ pthread_mutex_lock(&o->mtx); o->signaled=1; pthread_cond_broadcast(&o->cv); pthread_mutex_unlock(&o->mtx);} r=1; }
     else if (!strcmp(n,"ResetEvent")){ Obj*o=obj_get(A(c,0));
         if(o){ pthread_mutex_lock(&o->mtx); o->signaled=0; pthread_mutex_unlock(&o->mtx);} r=1; }
+    else if (!strcmp(n,"OpenMutexA") || !strcmp(n,"OpenSemaphoreA")){
+        r = named_open(c, n[4]=='M' ? OB_MUTEX : OB_SEM, A(c,2), 1);
+        if (!r) win32_set_last_error(c, 2u); }       /* ERROR_FILE_NOT_FOUND */
+    else if (!strcmp(n,"CreateMutexA") && (r = named_open(c, OB_MUTEX, A(c,2), 0)) != 0) { }
     else if (!strcmp(n,"CreateMutexA")){
         uint32_t h=obj_new(OB_MUTEX); Obj*o=obj_get(h);
+        named_set(o, A(c,2)); win32_set_last_error(c, 0);
         if(o){ if (A(c,1)){ o->signaled=0; o->owner_tid=cur_tid(c); o->rec=1; }
                else       { o->signaled=1; o->owner_tid=0; o->rec=0; } }
         r=h; }
@@ -1713,7 +1737,8 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
                } else { o->signaled=1; pthread_cond_broadcast(&o->cv); r=1; }
                pthread_mutex_unlock(&o->mtx); }
     }
-    else if (!strcmp(n,"CreateSemaphoreA")){ uint32_t h=obj_new(OB_SEM); Obj*o=obj_get(h); if(o) o->signaled=(int)A(c,1); r=h; }
+    else if (!strcmp(n,"CreateSemaphoreA") && (r = named_open(c, OB_SEM, A(c,3), 0)) != 0) { }
+    else if (!strcmp(n,"CreateSemaphoreA")){ uint32_t h=obj_new(OB_SEM); Obj*o=obj_get(h); if(o) o->signaled=(int)A(c,1); named_set(o, A(c,3)); win32_set_last_error(c, 0); r=h; }
     else if (!strcmp(n,"ReleaseSemaphore")){ Obj*o=obj_get(A(c,0));
         if(o){ pthread_mutex_lock(&o->mtx); o->signaled+=(int)A(c,1); pthread_cond_broadcast(&o->cv); pthread_mutex_unlock(&o->mtx);} r=1; }
     else if (!strcmp(n,"WaitForSingleObject")){
@@ -1778,7 +1803,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
                 pthread_cond_timedwait(&o->cv,&o->mtx,&ts);
             }
             r = o->signaled ? 0u : 0x102u;              /* WAIT_OBJECT_0 / WAIT_TIMEOUT */
-            if(o->signaled && !o->manual) o->signaled=0;
+            if(o->signaled && !o->manual){ if (o->kind == OB_SEM) o->signaled--; else o->signaled=0; }
             pthread_mutex_unlock(&o->mtx);
             guest_yield_end();
         } }
@@ -1908,7 +1933,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
                 Obj*o=obj_get(MR32(parr+4u*i));
                 if(o){ pthread_mutex_lock(&o->mtx);
                        int sig=o->signaled;
-                       if(sig && !o->manual) o->signaled=0;
+                       if(sig && !o->manual){ if (o->kind == OB_SEM) o->signaled--; else o->signaled=0; }
                        pthread_mutex_unlock(&o->mtx);
                        if(sig){ got=i; break; } }
             }
