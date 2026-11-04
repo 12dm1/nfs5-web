@@ -37,11 +37,18 @@
  * All guest code runs under the GIL, but host threads (Metal, audio, timers)
  * may reach the COM allocators, so every entry point takes g_hl. */
 #include "cpu.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <os/lock.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <mach/mach.h>
+#endif
 
 void mem_commit(uint32_t, uint32_t);
 void mem_release(uint32_t, uint32_t, int);
@@ -88,9 +95,15 @@ void win32_set_last_error(CPU *, uint32_t);
 #define B_PREVF(b) MR32((b) + 20u)
 #define B_SIZE(b)  (B_SZF(b) & ~15u)
 
+#ifdef _WIN32
+static SRWLOCK g_hl = SRWLOCK_INIT;
+#define LOCK()   AcquireSRWLockExclusive(&g_hl)
+#define UNLOCK() ReleaseSRWLockExclusive(&g_hl)
+#else
 static os_unfair_lock g_hl = OS_UNFAIR_LOCK_INIT;
 #define LOCK()   os_unfair_lock_lock(&g_hl)
 #define UNLOCK() os_unfair_lock_unlock(&g_hl)
+#endif
 
 static int g_bump = -1;                /* NFSU2_HEAP=bump */
 static int g_check = 0;                /* NFSU2_HEAPCHECK: 1 checks, 2 + fill */
@@ -193,15 +206,19 @@ static void va_free_region(uint32_t g0){
     mem_release(a, len, !g_check);
 }
 
+#define PU_IMAGE_END 0x006E3000u   /* PU: SizeOfImage 0x2E3000 (SPEED2: 0x932000) */
+
 /* ---- call sites ------------------------------------------------------------
  * The guest allocates through the CRT (malloc/new/calloc live in
  * [CRT_LO, CRT_HI)); the interesting site is the first return address on the
  * guest stack outside it.  Heuristic (the stack may hold stale values), but
  * good enough to attribute live bytes. */
+/* PU: .text + PACODE.  CRT range approximate (the MSVC CRT objects at the end
+ * of .text); only used to attribute allocations in reports. */
 #define TEXT_LO 0x00401000u
-#define TEXT_HI 0x00782AF1u
-#define CRT_LO  0x0075B000u
-#define CRT_HI  0x00772000u
+#define TEXT_HI 0x005B1AF9u
+#define CRT_LO  0x005A0000u
+#define CRT_HI  0x005B0000u
 static uint32_t site_of(CPU *c){
     if (!c) return 0;
     uint32_t ra = c->eip;
@@ -770,7 +787,7 @@ static uint32_t virtual_query(uint32_t addr, uint32_t mbi, uint32_t len){
     } else if (mem_is_committed(pg)){
         uint32_t e = (pg + 0x4000u) & ~0x3FFFu;
         while (e && mem_is_committed(e) && va_region(e) < 0) e += 0x4000u;
-        int img = pg >= 0x00400000u && pg < 0x00932000u;
+        int img = pg >= 0x00400000u && pg < PU_IMAGE_END;
         abase = img ? 0x00400000u : (pg & ~0x3FFFu); aprot = img ? 0x80u : 4u;
         rsize = e - pg; state = MEM_COMMIT; prot = img ? 0x40u : 4u; type = img ? MEM_IMAGE : MEM_PRIVATE;
     } else {
@@ -886,7 +903,7 @@ uint32_t heap_api(CPU *c, int k){
         uint32_t a = ARG(c, 0), np = ARG(c, 2), po = ARG(c, 3), old = 0x40u;
         int64_t g0 = g_bump ? -1 : va_region(a);
         if (g0 >= 0){ old = g_va[g0].prot; g_va[g0].prot = np; }
-        else if (!(a >= 0x00400000u && a < 0x00932000u)) old = 4u;
+        else if (!(a >= 0x00400000u && a < PU_IMAGE_END)) old = 4u;
         if (po && mem_is_committed(po) && mem_is_committed(po + 3)) MR32(po) = old;
         r = 1;
         break; }
@@ -898,9 +915,15 @@ uint32_t heap_api(CPU *c, int k){
 
 /* ---- reports ---------------------------------------------------------------- */
 static uint64_t host_footprint(void){
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX pc; memset(&pc, 0, sizeof pc);
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pc, sizeof pc)) return 0;
+    return pc.PrivateUsage;
+#else
     task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) != KERN_SUCCESS) return 0;
     return vi.phys_footprint;
+#endif
 }
 void heap_totals(uint64_t *live, uint64_t *peak, uint64_t *va, uint64_t *held){
     uint64_t l = 0, p = 0, h = 0;

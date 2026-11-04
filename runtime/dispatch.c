@@ -247,6 +247,17 @@ void cpuid_shim(CPU *c){
  * QPC + rdtsc + Sleep) found ~0 MHz and on the first run set ALL graphics
  * settings to the lowest (g_PerformanceLevel=0, 640x480).
  * Can be changed with NFSU2_TSC_MHZ. */
+#ifdef _WIN32
+#include <windows.h>
+uint64_t rdtsc_shim(void){
+    static LARGE_INTEGER f; static uint64_t mhz = 0;
+    if (!f.QuadPart){ QueryPerformanceFrequency(&f);
+        const char *e = getenv("NFSU2_TSC_MHZ"); mhz = e && *e ? strtoull(e, 0, 0) : 3000u; }
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    __uint128_t ns = (__uint128_t)(uint64_t)t.QuadPart * 1000000000u / (uint64_t)f.QuadPart;
+    return (uint64_t)(ns * mhz / 1000u);
+}
+#else
 #include <mach/mach_time.h>
 uint64_t rdtsc_shim(void){
     static mach_timebase_info_data_t tb; static uint64_t mhz = 0;
@@ -255,6 +266,7 @@ uint64_t rdtsc_shim(void){
     __uint128_t ns = (__uint128_t)mach_absolute_time() * tb.numer / tb.denom;
     return (uint64_t)(ns * mhz / 1000u);
 }
+#endif
 
 void dispatch_report(void){
     fprintf(stderr,"\n=== runtime ===\n");

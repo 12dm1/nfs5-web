@@ -732,6 +732,10 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
 #ifdef __wasm__
             /* WASI has no birth time: the status-change time stands in */
             const struct timespec *ts[3] = { &st.st_ctim, &st.st_atim, &st.st_mtim };
+#elif defined(_WIN32)
+            /* UCRT stat: whole seconds; st_ctime is the creation time on Windows */
+            struct timespec tsw[3] = { { st.st_ctime, 0 }, { st.st_atime, 0 }, { st.st_mtime, 0 } };
+            const struct timespec *ts[3] = { &tsw[0], &tsw[1], &tsw[2] };
 #else
             const struct timespec *ts[3] = { &st.st_birthtimespec, &st.st_atimespec, &st.st_mtimespec };
 #endif

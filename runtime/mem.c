@@ -4,7 +4,7 @@
 #include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
-#ifndef __wasm__
+#if !defined(__wasm__) && !defined(_WIN32)
 #include <signal.h>
 #include <sys/mman.h>
 #endif
@@ -74,6 +74,89 @@ void mprot_rearm(void){ }
 uint8_t *g_mprot_page = 0;
 void mem_altstack_install(void){ }
 void mem_fault_handler_install(void){ }
+#elif defined(_WIN32)
+/* nfs5-web, Windows x64 host: the 4 GB guest span is one VirtualAlloc
+ * reservation; mem_commit commits 16 KB pages (committing a committed page is
+ * a no-op).  Faults are reported from a vectored exception handler, which
+ * runs on the faulting thread's own stack (no sigaltstack on Windows; a
+ * stack overflow gets its guard-page reserve). */
+#include <windows.h>
+void mem_init(void){
+    if (g_mem) return;
+    g_mem = VirtualAlloc(0, (SIZE_T)GSZ, MEM_RESERVE, PAGE_NOACCESS);
+    if (!g_mem){ fprintf(stderr, "VirtualAlloc 4GB reserve failed (%lu)\n", GetLastError()); exit(1); }
+}
+void mem_commit(uint32_t addr, uint32_t size){
+    uint64_t lo = addr & ~0x3FFFull;
+    uint64_t hi = ((uint64_t)addr + size + 0x3FFF) & ~0x3FFFull;
+    if (hi > 0x100000000ull) hi = 0x100000000ull;
+    if (!VirtualAlloc(g_mem + lo, (SIZE_T)(hi - lo), MEM_COMMIT, PAGE_READWRITE)){
+        fprintf(stderr, "mem_commit 0x%08x+%u failed (%lu)\n", addr, size, GetLastError()); exit(1);
+    }
+    for (uint64_t a2 = lo; a2 < hi; a2 += 0x4000ull){
+        uint32_t pg = (uint32_t)(a2 >> 14);
+        if (!(g_cbits[pg>>3] & (1u << (pg&7)))){ g_cbits[pg>>3] |= (uint8_t)(1u << (pg&7)); g_committed += 0x4000u; }
+    }
+}
+uint64_t mem_committed(void){ return g_committed; }
+/* heap.c: a released range reads as zero afterwards; rw=0 (HEAPCHECK) makes it fault. */
+void mem_release(uint32_t addr, uint32_t size, int rw){
+    uint64_t lo = ((uint64_t)addr + 0x3FFF) & ~0x3FFFull;
+    uint64_t hi = ((uint64_t)addr + size) & ~0x3FFFull;
+    if (hi <= lo) return;
+    VirtualFree(g_mem + lo, (SIZE_T)(hi - lo), MEM_DECOMMIT);
+    if (rw) VirtualAlloc(g_mem + lo, (SIZE_T)(hi - lo), MEM_COMMIT, PAGE_READWRITE);
+    for (uint64_t a2 = lo; a2 < hi; a2 += 0x4000ull){
+        uint32_t pg = (uint32_t)(a2 >> 14);
+        if (rw) g_cbits[pg>>3] |= (uint8_t)(1u << (pg&7));
+        else    g_cbits[pg>>3] &= (uint8_t)~(1u << (pg&7));
+    }
+}
+uint8_t *g_mprot_page = 0;
+void mprot_arm(uint32_t a){ fprintf(stderr, "mprot: not implemented on Windows yet (0x%08x)\n", a); }
+void mprot_rearm(void){ }
+__attribute__((weak)) uint32_t guest_fn_from_host(const void *pc){ (void)pc; return 0; }
+static volatile LONG g_in_handler = 0;
+static LONG CALLBACK veh_fault(EXCEPTION_POINTERS *ep){
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_INT_DIVIDE_BY_ZERO)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedExchange(&g_in_handler, 1)){ fprintf(stderr, "\n*** a second fault inside the handler - exiting\n"); _exit(4); }
+    void *pc = ep->ExceptionRecord->ExceptionAddress;
+    uint32_t ffn = guest_fn_from_host(pc);
+    fprintf(stderr, "\n*** HOST EXCEPTION 0x%08lx at %p%s", code, pc, ffn ? "" : "\n");
+    if (ffn) fprintf(stderr, " in guest function sub_%08x\n", ffn);
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2){
+        uint8_t *p = (uint8_t*)ep->ExceptionRecord->ExceptionInformation[1];
+        const char *op = ep->ExceptionRecord->ExceptionInformation[0] == 1 ? "write" : "read";
+        if (p >= g_mem && p < g_mem + GSZ)
+            fprintf(stderr, "*** GUEST MEMORY FAULT: %s of guest address 0x%08llx (uncommitted)\n", op,
+                    (unsigned long long)(p - g_mem));
+        else
+            fprintf(stderr, "*** HOST FAULT: %s of %p (outside the guest area)\n", op, p);
+    }
+    if (code == EXCEPTION_STACK_OVERFLOW) fprintf(stderr, "*** HOST STACK OVERFLOW (endless recursion in guest code?)\n");
+    if (g_cur_cpu){
+        CPU *c = (CPU*)g_cur_cpu;
+        fprintf(stderr,"    eax=%08x ecx=%08x edx=%08x ebx=%08x\n", c->eax,c->ecx,c->edx,c->ebx);
+        fprintf(stderr,"    esp=%08x ebp=%08x esi=%08x edi=%08x  df=%u\n", c->esp,c->ebp,c->esi,c->edi,c->df);
+    }
+    if (g_cur_cpu && g_backtrace_fn) g_backtrace_fn(g_cur_cpu, 12);
+    if (g_itrace_dump_fn && getenv("ITRACE")) g_itrace_dump_fn(atoi(getenv("ITRACE")));
+    if (g_report_fn) g_report_fn();
+    fflush(stderr);
+    _exit(3);
+}
+void mem_altstack_install(void){
+    ULONG guarantee = 64 * 1024;              /* stack kept for the handler on overflow */
+    SetThreadStackGuarantee(&guarantee);
+}
+void mem_fault_handler_install(void){
+    static int done = 0;
+    mem_altstack_install();
+    if (!done){ done = 1; AddVectoredExceptionHandler(1, veh_fault); }
+}
 #else
 void mprot_arm(uint32_t);
 void mem_init(void){

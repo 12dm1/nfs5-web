@@ -1,15 +1,25 @@
 /* Win32 layer - second round: registry, window, synchronization, threads */
 #include <strings.h>
+/* struct tm's tm_gmtoff (BSD/glibc); UCRT has none (win/posix_compat.h) */
+#ifndef TM_GMTOFF
+#define TM_GMTOFF(t) ((t).tm_gmtoff)
+#endif
 #include "cpu.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <time.h>
+#ifndef _WIN32
 #include <sys/event.h>
+#endif
 #include <sched.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/mount.h>
+#endif
 #include <stddef.h>
 
 void dispatch_indirect(CPU*,uint32_t);
@@ -535,6 +545,18 @@ static void sleep_precise_ns(int64_t ns){
  * 3 ms request is 447 us late on average (separate measurement: median
  * ~770 us, QoS makes no difference).  A kevent timer with NOTE_CRITICAL is
  * not coalesced: median ~45 us. */
+#ifdef _WIN32
+/* Windows: a high-resolution waitable timer (no 15.6 ms tick rounding). */
+static void sleep_precise_ns(int64_t ns){
+    static _Thread_local HANDLE t = 0;
+    if (!t) t = CreateWaitableTimerExW(0, 0, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (t){
+        LARGE_INTEGER due; due.QuadPart = -(ns / 100);
+        if (SetWaitableTimer(t, &due, 0, 0, 0, FALSE)){ WaitForSingleObject(t, INFINITE); return; }
+    }
+    Sleep((DWORD)(ns / 1000000));
+}
+#else
 static void sleep_precise_ns(int64_t ns){
     static _Thread_local int kq = -1;
     if (kq < 0) kq = kqueue();
@@ -546,6 +568,7 @@ static void sleep_precise_ns(int64_t ns){
     struct timespec ts = { (time_t)(ns / 1000000000LL), (long)(ns % 1000000000LL) };
     nanosleep(&ts, 0);
 }
+#endif
 #endif
 static void sleep_released(int64_t ns, int frame){
     struct timespec a, b, d;
@@ -1310,14 +1333,14 @@ static uint32_t tz_info(uint32_t p){
     time_t now = time(0); struct tm lt; localtime_r(&now, &lt);
     struct tm y0 = {0}; y0.tm_year = lt.tm_year; y0.tm_mday = 1; y0.tm_isdst = -1;
     time_t t0 = mktime(&y0);
-    long std_off = lt.tm_isdst > 0 ? 0 : lt.tm_gmtoff, dst_off = lt.tm_isdst > 0 ? lt.tm_gmtoff : 0;
+    long std_off = lt.tm_isdst > 0 ? 0 : TM_GMTOFF(lt), dst_off = lt.tm_isdst > 0 ? TM_GMTOFF(lt) : 0;
     time_t to_dst = 0, to_std = 0;
     struct tm a; localtime_r(&t0, &a);
     int prev = a.tm_isdst > 0;
     for (time_t t = t0 + 3600; t < t0 + 366 * 86400; t += 3600){
         struct tm b; localtime_r(&t, &b);
         int d = b.tm_isdst > 0;
-        if (d) dst_off = b.tm_gmtoff; else std_off = b.tm_gmtoff;
+        if (d) dst_off = TM_GMTOFF(b); else std_off = TM_GMTOFF(b);
         if (d != prev){
             time_t lo = t - 3600, hi = t;                 /* to the minute */
             while (hi - lo > 60){ time_t m = lo + (hi - lo) / 2; struct tm x; localtime_r(&m, &x);
@@ -1326,7 +1349,7 @@ static uint32_t tz_info(uint32_t p){
             prev = d;
         }
     }
-    if (!std_off && !dst_off) std_off = lt.tm_gmtoff;
+    if (!std_off && !dst_off) std_off = TM_GMTOFF(lt);
     if (p){
         mem_commit(p, 172); memset(g_mem + p, 0, 172);
         MR32(p) = (uint32_t)(int32_t)(-std_off / 60);
@@ -1353,11 +1376,17 @@ static uint32_t tz_info(uint32_t p){
 }
 /* Free/total bytes of the volume holding the saves (NFSU2_SAVEDIR, else HOME). */
 static uint32_t disk_space(uint64_t *fr, uint64_t *tot){
+#ifdef _WIN32
+    const char *dw = getenv("NFSU2_SAVEDIR"); ULARGE_INTEGER a, t, f;
+    if (!GetDiskFreeSpaceExA(dw && *dw ? dw : 0, &a, &t, &f)){ *fr = 8ull << 30; *tot = 64ull << 30; return 1; }
+    *fr = a.QuadPart; *tot = t.QuadPart; return 1;
+#else
     struct statfs sf; const char *d = getenv("NFSU2_SAVEDIR");
     if (!d || !*d) d = getenv("HOME");
     if (!d || statfs(d, &sf) != 0){ *fr = 8ull << 30; *tot = 64ull << 30; return 1; }
     *fr = (uint64_t)sf.f_bavail * sf.f_bsize; *tot = (uint64_t)sf.f_blocks * sf.f_bsize;
     return 1;
+#endif
 }
 
 int win32_ext_call(CPU *c, const char *n, uint32_t *out){
@@ -1820,7 +1849,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         if (a && b && mem_is_committed(a+7)){
             time_t now = time(0); struct tm lt; localtime_r(&now, &lt);
             uint64_t ft = (uint64_t)MR32(a) | ((uint64_t)MR32(a+4) << 32);
-            ft += (uint64_t)((int64_t)lt.tm_gmtoff * 10000000LL);
+            ft += (uint64_t)((int64_t)TM_GMTOFF(lt) * 10000000LL);
             mem_commit(b,8); MR32(b)=(uint32_t)ft; MR32(b+4)=(uint32_t)(ft >> 32); r=1; }
         else r=0; }
     else if (!strcmp(n,"FileTimeToSystemTime")){        /* (FILETIME*, SYSTEMTIME*) */

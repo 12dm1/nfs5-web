@@ -1,6 +1,7 @@
 /* Stage 3 seed: the Win32 API subset needed to boot + tracing for the rest. */
 #include <stdatomic.h>
-#include "enhance.h"
+/* nfs5-web: nfsu2-web's enhance.h (its graphics options) is not part of PU */
+static inline void enh_report(void){}
 #include "cpu.h"
 #include <stdio.h>
 #include <string.h>
