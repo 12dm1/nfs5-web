@@ -218,6 +218,8 @@ static void game_state(DrawState *d, int topo){
     d->bias = d->mips ? g_lodbias : 0.0f;
     if (!(d->bias > -16.0f && d->bias < 16.0f)) d->bias = 0.0f;
 }
+/* The frontend's loading screen comes after the race's video mode (pu_hooks.c) and is laid out in 640x480 around the screen's
+ * centre: scaled to the screen until the race's first 3D draw. */
 static void flush_verts(DV *v, int n, int topo){
     if (n <= 0) return;
     { const float dv = tan_voffset(g_bound); if (dv != 0.0f) for (int i = 0; i < n; i++) v[i].v += dv; }
@@ -716,7 +718,7 @@ void r_restore(void){ close_draw(); seg_publish(0); }
 void r_setvideomode(int w, int h, int bpp){
     g_race = bpp == 32 && w > 640;         /* the frontend is 640x480x32 too (patches), the race never (pu_hooks.c) */
     g_st[THRASH_STATE_SCREEN_WIDTH] = w; g_st[THRASH_STATE_SCREEN_HEIGHT] = h;
-    if (w > 0 && h > 0 && (w != g_lw || h != g_lh)){ close_draw(); g_lw = w; g_lh = h; g_s_video = 0; }
+    if (w > 0 && h > 0 && (w != g_lw || h != g_lh)){ close_draw(); g_lw = w; g_lh = h; g_s_video = 0; g_clipvalid = 0; }   /* the old clip is the old mode's: the loading screen comes before the next THRASH_clip */
 }
 void r_window(int idx){ if (idx >= 0 && idx <= 7) g_curwin = idx; }
 void r_clip(int x1, int y1, int x2, int y2){ g_clip[0] = x1; g_clip[1] = y1; g_clip[2] = x2; g_clip[3] = y2; g_clipvalid = 1; }
@@ -753,7 +755,9 @@ void r_unlockwindow(uint32_t pixels, int w, int h, int pitch){
     const float W = (float)g_lw, H = (float)g_lh;
     DV v[6]; memset(v, 0, sizeof v);
     const float xs[6] = { 0, W, W, 0, W, 0 }, ys[6] = { 0, 0, H, 0, H, H }, us[6] = { 0, 1, 1, 0, 1, 0 }, vs[6] = { 0, 0, 1, 0, 1, 1 };
-    for (int i = 0; i < 6; i++){ v[i].x = xs[i]; v[i].y = ys[i]; v[i].w = 1.0f; v[i].u = us[i]; v[i].v = vs[i]; v[i].color = 0xFFFFFFFFu; }
+    /* a race mode's loading screen: the game lays its 640x480 picture out around the centre of the big frame; show that part */
+    const float cu = w > 640 ? 320.0f / (float)w : 0.5f, cv = h > 480 ? 240.0f / (float)h : 0.5f;
+    for (int i = 0; i < 6; i++){ v[i].x = xs[i]; v[i].y = ys[i]; v[i].w = 1.0f; v[i].u = 0.5f + (us[i] - 0.5f) * 2.0f * cu; v[i].v = 0.5f + (vs[i] - 0.5f) * 2.0f * cv; v[i].color = 0xFFFFFFFFu; }
     submit(v, 6, &d);
 }
 /* the screen's pixels are in the GPU, a frame away: the game's only use is the lens flares' sun test (G7);
