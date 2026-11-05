@@ -3,6 +3,7 @@
  * key/button state, drained into the guest window's queue by kbd_pump. */
 #include "host_abi.h"
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #define WM_MOUSEMOVE 0x200
@@ -25,6 +26,12 @@ typedef struct {
     Key keys[256];
     uint8_t dik[256];                   /* DirectInput keyboard state */
     uint8_t vk[256];                    /* GetAsyncKeyState */
+    /* the pad (web/src/input.ts) and what the page has to know for it */
+    volatile int32_t pad_on; volatile uint32_t pad_buttons;
+    volatile float pad_lx, pad_rt, pad_lt;
+    volatile int32_t pad_mode, rumble_seq;
+    volatile float rumble_low, rumble_high;
+    volatile int32_t rumble_ms;
 } Mail;
 static Mail g_mail = { .magic = 0x4B424D31u };
 
@@ -33,6 +40,16 @@ long r_frames(void) __attribute__((weak));
 void win32_post_message(uint32_t m, uint32_t wp, uint32_t lp);
 int win32_msg_room(void);
 
+int pu_pad_mode(void);
+int host_pad_read(uint32_t *buttons, float *lx, float *rt, float *lt){
+    if (!__atomic_load_n(&g_mail.pad_on, __ATOMIC_ACQUIRE)) return 0;
+    *buttons = g_mail.pad_buttons; *lx = g_mail.pad_lx; *rt = g_mail.pad_rt; *lt = g_mail.pad_lt;
+    return 1;
+}
+void host_pad_rumble(float low, float high, int ms){
+    g_mail.rumble_low = low; g_mail.rumble_high = high; g_mail.rumble_ms = ms;
+    __atomic_add_fetch(&g_mail.rumble_seq, 1, __ATOMIC_RELEASE);
+}
 static uint32_t g_mbtn;
 static int g_lx = -1, g_ly = -1;
 
@@ -67,6 +84,8 @@ static int is_mouse(uint32_t m){ return m >= WM_MOUSEMOVE && m <= WM_MOUSEWHEEL;
 void kbd_pump(void){
     static int registered;
     if (!registered){ registered = 1; nfsu2_register(HOST_KIND_INPUT, &g_mail, sizeof g_mail); }
+    { const int mode = pu_pad_mode();
+      if (mode != g_mail.pad_mode){ __atomic_store_n(&g_mail.pad_mode, mode, __ATOMIC_RELEASE); fprintf(stderr, "[pad] mode %d\n", mode); } }
     static long s_moveframe = -1;
     const long frame = r_frames ? r_frames() : 0;
     for (;;){

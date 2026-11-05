@@ -39,7 +39,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Hot pursuit (PUR1-14: `cop_ai`, `pursuit_rules`, `pursuit_radio`, `pursuit_fx`, `hot_pursuit_menu`) | later | about 6000 lines; self-contained hooks, data in the layer |
 | Car-car collision fix (PHYS1 `collision_probe.cpp`) | done | normal gate: patches/exe_v35.txt; remote car velocity: override 004980D0; the race and the native IP race run, the feel of a hit is not checked |
 | Music after focus loss (MUS1 `music_focus.cpp`) | check | byte patch; test by hiding the tab |
-| Gamepad (GP1, NE1) | next | Gamepad API instead of SDL3 |
+| Gamepad (GP1) | done | Gamepad API, standard mapping only: menus in `web/src/input.ts` (stick = cursor, A click, B/Start Esc, d-pad arrows, right stick wheel), race merged into the packet at 00413800, impact rumble from 0040F740; checked with a scripted pad (`browser_test.mjs --fakepad`), a real pad and the rumble are not |
 
 ## Network
 

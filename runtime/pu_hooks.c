@@ -28,8 +28,12 @@ static void stuck_check(CPU *c){
 }
 void pu_car_lod(CPU *c);
 void pu_car_lod_record(CPU *c);
+void pu_pad_input(void);
+void pu_pad_impact(CPU *c);
 int pu_hook(CPU *c, uint32_t ip){
     switch (ip){
+    case 0x413800u: pu_pad_input(); return 1;
+    case 0x40F740u: pu_pad_impact(c); return 1;
     case 0x43A3B0u: pu_car_lod(c); return 1;
     case 0x43C431u: pu_car_lod_record(c); return 1;
     case 0x40B6FDu: ST(0) *= hs_ai_speed_lookahead(); return 1;         /* fstp [ebp+8]: the slices the planner looks ahead */

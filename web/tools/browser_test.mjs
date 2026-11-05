@@ -26,6 +26,12 @@ const browser = prof ? await chromium.launchPersistentContext(prof, launch) : aw
 const page = await browser.newPage();
 page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') console.log('[console ' + m.type() + '] ' + m.text()); });
 page.on('pageerror', e => console.log('[pageerror] ' + e.message));
+if (process.argv.includes('--fakepad')) await page.addInitScript(() => {
+  const pad = { connected: true, mapping: 'standard', timestamp: 1, axes: [0, 0, 0, 0], buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })) };
+  window.__pad = pad;
+  navigator.getGamepads = () => [pad];
+  document.hasFocus = () => true;
+});
 await page.goto(`http://127.0.0.1:${PORT}${URLPATH}`);
 // --script <file>: lines of "wait <s>", "move <x> <y>", "click <x> <y>" (640x480 coordinates), "type <text>", "key <Name>",
 // "shot" (the next frame into out/web/shot_<frame>.rgba), "eval <js>"
@@ -42,6 +48,13 @@ if (script) {
     else if (c === 'key') await page.keyboard.press(a[0], { delay: 120 });
     else if (c === 'keydown') await page.keyboard.down(a[0]);
     else if (c === 'keyup') await page.keyboard.up(a[0]);
+    else if (c === 'pad') await page.evaluate(list => {   // pad lx=-1 ly=0 rx=0 ry=0, or a button number: b0=1 (A), b6=0.5 (left trigger)
+      for (const e of list) {
+        const [n, v] = e.split('='), f = +v, ax = ['lx', 'ly', 'rx', 'ry'].indexOf(n);
+        if (ax >= 0) window.__pad.axes[ax] = f;
+        else { const b = window.__pad.buttons[+n.slice(1)]; b.value = f; b.pressed = f > 0; }
+      }
+    }, a);
     else if (c === 'shot') await page.evaluate('stats.shotNext = true');
     else if (c === 'eval') console.log('[eval] ' + line.trim().slice(5) + ' => ' + JSON.stringify(await page.evaluate(a.join(' '))));
     console.log('[script] ' + line.trim());

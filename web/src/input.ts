@@ -1,6 +1,7 @@
 // nfs5-web WEB3: keyboard and mouse into the mailbox of runtime/web/input_web.c.
 // Layout (bytes): magic 0, msg_head 4, msg_tail 8, key_head 12, key_tail 16, mx 20, my 24, msgs 28 (256 * 12),
-// keys 3100 (256 * 16), dik 7196, vk 7452.
+// keys 3100 (256 * 16), dik 7196, vk 7452, then the pad: on 7708, buttons 7712, lx, rt, lt (floats) 7716; mode 7728 (from the
+// game: 0 frontend, 1 race menu, 2 driving), rumble seq 7732, low, high (floats) 7736, ms 7744.
 const WM = { KEYDOWN: 0x100, KEYUP: 0x101, CHAR: 0x102, SYSKEYDOWN: 0x104, SYSKEYUP: 0x105, MOVE: 0x200, WHEEL: 0x20A };
 // KeyboardEvent.code -> [DirectInput code / scan code (0x80 = extended), Windows virtual key]
 const K: Record<string, [number, number]> = {
@@ -67,10 +68,12 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   window.addEventListener('blur', () => {
     for (let i = 0; i < 256; i++) { if (dik[i]) { keyEvent(i, false); dik[i] = 0; } vk[i] = 0; }
   });
+  let cursorX = 0.5, cursorY = 0.5;
   const pos = (e: MouseEvent) => {
     const r = el.getBoundingClientRect();
     const x = Math.max(0, Math.min(65535, Math.floor((e.clientX - r.left) / r.width * 65536)));
     const y = Math.max(0, Math.min(65535, Math.floor((e.clientY - r.top) / r.height * 65536)));
+    cursorX = x / 65536; cursorY = y / 65536;
     Atomics.store(i32, 5, x); Atomics.store(i32, 6, y);
     return (x | y << 16) >>> 0;
   };
@@ -82,4 +85,96 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   window.addEventListener('mouseup', e => msg(btn(e.button, false), wParam(e), pos(e)));
   el.addEventListener('contextmenu', e => e.preventDefault());
   el.addEventListener('wheel', e => { e.preventDefault(); msg(WM.WHEEL, ((e.deltaY > 0 ? -120 : 120) << 16) >>> 0, pos(e)); }, { passive: false });
+
+  // ---- The pad (PC wrapper enhanced/subsystems/gamepad). Only pads with the standard mapping: wheels keep to their own. In menus the
+  // left stick is the cursor, A clicks, B and Start are Escape, the d-pad the arrows, the right stick the wheel. While driving Start is
+  // Escape and the rest goes to the game's packet (pu_pad_input in runtime/pu_ext.c).
+  const f32 = new Float32Array(sab, ptr, 4096 / 4 + 2048);
+  const PAD_ON = 7708 >> 2, PAD_BUTTONS = PAD_ON + 1, PAD_LX = PAD_ON + 2, PAD_RT = PAD_ON + 3, PAD_LT = PAD_ON + 4, PAD_MODE = PAD_ON + 5, RUMBLE_SEQ = PAD_ON + 6;
+  const B = { A: 0, B: 1, LT: 6, RT: 7, START: 9, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 };
+  const REPEAT_DELAY = 400, REPEAT_PERIOD = 80, CURSOR_SPEED = 1.2, CURSOR_CURVE = 1.8, WHEEL_NOTCHES = 8, STICK_DEAD = 0.10, TRIGGER_DEAD = 0.05;
+  const press = (code: string, down: boolean, repeat = false) =>
+    key({ code, key: '', altKey: false, ctrlKey: false, repeat, preventDefault() { } } as unknown as KeyboardEvent, down);
+  const padKeys: Record<string, { down: boolean, next: number }> = {};
+  const setKey = (code: string, down: boolean, now: number) => {
+    const st = padKeys[code] ??= { down: false, next: 0 };
+    if (down === st.down) {
+      if (down && code !== 'Escape' && now >= st.next) { press(code, true, true); st.next = now + REPEAT_PERIOD; }   // Escape would close the page it opened
+      return;
+    }
+    press(code, down);
+    st.down = down; st.next = now + REPEAT_DELAY;
+  };
+  const cursorParam = () => (Math.floor(cursorX * 65536) | Math.floor(cursorY * 65536) << 16) >>> 0;
+  let mode = -1, latched = 0, padMouse = false, wheelRest = 0, lastTime = 0, rumbleSeen = 0, wasOn = false;
+  const setMouse = (down: boolean) => {
+    if (down === padMouse) return;
+    msg(down ? 0x201 : 0x202, down ? 1 : 0, cursorParam());
+    padMouse = down;
+  };
+  const releaseAll = (now: number) => {
+    for (const code in padKeys) setKey(code, false, now);
+    setMouse(false);
+  };
+  const deadStick = (x: number, y: number) => {
+    const m = Math.hypot(x, y);
+    if (m <= STICK_DEAD) return [0, 0];
+    const k = Math.min(1, (m - STICK_DEAD) / (1 - STICK_DEAD)) / m;
+    return [x * k, y * k];
+  };
+  const deadTrigger = (v: number) => v <= TRIGGER_DEAD ? 0 : Math.min(1, (v - TRIGGER_DEAD) / (1 - TRIGGER_DEAD));
+  const padTick = (now: number) => {
+    requestAnimationFrame(padTick);
+    const seconds = Math.min(0.1, (now - lastTime) / 1000);
+    lastTime = now;
+    let pad: Gamepad | null = null;
+    if (navigator.getGamepads && document.hasFocus())
+      for (const p of navigator.getGamepads()) if (p && p.connected && p.mapping === 'standard' && (!pad || p.timestamp > pad.timestamp)) pad = p;
+    if (!pad) {
+      if (wasOn) { Atomics.store(i32, PAD_ON, 0); releaseAll(now); wasOn = false; }
+      return;
+    }
+    wasOn = true;
+    let bits = 0;
+    pad.buttons.forEach((b, i) => { if (b.pressed && i < 32) bits |= 1 << i; });
+    const gameMode = Atomics.load(i32, PAD_MODE);
+    if (gameMode !== mode) { latched = bits; releaseAll(now); mode = gameMode; }   // A that clicked Continue is not the hand brake
+    latched &= bits;
+    const held = bits & ~latched;
+    const is = (b: number) => (held & 1 << b) !== 0;
+    const menu = mode !== 2;
+    const [lx, ly] = deadStick(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
+    u32[PAD_BUTTONS] = (held & ~(1 << B.START)) >>> 0;
+    f32[PAD_LX] = lx;
+    f32[PAD_RT] = is(B.RT) || (pad.buttons[B.RT]?.value ?? 0) > 0 ? deadTrigger(pad.buttons[B.RT]?.value ?? 0) : 0;
+    f32[PAD_LT] = is(B.LT) || (pad.buttons[B.LT]?.value ?? 0) > 0 ? deadTrigger(pad.buttons[B.LT]?.value ?? 0) : 0;
+    Atomics.store(i32, PAD_ON, 1);
+    setKey('Escape', is(B.START) || (menu && is(B.B)), now);
+    setKey('ArrowUp', menu && is(B.UP), now);
+    setKey('ArrowDown', menu && is(B.DOWN), now);
+    setKey('ArrowLeft', menu && is(B.LEFT), now);
+    setKey('ArrowRight', menu && is(B.RIGHT), now);
+    if (menu) {
+      const m = Math.min(1, Math.hypot(lx, ly));
+      if (m > 0) {
+        const speed = CURSOR_SPEED * Math.pow(m, CURSOR_CURVE) * seconds / Math.hypot(lx, ly);    // screen heights per second
+        cursorX = Math.max(0, Math.min(65535 / 65536, cursorX + lx * speed * 0.75));
+        cursorY = Math.max(0, Math.min(65535 / 65536, cursorY + ly * speed));
+        Atomics.store(i32, 5, Math.floor(cursorX * 65536)); Atomics.store(i32, 6, Math.floor(cursorY * 65536));
+        msg(WM.MOVE, padMouse ? 1 : 0, cursorParam());
+      }
+      setMouse(is(B.A));
+      const [, ry] = deadStick(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
+      wheelRest -= ry * WHEEL_NOTCHES * seconds;
+      const notches = Math.trunc(wheelRest);
+      if (notches) { wheelRest -= notches; msg(WM.WHEEL, ((notches * 120) << 16) >>> 0, cursorParam()); }
+    } else { setMouse(false); wheelRest = 0; }
+    const seq = Atomics.load(i32, RUMBLE_SEQ);
+    if (seq !== rumbleSeen) {
+      rumbleSeen = seq;
+      const a = (pad as unknown as { vibrationActuator?: { playEffect(t: string, p: object): Promise<unknown> } }).vibrationActuator;
+      a?.playEffect('dual-rumble', { startDelay: 0, duration: i32[PAD_ON + 9], strongMagnitude: Math.min(1, f32[PAD_ON + 7]), weakMagnitude: Math.min(1, f32[PAD_ON + 8]) }).catch(() => { });
+    }
+  };
+  requestAnimationFrame(padTick);
 }

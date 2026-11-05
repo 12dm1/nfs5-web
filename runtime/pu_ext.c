@@ -2,6 +2,7 @@
  * The roster and the sound archives need no code here: the server's data layer gives them the stock names
  * (tools/make_mod_layer.py). Overrides of lifted functions: gen.sh OVERRIDE=... */
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -258,4 +259,102 @@ void sub_004980d0(CPU *restrict c){
     sub_004980d0_orig(c);
     if (ra) memcpy(g_mem + a + 0x33C, own_a, 12);
     if (rb) memcpy(g_mem + b + 0x33C, own_b, 12);
+}
+
+/* ---- GP1 (PC wrapper enhanced/subsystems/gamepad): the page reads the Gamepad API and works the menus itself (web/src/input.ts); it
+ * only needs to know which screen it is on. In a race the pad goes on top of what the bindings gave, just before the input frame's
+ * packet is handed over. The native build has no pad: host_pad_read stays NULL. ---- */
+int host_pad_read(uint32_t *buttons, float *lx, float *rt, float *lt) __attribute__((weak));
+void host_pad_rumble(float low, float high, int ms) __attribute__((weak));
+enum { PAD_A = 0, PAD_B = 1, PAD_X = 2, PAD_Y = 3, PAD_LB = 4, PAD_RB = 5 };    /* the standard mapping of the Gamepad API */
+static volatile int g_race_depth;
+void sub_004152e0(CPU *restrict c){      /* the race loop: its screens are the race's, what runs outside it is the frontend */
+    g_race_depth++;
+    sub_004152e0_orig(c);
+    g_race_depth--;
+}
+/* 0 frontend, 1 race menu (pause, results, options), 2 driving */
+int pu_pad_mode(void){
+    if (g_race_depth <= 0) return 0;
+    if (MR32(0x00606AA4u) != 0 || MR32(0x00606A90u) != 0) return 1;
+    const uint32_t pages = MR32(0x0060C9C4u);
+    if (pages){
+        const int32_t n = ((int32_t)MR32(pages + 4) - (int32_t)MR32(pages)) >> 3;
+        if (n > 0 && n < 64) return 1;
+    }
+    return 2;
+}
+static uint32_t player_car(void){
+    const int player = (int)MR32(0x0065741Cu);
+    return player >= 0 && player < 16 ? MR32(0x005E8E2Cu + 4u * (uint32_t)player) : 0;
+}
+static int guest_readable(uint32_t a){
+#ifdef __wasm__
+    return a >= 0x10000u && a < (uint32_t)__builtin_wasm_memory_size(0) * 65536u - 64u;     /* a race that loads holds garbage there */
+#else
+    return a >= 0x10000u;
+#endif
+}
+/* The stick is direct, while keyboard steering eases toward full lock: car+558 is the driver record, +14 "digital steering". Not in
+ * network races, the other side keeps its own copy of the flag. */
+static uint32_t g_steer_driver; static int g_steer_digital, g_steer_direct;
+static void pad_direct_steer(int direct){
+    const uint32_t car = player_car();
+    const uint32_t driver = car && guest_readable(car + 0x558) ? MR32(car + 0x558) : 0;
+    if (driver != g_steer_driver){
+        g_steer_driver = 0; g_steer_direct = 0;
+        if (!direct || !guest_readable(driver)) return;
+        g_steer_driver = driver;
+        g_steer_digital = (int)MR32(driver + 0x14);
+    }
+    if (!driver || direct == g_steer_direct || !g_steer_digital) return;
+    MR32(driver + 0x14) = direct ? 0 : (uint32_t)g_steer_digital;
+    g_steer_direct = direct;
+}
+static int clampi(int v, int lo, int hi){ return v < lo ? lo : v > hi ? hi : v; }
+/* 00413800 (entry): packet of player 0, byte 0: bit 0 hand brake, bits 3..7 event (2 up, 3 down, 5 reset); 1 steer -63..63; 2, 3 throttle, brake 0..126 */
+void pu_pad_input(void){
+    static uint32_t prev; static int pending; static int logged;
+    uint32_t b = 0; float lx = 0, rt = 0, lt = 0;
+    const int pad = host_pad_read && host_pad_read(&b, &lx, &rt, &lt);
+    if (!pad){ if (host_pad_read && g_steer_direct) pad_direct_steer(0); return; }
+    if (pu_pad_mode() != 2){ pad_direct_steer(0); prev = b; pending = 0; return; }
+    uint8_t *packet = g_mem + 0x005E99DCu;
+    const uint32_t rising = b & ~prev;
+    const int key_steer = (int8_t)packet[1], pad_steer = clampi((int)lroundf(lx * 63.0f), -63, 63);
+    const int pad_steers = abs(pad_steer) > abs(key_steer);
+    if (pad_steers) packet[1] = (uint8_t)(int8_t)pad_steer;
+    const int th = clampi((int)lroundf(rt * 126.0f), 0, 126), br = clampi((int)lroundf(lt * 126.0f), 0, 126);
+    if (th > packet[2]) packet[2] = (uint8_t)th;
+    if (br > packet[3]) packet[3] = (uint8_t)br;
+    if (b & 1u << PAD_A) packet[0] |= 1;
+    /* one event per input frame, a pad event waits while the keyboard has one */
+    if (rising & 1u << PAD_RB) pending = 2;
+    else if (rising & 1u << PAD_LB) pending = 3;
+    else if (rising & 1u << PAD_Y) pending = 5;
+    if (pending && !(packet[0] >> 3)){ packet[0] = (uint8_t)((packet[0] & 7) | pending << 3); pending = 0; }
+    /* look behind is held, the camera changes on the rising edge the game finds itself */
+    const uint32_t bits = 0x005E954Cu + 4u * (MR32(0x005E99B8u) & 31u);
+    if (b & 1u << PAD_X) MR32(bits) |= 1u << 19;
+    if (b & 1u << PAD_B) MR32(bits) |= 1u << 23;
+    prev = b;
+    if (pad_steers) pad_direct_steer(MR32(0x005E99F4u) != 2);
+    else if (key_steer) pad_direct_steer(0);
+    if (!logged && (pad_steers || th || br)){ logged = 1; fprintf(stderr, "[pad] the pad drives: packet %02X %02X %02X %02X\n", packet[0], packet[1], packet[2], packet[3]); }
+}
+/* 0040F740 (entry), the car's tick: it turns car+430 (magnitude) and car+438 (high word: 3 ground, 4 wall, 5 car) into a sound over 1.5
+ * and clears them. Magnitudes of full strength from the impacts of 129 traced races. */
+void pu_pad_impact(CPU *c){
+    if (!host_pad_rumble) return;
+    const uint32_t car = MR32(c->esp + 4);
+    if (!car || (MR32(car + 0x52C) & 0x400u) || car != player_car()) return;
+    float mag; memcpy(&mag, g_mem + car + 0x430, 4);
+    if (!(mag > 1.5f)) return;
+    const uint32_t group = MR32(car + 0x438) >> 16;
+    const float full = group == 3 ? 18.0f : group == 4 ? 50.0f : group == 5 ? 25.0f : 30.0f;
+    const float low = group == 5 ? 0.8f : 1.0f, high = group == 3 ? 0.3f : group == 4 ? 0.6f : group == 5 ? 0.8f : 0.5f;
+    float range = (mag - 1.5f) / (full - 1.5f);
+    range = range < 0 ? 0 : range > 1 ? 1 : range;
+    const float strength = 0.12f + 0.88f * powf(range, 0.6f);
+    host_pad_rumble(strength * low, strength * high, 90 + (int)(210.0f * strength));
 }
