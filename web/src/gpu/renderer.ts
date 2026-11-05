@@ -89,9 +89,22 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   ctx.configure({ device, format: canvasFormat, alphaMode: 'opaque' });
 
   const W = canvas.width, H = canvas.height;
+  // AA1 (PC dx11z [display] msaa): the scene draws into a 4x multisampled colour + depth pair, resolved into colorTex before a
+  // present, a shot or a pixel read. ?msaa=1 turns it off. The PC's alpha-to-coverage ended as "discard below the game's
+  // threshold, survivors opaque", which the shader's hard cutout already does, so there is no coverage from alpha here.
+  const msaaParam = Number(new URLSearchParams(location.search).get('msaa') ?? 4);
+  const SAMPLES = msaaParam === 1 ? 1 : 4;
   const colorTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
-  const depthTex = device.createTexture({ size: [W, H], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  const msTex = SAMPLES > 1 ? device.createTexture({ size: [W, H], format: 'rgba8unorm', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
+  const depthTex = device.createTexture({ size: [W, H], format: 'depth24plus', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
   const colorView = colorTex.createView(), depthView = depthTex.createView();
+  const drawView = msTex ? msTex.createView() : colorView;
+  log(`[gpu] MSAA x${SAMPLES}`);
+  // the multisampled target into colorTex: an empty pass whose end resolves
+  const resolve = (enc: GPUCommandEncoder) => {
+    if (!msTex) return;
+    enc.beginRenderPass({ colorAttachments: [{ view: drawView, resolveTarget: colorView, loadOp: 'load', storeOp: 'store' }] }).end();
+  };
 
   const module = device.createShaderModule({ code: SHADER });
   const blitModule = device.createShaderModule({ code: BLIT });
@@ -119,6 +132,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
       fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
       primitive: { topology: TOPO[topo], cullMode: topo === 0 ? CULL[cull] : 'none', frontFace: 'cw' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: !!zwrite, depthCompare: DEPTH[zcmp] },
+      multisample: { count: SAMPLES },
     });
     pipes.set(key, p);
     return p;
@@ -195,7 +209,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     const begin = () => {
       if (pass) return pass;
       pass = enc.beginRenderPass({
-        colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
+        colorAttachments: [{ view: drawView, loadOp: 'load', storeOp: 'store' }],
         depthStencilAttachment: { view: depthView, depthLoadOp: 'load', depthStoreOp: 'store' },
       });
       pass.setVertexBuffer(0, vbuf);
@@ -255,6 +269,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     if (ubos) queue.writeBuffer(ubo, 0, uboData, 0, ubos * UBO_ALIGN);
     (pass as GPURenderPassEncoder | null)?.end();
     stats.segments++; stats.draws += draws; stats.lastDraws = draws; stats.lastVerts = verts;
+    if (present || read) resolve(enc);
     if (present) {
       const frame = ++stats.frames;
       const view = ctx.getCurrentTexture().createView();

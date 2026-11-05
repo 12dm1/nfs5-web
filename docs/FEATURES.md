@@ -28,7 +28,8 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Draw distance, distant wheels (NE1 `detail`) | done | x2 and at least 20000 as on the PC: override 0044F1A0, far plane, object limits and wheel table in patches/exe_v35.txt; aquatica 2000 draws a frame instead of 450, 70 fps instead of 80 in headless Chrome |
 | Text quality, texture detail, frame interpolation (NE1 `text`, `detail`, `framerate`) | later | shader, hooks |
 | Car reflection cube (R1, R2, `car_reflection.cpp`), car paint (CAR1-2, CP1, `car_paint.cpp`, `car_shading.cpp`), materials (MAT, `materials.cpp`) | later | a large port: render passes into cube faces, WGSL version of the material shader |
-| Motion blur (MB1-2), MSAA + A2C (AA1), PBR road reflections (MAT14) | later | after the cube and materials |
+| MSAA (AA1) | done | 4x in `web/src/gpu/renderer.ts`, resolved before a present or a pixel read, `?msaa=1` turns it off; the PC A2C ended as the hard cutout the shader already has |
+| Motion blur (MB1-2), PBR road reflections (MAT14) | later | after the cube and materials |
 | Widescreen (P0-P7, `camera_hooks.cpp`, `scene_probe.cpp`) | later | camera patches; the canvas is 4:3 until then |
 
 ## Game
