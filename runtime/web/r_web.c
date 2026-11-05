@@ -48,14 +48,19 @@ static uint32_t g_nvtx, g_nup;
 typedef struct { float x, y, z, w, u, v; uint32_t color, specular; float rect[4]; } DV;
 typedef struct { float x, y, z, rhw; uint32_t color, specular; float u, v; } TV;
 
+/* PERFSTAT=1: every 5 s the game thread's frame: its own work, the waits for a free segment and for the page's present */
+static double g_pf_wait_seg, g_pf_wait_present, g_pf_last, g_pf_t0, g_pf_frame_max, g_pf_work_max; static int g_pf_n, g_pf_slow, g_pf_on = -1;
+static double pf_now(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 static void seg_acquire(void){
     static int next;
     Seg *s = &g_ring.seg[next];
     if (__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE)){
+        const double w0 = g_pf_on > 0 ? pf_now() : 0;
         guest_wait_begin();
         while (__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE))
             __builtin_wasm_memory_atomic_wait32((int32_t *)&s->ready, 1, 100000000LL);
         guest_wait_end();
+        if (g_pf_on > 0) g_pf_wait_seg += pf_now() - w0;
     }
     next = (next + 1) % SEGS;
     g_cur = s;
@@ -820,11 +825,34 @@ void r_pageflip(void){
     /* one frame queued at most: the page's display rate paces the game */
     int pub = __atomic_load_n(&g_ring.presents_pub, __ATOMIC_ACQUIRE);
     int done = __atomic_load_n(&g_ring.presents_done, __ATOMIC_ACQUIRE);
+    if (g_pf_on < 0){ const char *e = getenv("PERFSTAT"); g_pf_on = e && *e && *e != '0'; }
+    const double w0 = g_pf_on > 0 ? pf_now() : 0;
     if (pub - done > 1){
         guest_wait_begin();
         while (pub - (done = __atomic_load_n(&g_ring.presents_done, __ATOMIC_ACQUIRE)) > 1)
             __builtin_wasm_memory_atomic_wait32((int32_t *)&g_ring.presents_done, done, 100000000LL);
         guest_wait_end();
+    }
+    if (g_pf_on > 0){
+        const double t = pf_now(), wp = t - w0;
+        g_pf_wait_present += wp;
+        if (g_pf_last > 0){
+            const double frame = t - g_pf_last;
+            static double seg_before;
+            const double work = frame - wp - (g_pf_wait_seg - seg_before);
+            seg_before = g_pf_wait_seg;
+            if (frame > g_pf_frame_max) g_pf_frame_max = frame;
+            if (work > g_pf_work_max) g_pf_work_max = work;
+            if (frame > 25.0) g_pf_slow++;
+            g_pf_n++;
+        } else g_pf_t0 = t;
+        g_pf_last = t;
+        if (t - g_pf_t0 >= 5000.0 && g_pf_n){
+            const double span = t - g_pf_t0;
+            fprintf(stderr, "[perf game] %.1f fps, per frame: work %.2f ms (max %.1f), wait segment %.2f ms, wait present %.2f ms; longest frame %.1f ms, frames over 25 ms %d\n",
+                    g_pf_n * 1000.0 / span, (span - g_pf_wait_seg - g_pf_wait_present) / g_pf_n, g_pf_work_max, g_pf_wait_seg / g_pf_n, g_pf_wait_present / g_pf_n, g_pf_frame_max, g_pf_slow);
+            g_pf_t0 = t; g_pf_n = 0; g_pf_slow = 0; g_pf_wait_seg = g_pf_wait_present = 0; g_pf_frame_max = g_pf_work_max = 0;
+        }
     }
 }
 long r_frames(void){ return g_frames; }

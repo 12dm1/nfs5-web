@@ -72,7 +72,7 @@ const ADDR: GPUAddressMode[] = ['clamp-to-edge', 'repeat', 'mirror-repeat'];
 const CULL: GPUCullMode[] = ['none', 'back', 'front'];
 const TOPO: GPUPrimitiveTopology[] = ['triangle-list', 'line-list', 'point-list'];
 
-export interface RendererStats { frames: number; segments: number; draws: number; lastDraws: number; lastVerts: number; textures: number; shots: Map<number, ArrayBuffer>; shotNext: boolean; shotVideo: boolean; }
+export interface RendererStats { jsSum: number; jsMax: number; gapMax: number; slow: number; submitMax: number; frames: number; segments: number; draws: number; lastDraws: number; lastVerts: number; textures: number; shots: Map<number, ArrayBuffer>; shotNext: boolean; shotVideo: boolean; }
 
 export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, canvas: HTMLCanvasElement, log: (s: string) => void, wantShots: number[] = []) {
   if (!navigator.gpu) throw new Error('this browser has no WebGPU');
@@ -187,7 +187,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const ring = new Int32Array(sab, ptr, 6 + 3 * 8);
   const segCount = ring[1];
   let nextSeg = 0;
-  const stats: RendererStats = { frames: 0, segments: 0, draws: 0, lastDraws: 0, lastVerts: 0, textures: 0, shots: new Map(), shotNext: false, shotVideo: new URLSearchParams(location.search).has('shotvideo') };
+  const stats: RendererStats = { jsSum: 0, jsMax: 0, gapMax: 0, slow: 0, submitMax: 0, frames: 0, segments: 0, draws: 0, lastDraws: 0, lastVerts: 0, textures: 0, shots: new Map(), shotNext: false, shotVideo: new URLSearchParams(location.search).has('shotvideo') };
   const shotSet = new Set(wantShots);
   let lw = 640, lh = 480;
   // the element takes the shape of the game's mode; the canvas behind it keeps its size, so a 4:3 menu fills the wide canvas and
@@ -196,7 +196,9 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   setShape(lw, lh);
 
   // a segment: its uploads first, then its draws in one pass
+  let frameJs = 0, lastPresentAt = 0;
   const runSegment = (s: number) => {
+    const t0 = performance.now();
     const b = 6 + s * 8;
     const words = ring[b + 1], vtxBytes = ring[b + 2], cmdPtr = ring[b + 5] >>> 0, vtxPtr = ring[b + 6] >>> 0, upPtr = ring[b + 7] >>> 0;
     const buffer = memory.buffer as unknown as SharedArrayBuffer;
@@ -315,7 +317,16 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
         readBack = () => { void rb.mapAsync(GPUMapMode.READ).then(() => { finish(new Uint8Array(rb.getMappedRange()), row); rb.destroy(); }, () => { finish(null, 0); rb.destroy(); }); };
       }
     }
+    const ts = performance.now();
     queue.submit([enc.finish()]);
+    const te = performance.now();
+    if (te - ts > stats.submitMax) stats.submitMax = te - ts;
+    frameJs += te - t0;
+    if (present) {
+      stats.jsSum += frameJs; if (frameJs > stats.jsMax) stats.jsMax = frameJs; frameJs = 0;
+      if (lastPresentAt) { const gap = te - lastPresentAt; if (gap > stats.gapMax) stats.gapMax = gap; if (gap > 25) stats.slow++; }
+      lastPresentAt = te;
+    }
     readBack?.();
     for (const t of toFree) t.destroy();
     stats.textures = textures.size;

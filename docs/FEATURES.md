@@ -30,6 +30,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Car reflection cube (R1, R2, `car_reflection.cpp`), car paint (CAR1-2, CP1, `car_paint.cpp`, `car_shading.cpp`), materials (MAT, `materials.cpp`) | later | a large port: render passes into cube faces, WGSL version of the material shader |
 | MSAA (AA1) | done | 4x in `web/src/gpu/renderer.ts`, resolved before a present or a pixel read, `?msaa=1` turns it off; the PC A2C ended as the hard cutout the shader already has |
 | Motion blur (MB1-2), PBR road reflections (MAT14) | later | after the cube and materials |
+| Exact game timer (`enhanced` qpc_timer, SilentPatch) | done | overrides of the timer thread and the one-shot callback in `runtime/pu_ext.c`: 128 Hz by the clock, no lost ticks, a steady 64 simulation steps a second; the race loop waits for the tick instead of spinning; `PERFSTAT=1` logs the frame and loop timings |
 | Widescreen (P0-P7, `camera_hooks.cpp`) | done | Hor+ camera, tree footprint and sky extent hooks in `runtime/pu_ext.c` (`pu_cam_*`); the race mode is 960 lines as wide as the window (`NFS5_RACE_W` from `web/src/main.ts`, 4:3 to 32:9, `?ws=0` keeps 4:3); the menus stay 4:3, the canvas element takes the mode's shape |
 
 ## Game

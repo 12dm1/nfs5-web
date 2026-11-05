@@ -83,6 +83,8 @@ async function main() {
   }, 200);
   if (toServer) { let last = 0; setInterval(() => {
     log(`[fps] ${(stats.frames - last) / 5} frames/s, frame ${stats.frames}, last segment ${stats.lastDraws} draws ${stats.lastVerts} verts, ${stats.textures} textures`);
+    if (stats.frames > last) log(`[perf page] js per frame ${(stats.jsSum / (stats.frames - last)).toFixed(2)} ms (max ${stats.jsMax.toFixed(1)}), longest submit ${stats.submitMax.toFixed(1)} ms, longest gap between presents ${stats.gapMax.toFixed(1)} ms, gaps over 25 ms ${stats.slow}`);
+    stats.jsSum = 0; stats.jsMax = 0; stats.gapMax = 0; stats.slow = 0; stats.submitMax = 0;
     last = stats.frames;
   }, 5000); }
 }

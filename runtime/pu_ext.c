@@ -3,6 +3,8 @@
  * (tools/make_mod_layer.py). Overrides of lifted functions: gen.sh OVERRIDE=... */
 #include <ctype.h>
 #include <math.h>
+#include <time.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -674,3 +676,123 @@ void pu_cam_sky_before(CPU *c){
     if (half > 0.0f) cam_view_swap(view, half);
 }
 void pu_cam_sky_after(CPU *c){ (void)c; cam_view_restore(); }
+
+/* PERFSTAT=1: the race loop (004152E0) at 00415C6E, after its simulation ticks: passes, ticks and the frames drawn per 5 s */
+long r_frames(void);
+static void race_wait_tick(void);
+void guest_wait_begin(void); void guest_wait_end(void);
+/* The race loop spins between the simulation's 60 ticks a second (3 million passes a second, the timer's tick 00606A9C comes
+ * from the clock, read by the loop itself): a pass that simulated nothing lets the guest lock go for a short sleep, so the
+ * timer and the other threads get the lock at once and the core is free. ?env=RACE_SPIN=1 keeps the game's own spin. */
+static double g_idle_sleep_ms, g_idle_lock_ms; static int g_idle_sleeps;
+static void race_idle(uint32_t tick){
+    static int on = -1; static uint32_t last;
+    if (on < 0){ const char *e = getenv("RACE_SPIN"); on = !(e && *e && *e != '0'); }
+    const int idle = tick == last;
+    last = tick;
+    if (!on || !idle) return;
+    struct timespec a0, a1, a2;
+    clock_gettime(CLOCK_MONOTONIC, &a0);
+    guest_wait_begin();
+    race_wait_tick(); g_idle_sleeps++;
+    clock_gettime(CLOCK_MONOTONIC, &a1);
+    guest_wait_end();
+    clock_gettime(CLOCK_MONOTONIC, &a2);
+    g_idle_sleep_ms += (a1.tv_sec - a0.tv_sec) * 1e3 + (a1.tv_nsec - a0.tv_nsec) / 1e6;
+    g_idle_lock_ms += (a2.tv_sec - a1.tv_sec) * 1e3 + (a2.tv_nsec - a1.tv_nsec) / 1e6;
+}
+void pu_loop_stat(CPU *c){
+    (void)c;
+    race_idle(MR32(0x00606AA0u));
+    static int on = -1; static double t0; static long f0; static uint32_t tick0; static int passes, idle, maxticks; static uint32_t last_tick;
+    if (on < 0){ const char *e = getenv("PERFSTAT"); on = e && *e && *e != '0'; }
+    if (!on) return;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    const double t = ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+    const uint32_t tick = MR32(0x00606AA0u);
+    passes++;
+    if (tick == last_tick) idle++;
+    else if ((int)(tick - last_tick) > maxticks && last_tick) maxticks = (int)(tick - last_tick);
+    last_tick = tick;
+    if (!t0){ t0 = t; f0 = r_frames(); tick0 = tick; passes = idle = maxticks = 0; return; }
+    if (t - t0 >= 5000.0){
+        fprintf(stderr, "[perf loop] per s: %.0f passes (%.0f without a tick), %.1f ticks, %.1f frames; most ticks in one pass %d; idle: %d sleeps, %.2f ms each, %.0f ms slept, %.0f ms getting the lock back, in 1 s\n",
+                passes * 1000.0 / (t - t0), idle * 1000.0 / (t - t0), (tick - tick0) * 1000.0 / (t - t0), (r_frames() - f0) * 1000.0 / (t - t0), maxticks, g_idle_sleeps, g_idle_sleeps ? g_idle_sleep_ms / g_idle_sleeps : 0.0, g_idle_sleep_ms * 1000.0 / (t - t0), g_idle_lock_ms * 1000.0 / (t - t0));
+        g_idle_sleep_ms = g_idle_lock_ms = 0; g_idle_sleeps = 0;
+        t0 = t; f0 = r_frames(); tick0 = tick; passes = idle = maxticks = 0;
+    }
+}
+
+/* ---- The game's timer on an exact schedule (PC wrapper enhanced qpc_timer.cpp, SilentPatch). The game re-arms a one-shot
+ * timeSetEvent (00564EB0) that signals an event; its timer thread (00565270) runs one tick per wake-up. Two signals during
+ * one wait for the guest lock make one tick: 60 instead of 64 simulation steps a second, unevenly. The thread proc here
+ * counts the ticks due by the clock and runs them all; the one-shot chain is off. ---- */
+#define TIMER_TICKS 0x006B7C7Cu
+#define TIMER_TICKS2 0x006B7C40u
+#define TIMER_PIT 0x006B7C44u
+#define TIMER_CALLBACKS 0x006B7C20u
+#define TIMER_PERIOD 0x006A5BF8u
+#define TIMER_RUNNING 0x006A5C0Cu
+#define TIMER_CATCH_UP 128
+static volatile int32_t g_tick_seq;
+static volatile uint32_t g_timer_gen;
+static uint64_t mono_us(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u; }
+void sub_00564eb0(CPU *restrict c){ POP32(c->eip); c->esp += 0x14; }
+/* the guest lock is free while it waits; the last 2.5 ms on the clock, a sleep's wake-up is that coarse in a page's worker */
+static void timer_wait_until(uint64_t due, uint32_t mine){
+    guest_wait_begin();
+    for (;;){
+        const uint64_t now = mono_us();
+        if (now >= due || g_timer_gen != mine) break;
+        if (due - now > 2500u) usleep((useconds_t)(due - now - 2500u));
+    }
+    guest_wait_end();
+}
+void sub_00565270(CPU *restrict c){
+    const uint32_t mine = __atomic_add_fetch(&g_timer_gen, 1, __ATOMIC_SEQ_CST);
+    /* TIMER_init publishes "running" after it created this thread */
+    for (const uint64_t t0 = mono_us(); !MR32(TIMER_RUNNING) && g_timer_gen == mine && mono_us() - t0 < 2000000u;){ guest_wait_begin(); usleep(1000); guest_wait_end(); }
+    const uint32_t period = MR32(TIMER_PERIOD);
+    const uint64_t hz = period ? (65536000u + period / 2u) / period : 100u;
+    fprintf(stderr, "[timer] exact schedule, %u Hz\n", (unsigned)hz);
+    uint64_t start = mono_us(), processed = 0, pit_reported = 0;
+    const uint64_t pit_start = start;
+    while (g_timer_gen == mine && MR32(TIMER_RUNNING)){
+        timer_wait_until(start + (processed + 1) * 1000000u / hz, mine);
+        if (g_timer_gen != mine || !MR32(TIMER_RUNNING)) break;
+        const uint64_t now = mono_us(), due = (now - start) * hz / 1000000u;
+        if (due <= processed) continue;
+        uint64_t pending = due - processed;
+        if (pending > TIMER_CATCH_UP){           /* a long hold of the lock: game time does not race ahead */
+            pending = TIMER_CATCH_UP;
+            start = now - (processed + pending) * 1000000u / hz;
+        }
+        for (uint64_t i = 0; i < pending; i++){
+            MR32(TIMER_TICKS) = MR32(TIMER_TICKS) + 1;
+            MR32(TIMER_TICKS2) = MR32(TIMER_TICKS2) + 1;
+            const uint64_t pit = ((now - pit_start) * 1193u / 1000u) >> 16;
+            if (pit != pit_reported){ MR32(TIMER_PIT) = MR32(TIMER_PIT) + (uint32_t)(pit - pit_reported); pit_reported = pit; }
+            for (uint32_t slot = 0; slot < 8; slot++){
+                const uint32_t fn = MR32(TIMER_CALLBACKS + slot * 4);
+                if (fn) guest_call(c, fn, 0, NULL, 0);
+            }
+            guest_call(c, 0x0053C270u, 0, NULL, 0);     /* the frame event the one-shot callback pulsed */
+        }
+        processed += pending;
+        __atomic_add_fetch(&g_tick_seq, 1, __ATOMIC_SEQ_CST);
+#ifdef __wasm__
+        __builtin_wasm_memory_atomic_notify((int32_t *)&g_tick_seq, 0xFFFFFFFFu);
+#endif
+    }
+    if (g_timer_gen == mine) MR32(0x005DEB48u) = 0;
+    c->eax = 0;
+    POP32(c->eip);
+}
+/* a pass of the race loop without a simulation step sleeps until the next tick */
+static void race_wait_tick(void){
+#ifdef __wasm__
+    __builtin_wasm_memory_atomic_wait32((int32_t *)&g_tick_seq, __atomic_load_n(&g_tick_seq, __ATOMIC_SEQ_CST), 4000000LL);
+#else
+    usleep(1000);
+#endif
+}
