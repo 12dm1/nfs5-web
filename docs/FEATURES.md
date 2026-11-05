@@ -26,7 +26,9 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Car LOD: LOD1 in races (L1, L3 `car_lod.cpp`) | done | hooks 0043A3B0, 0043C431, override 0043E120, size reference patch; the look is not checked |
 | HUD scaling (NE1 `hud_scaling`) | done | 61 size reads patched to a virtual size in patches/exe_v35.txt, mode hooks, layout override 0041E170, font scale around the text loop; the digital-gauge option is left out |
 | Draw distance, distant wheels (NE1 `detail`) | done | x2 and at least 20000 as on the PC: override 0044F1A0, far plane, object limits and wheel table in patches/exe_v35.txt; aquatica 2000 draws a frame instead of 450, 70 fps instead of 80 in headless Chrome |
-| Text quality, texture detail, frame interpolation (NE1 `text`, `detail`, `framerate`) | later | shader, hooks |
+| Text quality, texture detail (NE1 `text`, `detail`) | later | shader, hooks |
+| Frame interpolation (NE1 `framerate`) | done | runtime/pu_interp.c: the display's rate instead of 64 frames, blended cars and cameras, the simulation never sees them; 100-143 fps in headless Chrome, camera motion unevenness 1.5-3 % instead of 10 %; `?env=INTERP=0` off |
+| CPU speed (compat `fast_cpu_speed`) | done | both measuring functions return a constant, patches/exe_v35.txt |
 | Car reflection cube (R1, R2, `car_reflection.cpp`), car paint (CAR1-2, CP1, `car_paint.cpp`, `car_shading.cpp`), materials (MAT, `materials.cpp`) | later | a large port: render passes into cube faces, WGSL version of the material shader |
 | MSAA (AA1) | done | 4x in `web/src/gpu/renderer.ts`, resolved before a present or a pixel read, `?msaa=1` turns it off; the PC A2C ended as the hard cutout the shader already has |
 | Motion blur (MB1-2), PBR road reflections (MAT14) | later | after the cube and materials |

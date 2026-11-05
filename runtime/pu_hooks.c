@@ -44,9 +44,11 @@ void pu_cam_footprint(CPU *c);
 void pu_cam_sky_before(CPU *c);
 void pu_cam_sky_after(CPU *c);
 void pu_loop_stat(CPU *c);
+void pu_interp_restore(void);
 int pu_hook(CPU *c, uint32_t ip){
     switch (ip){
     case 0x415C6Eu: pu_loop_stat(c); return 1;
+    case 0x415C7Fu: pu_interp_restore(); return 1;
     case 0x46700Cu: case 0x467162u: pu_cam_before(c); return 1;
     case 0x467011u: case 0x467167u: pu_cam_after(c); return 1;
     case 0x539133u: pu_cam_replay(c); return 1;

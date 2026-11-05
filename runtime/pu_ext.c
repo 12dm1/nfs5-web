@@ -703,7 +703,12 @@ static void race_idle(uint32_t tick){
 }
 void pu_loop_stat(CPU *c){
     (void)c;
-    race_idle(MR32(0x00606AA0u));
+    {
+        int pu_interp_check(void);
+        const int drawing = pu_interp_check();
+        /* a pass that draws is paced by the display in r_pageflip */
+        if (!drawing) race_idle(MR32(0x00606AA0u));
+    }
     static int on = -1; static double t0; static long f0; static uint32_t tick0; static int passes, idle, maxticks; static uint32_t last_tick;
     if (on < 0){ const char *e = getenv("PERFSTAT"); on = e && *e && *e != '0'; }
     if (!on) return;
@@ -721,6 +726,13 @@ void pu_loop_stat(CPU *c){
         g_idle_sleep_ms = g_idle_lock_ms = 0; g_idle_sleeps = 0;
         t0 = t; f0 = r_frames(); tick0 = tick; passes = idle = maxticks = 0;
     }
+}
+
+/* 00414FF0, one simulation step of the race loop: render interpolation records the state it left */
+void pu_interp_step(void);
+void sub_00414ff0(CPU *restrict c){
+    sub_00414ff0_orig(c);
+    pu_interp_step();
 }
 
 /* ---- The game's timer on an exact schedule (PC wrapper enhanced qpc_timer.cpp, SilentPatch). The game re-arms a one-shot

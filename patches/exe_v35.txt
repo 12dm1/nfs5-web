@@ -21,6 +21,7 @@
 005560A5  8BC18D0480  B80000007F        # return 7F000000h instead of value*5 (presumably the CPU clock measurement that overflows on fast CPUs)
 
 # nfs5-web's own (not in the community set above)
+005560B0  558BEC83EC14  B80046C323C3    # the same for its other branch (005DEB24 = 0)
 00555FA0  558BEC83EC38  B80046C323C3    # PACODE's CPU speed measure (5 x 0.2 s busy wait, ~7 times at start: 7 s): mov eax,600000000 ; ret = its result at the runtime's fixed 3.0 GHz rdtsc
 0043A30B  0000F042    00007042          # L1: car LOD size reference 120 -> 60, every tier holds to twice the distance (PC car_lod_distance=2)
 00497297  0F85          90E9              # PHYS1: car-car normal chosen by geometry, not by relative speed > 15 m/s (glancing hit = the hook; PC collision_normal_gate=0)
