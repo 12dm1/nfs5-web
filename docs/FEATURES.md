@@ -34,7 +34,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Feature | Verdict | How |
 |---|---|---|
 | Career additions, club events, bonus garage (NP1 `new_profile.cpp`, race mode part done) | later | hooks + layout files |
-| Similar opponents in Quick Race (OS1 `opponent_similar.cpp`) | later | |
+| Similar opponents in Quick Race (OS1 `opponent_similar.cpp`) | done | overrides of the accessor, `runtime/ext/opp_similar.cpp`, counts in patches/exe_v35.txt; the police part comes with the pursuit |
 | Eight racers, cop cars in the list (`race_cars8.cpp`, `cop_cars.cpp`) | later | with the pursuit port |
 | Hot pursuit (PUR1-14: `cop_ai`, `pursuit_rules`, `pursuit_radio`, `pursuit_fx`, `hot_pursuit_menu`) | later | about 6000 lines; self-contained hooks, data in the layer |
 | Car-car collision fix (PHYS1 `collision_probe.cpp`) | done | normal gate: patches/exe_v35.txt; remote car velocity: override 004980D0; the race and the native IP race run, the feel of a hit is not checked |

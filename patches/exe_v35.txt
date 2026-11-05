@@ -25,3 +25,7 @@
 0043A30B  0000F042    00007042          # L1: car LOD size reference 120 -> 60, every tier holds to twice the distance (PC car_lod_distance=2)
 00497297  0F85          90E9              # PHYS1: car-car normal chosen by geometry, not by relative speed > 15 m/s (glancing hit = the hook; PC collision_normal_gate=0)
 00497772  0F85          90E9              # PHYS1: the same for the other car of the pair
+004F4E60  05            08                # OS1: the opponent accessor's constructor, push 5 modes -> 8
+004F5886  05            08                # OS1: the row height helper's limit
+004F58AA  05            08                # OS1: the row draw limit
+004F5871  46            70                # OS1: the dropdown's height, 8 rows of 14 px

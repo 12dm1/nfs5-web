@@ -11,13 +11,15 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 ? process.argv[i + 1] : d; };
 const SECONDS = +arg('seconds', 60), PORT = +arg('port', 8077), URLPATH = arg('url', '/?log=1');
 const eval_ = arg('eval', '');
+// --origin-port <n>: the page thinks it is on that port, so a profile's saves from there show up while the server is on --port
+const ORIGIN = +arg('origin-port', PORT);
 
 const srv = spawn(process.execPath, [path.join(HERE, '../server.mjs'), '--port', String(PORT)], { stdio: ['ignore', 'inherit', 'inherit'] });
 await new Promise(r => setTimeout(r, 800));
 const launch = {
   executablePath: arg('chrome', 'C:/Program Files/Google/Chrome/Application/chrome.exe'),
   headless: true,
-  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan,WebGPU', '--use-angle=d3d11', '--mute-audio', '--autoplay-policy=no-user-gesture-required'],
+  args: [...(ORIGIN !== PORT ? [`--host-resolver-rules=MAP 127.0.0.1:${ORIGIN} 127.0.0.1:${PORT}`] : []), '--enable-unsafe-webgpu', '--enable-features=Vulkan,WebGPU', '--use-angle=d3d11', '--mute-audio', '--autoplay-policy=no-user-gesture-required'],
   viewport: { width: 1280, height: 960 },
 };
 // --profile <folder>: a browser profile that stays, and with it the game's save folder (OPFS)
@@ -32,7 +34,7 @@ if (process.argv.includes('--fakepad')) await page.addInitScript(() => {
   navigator.getGamepads = () => [pad];
   document.hasFocus = () => true;
 });
-await page.goto(`http://127.0.0.1:${PORT}${URLPATH}`);
+await page.goto(`http://127.0.0.1:${ORIGIN}${URLPATH}`);
 // --script <file>: lines of "wait <s>", "move <x> <y>", "click <x> <y>" (640x480 coordinates), "type <text>", "key <Name>",
 // "shot" (the next frame into out/web/shot_<frame>.rgba), "eval <js>"
 const script = arg('script', '');

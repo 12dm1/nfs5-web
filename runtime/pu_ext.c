@@ -10,6 +10,7 @@
 #include "cpu.h"
 #include "decls.h"
 #include "ext/hs_walls.h"
+#include "ext/opp_similar.h"
 #include "ext/hs_ai.h"
 
 int fileio_resolve_game(const char *win, char *out, size_t outsz);
@@ -357,4 +358,109 @@ void pu_pad_impact(CPU *c){
     range = range < 0 ? 0 : range > 1 ? 1 : range;
     const float strength = 0.12f + 0.88f * powf(range, 0.6f);
     host_pad_rumble(strength * low, strength * high, 90 + (int)(210.0f * strength));
+}
+
+/* ---- OS1 (PC wrapper opponent_similar.cpp): the opponent list of Quick Race gets "similar", "similar stock" and "similar tuned" on
+ * top; the game's five modes shift down to 3..7. FEOpponentCarAccessor (vtable 005B77D8) has 7 opponent objects of 0x760 bytes at
+ * this+24h, its value is at +18h. The counts: patches/exe_v35.txt. ---- */
+void dispatch_indirect(CPU *c, uint32_t target);
+static uint32_t guest_call(CPU *c, uint32_t fn, uint32_t ecx, const uint32_t *args, int n){
+    const uint32_t sp = c->esp, keep = c->ecx;
+    for (int i = n - 1; i >= 0; i--) PUSH32(args[i]);
+    PUSH32(0);
+    c->ecx = ecx;
+    dispatch_indirect(c, fn);
+    const uint32_t r = c->eax;
+    c->esp = sp; c->ecx = keep;
+    return r;
+}
+static uint32_t guest_vcall(CPU *c, uint32_t obj, uint32_t off){ return guest_call(c, MR32(MR32(obj) + off), obj, NULL, 0); }
+static uint32_t guest_string(const char *text){
+    const size_t n = strlen(text) + 1;
+    const uint32_t a = gheap_alloc(1, (uint32_t)n, 1);
+    memcpy(g_mem + a, text, n);
+    return a;
+}
+typedef struct { CPU *c; uint32_t self; } OppCtx;
+static void opp_set_slot(void *ctx, int slot, const uint8_t *rec, uint32_t ext, uint32_t stripe, uint32_t trim, uint32_t extra, int package, int number){
+    OppCtx *o = ctx;
+    const uint32_t args[7] = { (uint32_t)(rec - g_mem), ext, stripe, trim, extra, (uint32_t)package, (uint32_t)number };
+    guest_call(o->c, 0x004EEBA0u, o->self + 0x24 + (uint32_t)slot * 0x760, args, 7);
+}
+static void opp_install(void *ctx, int slot, const int16_t *ids, int count){
+    static uint32_t buf;
+    if (!buf) buf = gheap_alloc(1, 64 * 2, 1);
+    if (count > 64) count = 64;
+    OppCtx *o = ctx;
+    memcpy(g_mem + buf, ids, (size_t)count * 2);
+    const uint32_t args[3] = { o->self + 0x24 + (uint32_t)slot * 0x760, (uint32_t)count, buf };
+    guest_call(o->c, 0x004ED880u, 0, args, 3);
+}
+static int opp_run(CPU *c, uint32_t self, int mode){
+    const uint32_t name = 0x005D71A8u;      /* "zMergedList.Car" */
+    const uint32_t acc = guest_call(c, 0x004B7AB0u, 0, &name, 1);
+    const uint32_t cast[5] = { acc, 0, 0x005CD6A8u, 0x005D9468u, 0 };
+    const uint32_t merged = acc ? guest_call(c, 0x005A134Bu, 0, cast, 5) : 0;
+    if (!merged) return 0;
+    const uint32_t player = guest_vcall(c, merged, 0x90);
+    if (!player) return 0;
+    const int owned = (guest_call(c, 0x004F4DF0u, merged, NULL, 0) & 0xFF) != 0;
+    const uint32_t obj = owned ? guest_vcall(c, merged, 0x8C) : 0;
+    const uint32_t list = guest_call(c, MR32(self + 0xCF2 * 4), 0, NULL, 0);     /* the racer records of nfs5.car */
+    if (!list || !MR32(list) || MR32(list + 4) <= MR32(list)) return 0;
+    OppCtx ctx = { c, self };
+    OppGame g;
+    memset(&g, 0, sizeof g);
+    g.mem = g_mem;
+    g.player_rec = g_mem + player;
+    g.owned_obj = obj ? g_mem + obj : NULL;
+    g.list = (const uint32_t *)(g_mem + MR32(list));
+    g.list_size = (int)((MR32(list + 4) - MR32(list)) / 4);
+    g.part_table = g_mem + MR32(0x00628F84u);
+    g.part_count = (int)MR32(0x00628F80u);
+    g.sim_dir = (const char *)(g_mem + MR32(0x0065B2ACu));
+    g.packages = (int)MR32(0x006115F8u);
+    g.ctx = &ctx; g.set_slot = opp_set_slot; g.install = opp_install;
+    return opp_similar_run(&g, mode);
+}
+void sub_004f4fa0(CPU *restrict c){      /* Generate, ecx = the accessor */
+    const uint32_t self = c->ecx;
+    MR32(self + 0x14) = OPP_MODE_COUNT;
+    const int menu = (int)MR32(self + 0x18);
+    int game = menu - OPP_MODES_OURS;
+    if (menu >= 0 && menu < OPP_MODES_OURS){
+        if (opp_run(c, self, menu)){ POP32(c->eip); return; }
+        game = 4;                            /* its random car */
+    }
+    if (game >= 0 && game <= 4) MR32(self + 0x18) = (uint32_t)game;
+    sub_004f4fa0_orig(c);
+    MR32(self + 0x18) = (uint32_t)menu;
+}
+void sub_004f5820(CPU *restrict c){      /* SetRange: 4 modes on low memory, 5 otherwise */
+    const uint32_t count = OPP_MODE_COUNT;
+    guest_call(c, 0x004BC310u, c->ecx, &count, 1);
+    POP32(c->eip);
+}
+static uint32_t opp_name(CPU *c, int mode, int short_text){
+    static uint32_t ours[2][OPP_MODES_OURS];
+    static const char *const text[2][OPP_MODES_OURS] = {
+        { "similar cars", "similar stock cars", "similar tuned cars" }, { "similar", "similar stock", "similar tuned" } };
+    static const uint32_t ids[2][5] = { { 640, 642, 643, 644, 641 }, { 640, 642, 643, 645, 641 } };
+    if (mode >= 0 && mode < OPP_MODES_OURS){
+        if (!ours[short_text][mode]) ours[short_text][mode] = guest_string(text[short_text][mode]);
+        return ours[short_text][mode];
+    }
+    const int game = mode - OPP_MODES_OURS;
+    if (game < 0 || game > 4) return 0x005DACACu;   /* "bug in car list" */
+    return guest_call(c, 0x004E06D0u, 0, &ids[short_text][game], 1);
+}
+void sub_004f5720(CPU *restrict c){      /* the long and the short text of a mode, thiscall(mode) */
+    const uint32_t r = opp_name(c, (int)MR32(c->esp + 4), 0);
+    c->eax = r;
+    POP32(c->eip); c->esp += 4;
+}
+void sub_004f57a0(CPU *restrict c){
+    const uint32_t r = opp_name(c, (int)MR32(c->esp + 4), 1);
+    c->eax = r;
+    POP32(c->eip); c->esp += 4;
 }

@@ -38,7 +38,7 @@ rm -f "$OUT/nfs5.wasm"
 "$CC" $TARGET $OPT $FEAT -o "$OUT/nfs5.wasm" @"$OUT/objs.rsp" \
   -Wl,--import-memory,--export-memory,--shared-memory,--max-memory=4294967296 \
   -Wl,--initial-memory=$(( MIN_MB * 1048576 )),--global-base=$GUEST_END \
-  -Wl,-z,stack-size=$(( 8 * 1048576 )) -Wl,--no-stack-first \
+  -lc++ -lc++abi -Wl,-z,stack-size=$(( 8 * 1048576 )) -Wl,--no-stack-first \
   -lsetjmp -lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-process-clocks > "$OUT/link.log" 2>&1 || true
 [ -f "$OUT/nfs5.wasm" ] || { echo "link FAILED: $(grep -c 'undefined symbol' "$OUT/link.log") undefined"; grep -E "error" "$OUT/link.log" | head -60 | cut -c1-150; exit 1; }
 SIZE=$(wc -c < "$OUT/nfs5.wasm" | tr -d ' ')
