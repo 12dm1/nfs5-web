@@ -473,9 +473,10 @@ void sub_004f57a0(CPU *restrict c){
 #define HUD_VW 0x006C1F00u
 #define HUD_VH 0x006C1F04u
 #define HUD_REF_HEIGHT 480
+#define HUD_SCALE 0.67f     /* PC dx11z.ini [hud] scale: 1 would keep the 640x480 proportions */
 static float g_hud_fx = 1.0f, g_hud_fy = 1.0f;
 static void hud_virtualize(int w, int h, int *vw, int *vh){
-    float scale = (float)h / HUD_REF_HEIGHT;
+    float scale = (float)h / HUD_REF_HEIGHT * HUD_SCALE;
     if (scale < 1.0f) scale = 1.0f;
     *vw = (int)lroundf((float)w / scale); *vh = (int)lroundf((float)h / scale);
 }

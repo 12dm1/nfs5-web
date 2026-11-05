@@ -57,13 +57,6 @@ static long g_frames;
 static uint64_t g_draws, g_tex_up, g_calls;
 static int g_log = -1;
 
-/* the race's mode (entry 8, forced by runtime/pu_hooks.c race_mode): 960 lines, as wide as the page's window
- * (NFS5_RACE_W from web/src/main.ts, 1280 = 4:3; widescreen: runtime/pu_ext.c pu_cam_*) */
-int thrash_race_width(void){
-    static int w;
-    if (!w){ const char *e = getenv("NFS5_RACE_W"); int v = e ? atoi(e) : 0; if (v < 1280 || v > 3416) v = 1280; w = v & ~7; }
-    return w;
-}
 static uint32_t k_modes[11][3] = {
     {0,0,0}, {640,480,16}, {640,480,32}, {800,600,16}, {800,600,32}, {1024,768,16},
     {1024,768,32}, {1280,960,16}, {1280,960,32}, {1600,1200,16}, {1600,1200,32},
@@ -90,7 +83,6 @@ static uint32_t about(void){
         static const uint32_t ff[21] = {0,0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0};   /* 32-bit textures */
         for (int i = 0; i < 21; i++) MR32(g_fmtflags + 4u * i) = ff[i];
         for (int i = 1; i <= 10; i++){
-            if (i == 8) k_modes[8][0] = (uint32_t)thrash_race_width();
             uint32_t m = g_modes + 0x28u * (uint32_t)i;
             MR32(m) = k_modes[i][0]; MR32(m + 4) = k_modes[i][1]; MR32(m + 8) = k_modes[i][2];
             MR32(m + 12) = k_modes[i][2] == 16 ? 4u : 5u;     /* RGB565 / ARGB8888 */
@@ -141,6 +133,19 @@ static void pace(void){
 __attribute__((weak)) int r_init(int w, int h){ (void)w; (void)h; return 0; }
 void r_restore(void) __attribute__((weak));
 void r_setvideomode(int w, int h, int bpp) __attribute__((weak));
+int r_window_mode(int *w, int *h) __attribute__((weak));
+/* The race's mode (entry 8, forced by runtime/pu_hooks.c race_mode), asked when a race starts: the page's window (web/src/gpu/renderer.ts
+ * raceMode; widescreen: runtime/pu_ext.c pu_cam_*). NFS5_RACE_W: a fixed width at 960 lines, for tests. */
+void thrash_race_mode(int *pw, int *ph){
+    int w = 1280, h = 960;
+    const char *e = getenv("NFS5_RACE_W");
+    const int v = e ? atoi(e) : 0;
+    if (v >= 1280 && v <= 3416) w = v & ~7;
+    else if (r_window_mode) r_window_mode(&w, &h);
+    k_modes[8][0] = (uint32_t)w; k_modes[8][1] = (uint32_t)h;
+    if (g_modes){ MR32(g_modes + 0x28u * 8u) = (uint32_t)w; MR32(g_modes + 0x28u * 8u + 4u) = (uint32_t)h; }
+    *pw = w; *ph = h;
+}
 void r_setstate(int id, int v) __attribute__((weak));
 int  r_getstate(int id) __attribute__((weak));
 void r_window(int idx) __attribute__((weak));

@@ -9,10 +9,12 @@ void nettest_hook(CPU *c, uint32_t ip);
 /* The race's video mode: 00467FC0(w, h, bpp, 2) at race start and in network games (PC mod NP1). A new profile asks for
  * 640x480x16, where the LOD selector (00439F90 divides by the width) picks low-poly cars close by; so 32 bits and the
  * picture's own size whatever the settings say. */
-int thrash_race_width(void);
+void thrash_race_mode(int *w, int *h);
 static void race_mode(CPU *c){
     const uint32_t a = c->esp;
-    MR32(a) = (uint32_t)thrash_race_width(); MR32(a + 4) = 960; MR32(a + 8) = 32;
+    int w, h;
+    thrash_race_mode(&w, &h);
+    MR32(a) = (uint32_t)w; MR32(a + 4) = (uint32_t)h; MR32(a + 8) = 32;
 }
 
 /* AI on the converted tracks (runtime/ext/hs_ai.cpp): the PC wrapper's call patches, as hooks before the same instructions */

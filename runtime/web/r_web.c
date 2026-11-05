@@ -38,6 +38,7 @@ typedef struct {
     volatile int32_t published, consumed;   /* segment counters; notified on change */
     volatile int32_t presents_pub, presents_done;
     Seg seg[SEGS];
+    volatile int32_t win_w, win_h;          /* the page: the mode a race started now would use */
 } Ring;
 static Ring g_ring;
 static Seg *g_cur;
@@ -856,3 +857,7 @@ void r_pageflip(void){
     }
 }
 long r_frames(void){ return g_frames; }
+int r_window_mode(int *w, int *h){
+    *w = __atomic_load_n(&g_ring.win_w, __ATOMIC_ACQUIRE); *h = __atomic_load_n(&g_ring.win_h, __ATOMIC_ACQUIRE);
+    return *w > 640 && *h > 480;
+}

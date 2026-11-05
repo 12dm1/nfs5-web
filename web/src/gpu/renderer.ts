@@ -72,6 +72,16 @@ const ADDR: GPUAddressMode[] = ['clamp-to-edge', 'repeat', 'mirror-repeat'];
 const CULL: GPUCullMode[] = ['none', 'back', 'front'];
 const TOPO: GPUPrimitiveTopology[] = ['triangle-list', 'line-list', 'point-list'];
 
+// The race's mode for this window: its real pixels (720 to 2160 lines), its shape from 4:3 to 32:9. ?ws=0 keeps 4:3, ?rh=<lines> caps the lines.
+export function raceMode(): [number, number] {
+  const q = new URLSearchParams(location.search);
+  const dpr = devicePixelRatio || 1, pw = Math.max(1, innerWidth * dpr), ph = Math.max(1, innerHeight * dpr);
+  const aspect = q.get('ws') === '0' ? 4 / 3 : Math.min(32 / 9, Math.max(4 / 3, pw / ph));
+  const cap = Math.min(2160, Number(q.get('rh') ?? 2160) || 2160);
+  const h = Math.max(720, Math.min(cap, Math.round(Math.min(ph, pw / aspect)))) & ~1;
+  return [Math.round(h * aspect / 8) * 8, h];
+}
+
 export interface RendererStats { jsSum: number; jsMax: number; gapMax: number; slow: number; submitMax: number; frames: number; segments: number; draws: number; lastDraws: number; lastVerts: number; textures: number; shots: Map<number, ArrayBuffer>; shotNext: boolean; shotVideo: boolean; }
 
 export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, canvas: HTMLCanvasElement, log: (s: string) => void, wantShots: number[] = []) {
@@ -88,17 +98,20 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
   ctx.configure({ device, format: canvasFormat, alphaMode: 'opaque' });
 
-  const W = canvas.width, H = canvas.height;
+  let W = canvas.width, H = canvas.height;
   // AA1 (PC dx11z [display] msaa): the scene draws into a 4x multisampled colour + depth pair, resolved into colorTex before a
   // present, a shot or a pixel read. ?msaa=1 turns it off. The PC's alpha-to-coverage ended as "discard below the game's
   // threshold, survivors opaque", which the shader's hard cutout already does, so there is no coverage from alpha here.
   const msaaParam = Number(new URLSearchParams(location.search).get('msaa') ?? 4);
   const SAMPLES = msaaParam === 1 ? 1 : 4;
-  const colorTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
-  const msTex = SAMPLES > 1 ? device.createTexture({ size: [W, H], format: 'rgba8unorm', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
-  const depthTex = device.createTexture({ size: [W, H], format: 'depth24plus', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
-  const colorView = colorTex.createView(), depthView = depthTex.createView();
-  const drawView = msTex ? msTex.createView() : colorView;
+  const makeTargets = () => {
+    const colorTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+    const msTex = SAMPLES > 1 ? device.createTexture({ size: [W, H], format: 'rgba8unorm', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
+    const depthTex = device.createTexture({ size: [W, H], format: 'depth24plus', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const colorView = colorTex.createView();
+    return { colorTex, msTex, depthTex, colorView, depthView: depthTex.createView(), drawView: msTex ? msTex.createView() : colorView };
+  };
+  let { colorTex, msTex, depthTex, colorView, depthView, drawView } = makeTargets();
   log(`[gpu] MSAA x${SAMPLES}`);
   // the multisampled target into colorTex: an empty pass whose end resolves
   const resolve = (enc: GPUCommandEncoder) => {
@@ -170,7 +183,8 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const blitPipe = (format: GPUTextureFormat) => device.createRenderPipeline({ layout: blitPipeLayout,
     vertex: { module: blitModule, entryPoint: 'vs' }, fragment: { module: blitModule, entryPoint: 'fs', targets: [{ format }] }, primitive: { topology: 'triangle-list' } });
   const genPipe = blitPipe('rgba8unorm'), presentPipe = blitPipe(canvasFormat);
-  const presentGroup = device.createBindGroup({ layout: blitLayout, entries: [{ binding: 0, resource: colorView }, { binding: 1, resource: genSampler }] });
+  const makePresentGroup = () => device.createBindGroup({ layout: blitLayout, entries: [{ binding: 0, resource: colorView }, { binding: 1, resource: genSampler }] });
+  let presentGroup = makePresentGroup();
   const genMips = (t: T) => {
     const enc = device.createCommandEncoder();
     for (let l = 1; l < t.levels; l++) {
@@ -184,7 +198,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   };
 
   const sab = memory.buffer as unknown as SharedArrayBuffer;
-  const ring = new Int32Array(sab, ptr, 6 + 3 * 8);
+  const ring = new Int32Array(sab, ptr, 6 + 3 * 8 + 2);
   const segCount = ring[1];
   let nextSeg = 0;
   const stats: RendererStats = { jsSum: 0, jsMax: 0, gapMax: 0, slow: 0, submitMax: 0, frames: 0, segments: 0, draws: 0, lastDraws: 0, lastVerts: 0, textures: 0, shots: new Map(), shotNext: false, shotVideo: new URLSearchParams(location.search).has('shotvideo') };
@@ -192,8 +206,17 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   let lw = 640, lh = 480;
   // the element takes the shape of the game's mode; the canvas behind it keeps its size, so a 4:3 menu fills the wide canvas and
   // shows undistorted, and the mouse and the focus outline keep mapping the element's box to the game's screen
-  const setShape = (w: number, h: number) => { canvas.style.aspectRatio = `${w} / ${h}`; };
+  // a mode within 1 % of the window's shape fills it, the race then has no thin bars from rounding its width
+  const setShape = (w: number, h: number) => {
+    const fill = Math.abs(w / h / (innerWidth / Math.max(1, innerHeight)) - 1) < 0.01;
+    canvas.style.aspectRatio = fill ? 'auto' : `${w} / ${h}`;
+    canvas.style.width = fill ? '100%' : '';
+  };
   setShape(lw, lh);
+  // for the game: the mode its next race starts with (r_web.c r_window_mode)
+  const putWindow = () => { const [w, h] = raceMode(); Atomics.store(ring, 30, w); Atomics.store(ring, 31, h); setShape(lw, lh); };
+  putWindow();
+  addEventListener('resize', putWindow);
 
   // a segment: its uploads first, then its draws in one pass
   let frameJs = 0, lastPresentAt = 0;
@@ -229,6 +252,15 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
           if (stats.shotVideo && cmd[i] > lw) for (const k of [1, 2, 3, 6, 12]) shotSet.add(stats.frames + k);
           const nw = cmd[i++], nh = cmd[i++];
           if (nw !== lw || nh !== lh) setShape(nw, nh);
+          // a race's mode is the render size: the race draws pixel for pixel. The menus keep the targets, they are scaled.
+          if (nw > 640 && (nw !== W || nh !== H)) {
+            if (pass) { (pass as GPURenderPassEncoder).end(); pass = null; }
+            toFree.push(colorTex, depthTex); if (msTex) toFree.push(msTex);
+            W = nw; H = nh; canvas.width = W; canvas.height = H;
+            ({ colorTex, msTex, depthTex, colorView, depthView, drawView } = makeTargets());
+            presentGroup = makePresentGroup();
+            log(`[gpu] race ${W}x${H}`);
+          }
           lw = nw; lh = nh; scDirty = true; break; }
         case C.TEX_CREATE: {
           const id = cmd[i], w = cmd[i + 1], h = cmd[i + 2], levels = cmd[i + 3]; i += 4;
