@@ -66,7 +66,7 @@ async function main() {
   const stats = await attachRenderer(p.memory, r.ptr, canvas, log, shots);
   g.stats = stats;
   setStatus('');
-  if (shots.length) setInterval(() => {
+  setInterval(() => {
     for (const [frame, px] of stats.shots) { stats.shots.delete(frame); void fetch('/test-shot/' + frame, { method: 'POST', body: px }); log(`[shot] frame ${frame}`); }
   }, 200);
   if (toServer) { let last = 0; setInterval(() => {

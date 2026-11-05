@@ -610,7 +610,7 @@ int r_init(int w, int h){
 }
 void r_restore(void){ close_draw(); seg_publish(0); }
 void r_setvideomode(int w, int h, int bpp){
-    g_race = bpp == 32;
+    g_race = bpp == 32 && w > 640;         /* the frontend is 640x480x32 too (patches), the race never (pu_hooks.c) */
     g_st[THRASH_STATE_SCREEN_WIDTH] = w; g_st[THRASH_STATE_SCREEN_HEIGHT] = h;
     if (w > 0 && h > 0 && (w != g_lw || h != g_lh)){ close_draw(); g_lw = w; g_lh = h; g_s_video = 0; }
 }

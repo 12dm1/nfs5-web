@@ -246,7 +246,7 @@ void r_restore(void) {
 }
 
 void r_setvideomode(int w, int h, int bpp) {
-    State_SetRaceVideoMode(bpp == 32);
+    State_SetRaceVideoMode(bpp == 32 && w > 640);   // the frontend is 640x480x32 too (patches), the race never (pu_hooks.c)
     State_SetDirect(THRASH_STATE_SCREEN_WIDTH, w);
     State_SetDirect(THRASH_STATE_SCREEN_HEIGHT, h);
     g_dx.gameVideoW = w;

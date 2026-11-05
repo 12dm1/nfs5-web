@@ -72,7 +72,7 @@ const ADDR: GPUAddressMode[] = ['clamp-to-edge', 'repeat', 'mirror-repeat'];
 const CULL: GPUCullMode[] = ['none', 'back', 'front'];
 const TOPO: GPUPrimitiveTopology[] = ['triangle-list', 'line-list', 'point-list'];
 
-export interface RendererStats { frames: number; segments: number; draws: number; lastDraws: number; lastVerts: number; textures: number; shots: Map<number, ArrayBuffer> }
+export interface RendererStats { frames: number; segments: number; draws: number; lastDraws: number; lastVerts: number; textures: number; shots: Map<number, ArrayBuffer>; shotNext: boolean }
 
 export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, canvas: HTMLCanvasElement, log: (s: string) => void, wantShots: number[] = []) {
   if (!navigator.gpu) throw new Error('this browser has no WebGPU');
@@ -173,7 +173,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const ring = new Int32Array(sab, ptr, 6 + 3 * 8);
   const segCount = ring[1];
   let nextSeg = 0;
-  const stats: RendererStats = { frames: 0, segments: 0, draws: 0, lastDraws: 0, lastVerts: 0, textures: 0, shots: new Map() };
+  const stats: RendererStats = { frames: 0, segments: 0, draws: 0, lastDraws: 0, lastVerts: 0, textures: 0, shots: new Map(), shotNext: false };
   const shotSet = new Set(wantShots);
   let lw = 640, lh = 480;
 
@@ -258,7 +258,8 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
       const view = ctx.getCurrentTexture().createView();
       const out = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
       out.setPipeline(presentPipe); out.setBindGroup(0, presentGroup); out.draw(3); out.end();
-      if (shotSet.has(frame)) {
+      if (shotSet.has(frame) || stats.shotNext) {
+        stats.shotNext = false;
         const rb = device.createBuffer({ size: W * H * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
         enc.copyTextureToBuffer({ texture: colorTex }, { buffer: rb, bytesPerRow: W * 4 }, [W, H]);
         void queue.onSubmittedWorkDone().then(async () => { await rb.mapAsync(GPUMapMode.READ); stats.shots.set(frame, rb.getMappedRange().slice(0)); rb.destroy(); });

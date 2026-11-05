@@ -4,6 +4,7 @@
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -26,6 +27,26 @@ const page = await browser.newPage();
 page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') console.log('[console ' + m.type() + '] ' + m.text()); });
 page.on('pageerror', e => console.log('[pageerror] ' + e.message));
 await page.goto(`http://127.0.0.1:${PORT}${URLPATH}`);
+// --script <file>: lines of "wait <s>", "move <x> <y>", "click <x> <y>" (640x480 coordinates), "type <text>", "key <Name>",
+// "shot" (the next frame into out/web/shot_<frame>.rgba), "eval <js>"
+const script = arg('script', '');
+if (script) {
+  const P = (x, y) => [+x * 2, +y * 2];
+  for (const line of fs.readFileSync(script, 'utf8').split(String.fromCharCode(10))) {
+    const [c, ...a] = line.trim().split(' ');
+    if (!c || c.startsWith('#')) continue;
+    if (c === 'wait') await new Promise(r => setTimeout(r, +a[0] * 1000));
+    else if (c === 'move') await page.mouse.move(...P(a[0], a[1]));
+    else if (c === 'click') { await page.mouse.move(...P(a[0], a[1])); await new Promise(r => setTimeout(r, 200)); await page.mouse.down(); await new Promise(r => setTimeout(r, 120)); await page.mouse.up(); }
+    else if (c === 'type') await page.keyboard.type(a.join(' '), { delay: 120 });
+    else if (c === 'key') await page.keyboard.press(a[0], { delay: 120 });
+    else if (c === 'keydown') await page.keyboard.down(a[0]);
+    else if (c === 'keyup') await page.keyboard.up(a[0]);
+    else if (c === 'shot') await page.evaluate('stats.shotNext = true');
+    else if (c === 'eval') console.log('[eval] ' + line.trim().slice(5) + ' => ' + JSON.stringify(await page.evaluate(a.join(' '))));
+    console.log('[script] ' + line.trim());
+  }
+}
 await new Promise(r => setTimeout(r, SECONDS * 1000));
 if (eval_) console.log('[eval] ' + JSON.stringify(await page.evaluate(eval_)));
 await browser.close();
