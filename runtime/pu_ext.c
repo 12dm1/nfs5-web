@@ -477,12 +477,37 @@ static void hud_virtualize(int w, int h, int *vw, int *vh){
     if (scale < 1.0f) scale = 1.0f;
     *vw = (int)lroundf((float)w / scale); *vh = (int)lroundf((float)h / scale);
 }
+#define DRAW_LIMIT1 0x006C1F08u
+#define DRAW_LIMIT2 0x006C1F0Cu
+#define DRAW_SCALE 2.0f
+#define DRAW_MIN 20000.0f
+/* The two object classes with fixed limits (600 and 700, squared, in 0047F890) scale along and never end before the rest, otherwise
+ * ground and walls go missing under buildings that are still drawn. */
+static void draw_limits(float drawn){
+    const float a = 600.0f * DRAW_SCALE, b = 700.0f * DRAW_SCALE;
+    const float l1 = a > drawn ? a : drawn, l2 = b > drawn ? b : drawn;
+    const float s1 = l1 * l1, s2 = l2 * l2;
+    memcpy(g_mem + DRAW_LIMIT1, &s1, 4); memcpy(g_mem + DRAW_LIMIT2, &s2, 4);
+}
+/* 0044F1A0, cdecl(distance): the race's draw distance, stored at 006197CC with the view distance option on top */
+void sub_0044f1a0(CPU *restrict c){
+    float d;
+    memcpy(&d, g_mem + c->esp + 4, 4);
+    d *= DRAW_SCALE;
+    if (d < DRAW_MIN) d = DRAW_MIN;
+    memcpy(g_mem + c->esp + 4, &d, 4);
+    sub_0044f1a0_orig(c);
+    float drawn;
+    memcpy(&drawn, g_mem + 0x006197CCu, 4);
+    draw_limits(drawn);
+}
 /* 0044E324, 0044EC58: the mode setters, just after the screen size was written */
 void pu_hud_mode(void){
     const int w = (int)MR32(0x00619784u), h = (int)MR32(0x00619788u);
     int vw = w, vh = h;
     if (w > 0 && h > 0) hud_virtualize(w, h, &vw, &vh);
     MR32(HUD_VW) = (uint32_t)vw; MR32(HUD_VH) = (uint32_t)vh;
+    if (!MR32(DRAW_LIMIT1)) draw_limits(0.0f);
     g_hud_fx = vw > 0 ? (float)w / (float)vw : 1.0f;
     g_hud_fy = vh > 0 ? (float)h / (float)vh : 1.0f;
 }

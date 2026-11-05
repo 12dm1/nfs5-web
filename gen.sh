@@ -13,7 +13,7 @@ export JTSWITCH="${JTSWITCH:-1}"
 # instruction hooks served by runtime/pu_hooks.c
 export HOOKS="${HOOKS:-0x4D2B80,0x4D3D00,0x41562E,0x4B6CB9,0x40B6FD,0x40BA91,0x40BAF0,0x40C865,0x40C8DA,0x41041E,0x43A3B0,0x43C431,0x413800,0x40F740,0x44E324,0x44EC58,0x4CBBDE,0x4CBBF9,0x41A495,0x41A4AE}"   # guest_hook sites (runtime/pu_hooks.c): network autotest only; loops yield by themselves (GUEST_BACKEDGE)
 # lifted functions replaced in runtime/pu_ext.c (the original stays as sub_x_orig)
-export OVERRIDE="${OVERRIDE:-0x4E06D0,0x40F480,0x498FF0,0x4677D0,0x43E120,0x4980D0,0x4152E0,0x4F4FA0,0x4F5820,0x4F5720,0x4F57A0,0x41E170}"
+export OVERRIDE="${OVERRIDE:-0x4E06D0,0x40F480,0x498FF0,0x4677D0,0x43E120,0x4980D0,0x4152E0,0x4F4FA0,0x4F5820,0x4F5720,0x4F57A0,0x41E170,0x44F1A0}"
 mkdir -p out gen/all
 "$PY" tools/exe.py prepare "$SRC" out/PORSCHE.EXE
 "$PY" tools/relocs.py out/PORSCHE.EXE

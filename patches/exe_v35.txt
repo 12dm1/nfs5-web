@@ -91,3 +91,14 @@
 004374A9  88976100    041F6C00
 00467185  84976100    001F6C00
 0046719A  88976100    041F6C00
+# NE1 draw distance (runtime/pu_ext.c, override 0044F1A0): the far plane and the two fixed object limits follow it
+004677FF  00002F44    00409C46    # render context: far clip 700 -> 20000
+0045D502  00002F44    00409C46    # the second pass resets the view to it
+0047FA0A  A8475B00    081F6C00    # objects with flag 400000h: squared limit at 006C1F08
+0047FA3F  AC475B00    0C1F6C00    # objects with flag 20h: squared limit at 006C1F0C
+005CDB58  05000000    01000000    # distant cars: the wheels of LOD 1
+005CDB5C  06000000    01000000
+005CDB74  05000000    01000000
+005CDB78  06000000    01000000
+005CDB90  05000000    01000000
+005CDB94  06000000    01000000
