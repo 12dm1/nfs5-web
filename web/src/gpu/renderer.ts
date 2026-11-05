@@ -3,16 +3,22 @@
 //
 // Ring (bytes): magic 0, seg_count 4, published 8, consumed 12, presents_pub 16, presents_done 20, segments 24 (32 bytes each:
 // ready, cmd_words, vtx_bytes, up_bytes, has_present, cmd, vtx, up).
-const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14 };
+const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14, PAINT: 15 };
 const VSIZE = 48, VERTEX_BUFFER = 24 << 20, UBO_ALIGN = 256, UBO_SLOTS = 65536 / 256 * 64;
 
 const SHADER = /* wgsl */`
-struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDensity: f32, fogScale: f32, hard: f32, lodBias: f32, em: vec4f };
+struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDensity: f32, fogScale: f32, hard: f32, lodBias: f32, em: vec4f,
+  camR: vec4f, camU: vec4f, camF: vec4f, proj: vec4f, vp: vec4f, sun: vec4f, x0: vec4f, x1: vec4f };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tx: texture_2d<f32>;
 @group(1) @binding(1) var sm: sampler;
+@group(1) @binding(2) var paintTx: texture_2d<f32>;
+@group(1) @binding(3) var sm2: sampler;
+@group(2) @binding(0) var cubeTx: texture_cube<f32>;
+@group(2) @binding(1) var cubeSm: sampler;
 struct VI { @location(0) pos: vec4f, @location(1) uv: vec2f, @location(2) color: vec4f, @location(3) spec: vec4f, @location(4) rect: vec4f };
-struct VO { @builtin(position) pos: vec4f, @location(0) uvq: vec3f, @location(1) color: vec4f, @interpolate(flat) @location(2) rect: vec4f };
+struct VO { @builtin(position) pos: vec4f, @location(0) uvq: vec3f, @location(1) color: vec4f, @interpolate(flat) @location(2) rect: vec4f,
+  @location(3) aux: vec4f, @location(4) nrm: vec4f, @interpolate(linear) @location(5) ray: vec3f };
 fn finite(x: f32) -> bool { return x == x && abs(x) < 1e30; }
 @vertex fn vs(i: VI) -> VO {
   var o: VO;
@@ -24,6 +30,15 @@ fn finite(x: f32) -> bool { return x == x && abs(x) < 1e30; }
   o.uvq = vec3f(i.uv * q, q);
   o.color = i.color.bgra;
   o.rect = i.rect;
+  // a carrier of the car page's UVs (r_web.c, the game's reflection pass over a car page)
+  o.aux = vec4f(i.rect.xy * q, q, 0.0);
+  if (i.rect.w == 7.0) { o.rect = vec4f(0.0); }
+  // car normals in the specular dword, one byte per axis (runtime/pu_paint.c), x q for perspective
+  let sp = i.spec * 255.0;
+  if (sp.x >= 1.0) { o.nrm = vec4f((((sp.xyz - 1.0) / 254.0) * 2.0 - 1.0) * q, 1.0); } else { o.nrm = vec4f(0.0); }
+  let su = (i.pos.x - u.vp.x) / select(1.0, u.vp.z, abs(u.vp.z) > 1e-6);
+  let sv = (i.pos.y - u.vp.y) / select(1.0, u.vp.w, abs(u.vp.w) > 1e-6);
+  o.ray = vec3f((su - u.proj.z) / select(1.0, u.proj.x, abs(u.proj.x) > 1e-6), -(sv - u.proj.w) / select(1.0, u.proj.y, abs(u.proj.y) > 1e-6), -1.0);
   return o;
 }
 fn fog(rgb: vec3f, q: f32) -> vec3f {
@@ -51,6 +66,147 @@ fn shade(i: VO) -> vec4f {
   return vec4f(fog(r.rgb, i.uvq.z), r.a);
 }
 @fragment fn fs(i: VO) -> @location(0) vec4f { return shade(i); }
+// ---- car paint (PC dx11_shaders.h PSMaterial car branch, shaders/material_core.inc mat_shade_car; [car_paint] values of dx11z.ini) ----
+const PI = 3.14159265;
+const P_METAL = 0.2; const P_GRAZING = 0.5; const P_FLAKE_SCALE = 1200.0; const P_FLAKE = 0.015; const P_SILVER = 0.5;
+const P_COAT = 1.0; const P_COAT_GLOSS = 0.0; const P_PEEL = 0.0; const P_ROUGH = 0.15; const P_METAL_MAP = 0.0;
+const P_SPEC = 20.0; const P_REFL = 1.0; const P_GLOW = 35.8; const P_GLOW_ANG = 15.0; const P_GLOW_SAT = 0.6;
+const P_VIEW_LIGHT = 1.2; const P_VIEW_DARK = 0.25; const P_ENV_DIFFUSE = 0.3; const P_ENV_GLOW = 0.0; const P_ENV_HDR = 9.0;
+const P_SUN_FOG = 150.0; const P_LIGHT_GAIN = 1.7; const P_DARK_MATTE = 1.0; const P_DARK_POWER = 4.0; const P_SUN_REFL = 0.1;
+const MAXMIP = 8.0;
+const SUN_COL = vec3f(1.0, 0.95, 0.85);
+fn lum(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
+fn D_GGX(nh: f32, r: f32) -> f32 { let a = r * r; let a2 = a * a; let d = nh * nh * (a2 - 1.0) + 1.0; return a2 / (PI * d * d + 1e-7); }
+fn G1(nx: f32, k: f32) -> f32 { return nx / (nx * (1.0 - k) + k + 1e-7); }
+fn G_Smith(nv: f32, nl: f32, r: f32) -> f32 { let k = (r + 1.0) * (r + 1.0) / 8.0; return G1(nv, k) * G1(nl, k); }
+fn fresnel(F0: vec3f, c: f32) -> vec3f { let t = 1.0 - c; let t2 = t * t; return F0 + (vec3f(1.0) - F0) * (t2 * t2 * t); }
+fn fresnel_rk(F0: vec3f, c: f32, r: f32, k: f32) -> vec3f { let t = 1.0 - c; let t2 = t * t; let g = 1.0 - r; let Fm = max(vec3f(g), F0); return F0 + (Fm - F0) * (t2 * t2 * t) * k; }
+fn hash2(x: i32, y: i32) -> f32 { var h = u32(x) * 374761393u + u32(y) * 668265263u; h = (h ^ (h >> 13u)) * 1274126177u; h = h ^ (h >> 16u); return f32(h & 16777215u) / 16777215.0; }
+fn flake_offset(uv: vec2f, s: f32) -> vec2f { let c = floor(uv * s); let x = i32(c.x); let y = i32(c.y); return vec2f(hash2(x, y), hash2(x + 7919, y + 104729)) * 2.0 - vec2f(1.0); }
+fn tilt(T: mat3x3f, off: vec2f, s: f32) -> vec3f { return normalize(T * normalize(vec3f(off * s, 1.0))); }
+fn cotangent(N: vec3f, p1: vec3f, p2: vec3f, uv1: vec2f, uv2: vec2f) -> mat3x3f {
+  let a = cross(p2, N); let b = cross(N, p1);
+  let T = a * uv1.x + b * uv2.x; let B = a * uv1.y + b * uv2.y;
+  let im = inverseSqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
+  return mat3x3f(T * im, B * im, N);
+}
+fn toWorld(d: vec3f) -> vec3f { return d.x * u.camR.xyz + d.y * u.camU.xyz - d.z * u.camF.xyz; }
+fn cube(d: vec3f, mip: f32) -> vec4f { return textureSampleLevel(cubeTx, cubeSm, toWorld(d), mip); }
+fn envGain(c: vec3f, g: f32) -> vec3f { return min(c, vec3f(1.0)) + max(c - vec3f(1.0), vec3f(0.0)) * g; }
+fn envK(Nr: vec3f, V: vec3f, mip: f32, keep: f32) -> vec3f {
+  if (u.camR.w < 0.5) { return vec3f(0.0); }
+  let e = cube(reflect(-V, Nr), mip); let pk = max(e.r, max(e.g, e.b));
+  let sh = select(0.0, clamp(e.a / pk, 0.0, 1.0), pk > 1e-5);
+  return min(e.rgb * (1.0 - (1.0 - keep) * sh), vec3f(64.0));
+}
+fn envCone(d: vec3f, cone: f32, g: f32) -> vec3f {
+  if (u.camR.w < 0.5) { return vec3f(0.0); }
+  let mip = clamp(log2(max(exp2(MAXMIP) * cone / 90.0, 1.0)), 0.0, MAXMIP);
+  let e = cube(d, mip); let pk = max(e.r, max(e.g, e.b));
+  let sh = select(0.0, clamp(e.a / pk, 0.0, 1.0), pk > 1e-5);
+  return envGain(min(e.rgb * (1.0 - sh), vec3f(64.0)), g);
+}
+fn sunVisibility() -> f32 {
+  if (u.camU.w < 0.5) { return 1.0; }
+  let e = cube(u.sun.xyz, MAXMIP - 5.0); let pk = max(e.r, max(e.g, e.b));
+  var vis = clamp(e.a / 0.5, 0.0, 1.0) * clamp(pk - 0.5, 0.0, 1.0);
+  if (u.fogColor.w > 0.0) { vis *= 1.0 - clamp((1.0 - exp(-u.fogDensity * P_SUN_FOG)) * u.fogScale, 0.0, 1.0); }
+  return vis;
+}
+fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df: vec3f, sun: vec3f, env_base: vec3f, env_coat: vec3f,
+             metallic: f32, roughness: f32, spec_s: f32, refl_s: f32, coat: f32, coat_r: f32, sun_glow: f32, view_light: f32,
+             env_irr: vec3f, env_glow_col: vec3f, env_diffuse: f32, env_glow: f32, light_gain: f32) -> vec3f {
+  let lit = lum(df);
+  let F0 = mix(vec3f(0.04), mix(base, vec3f(0.85), P_SILVER), metallic);
+  let H = normalize(V + L); let VdotH = max(dot(V, H), 0.0);
+  let NdotV = max(dot(Nb, V), 0.001); let NdotL = max(dot(Nb, L), 0.0); let NdotH = max(dot(Nb, H), 0.0);
+  let spec = sun * spec_s * lit * (D_GGX(NdotH, roughness) * G_Smith(NdotV, NdotL, roughness) * fresnel(F0, VdotH)) / (4.0 * NdotV * NdotL + 0.001) * NdotL;
+  let Fr = fresnel_rk(F0, NdotV, roughness, P_GRAZING);
+  let env_w = clamp(2.0 * (1.0 - roughness), 0.0, 1.0);
+  let refl = env_base * Fr * refl_s * env_w;
+  let sNdotL = max(dot(N, L), 0.0); let sNdotV = max(dot(N, V), 0.0);
+  let ang = clamp(P_GLOW_ANG, 5.0, 85.0);
+  let gk = log(0.5) / log(cos(ang * 0.017453292));
+  let lobe = sun_glow * pow(sNdotL, gk) * lit;
+  let sun_lum = lum(sun);
+  let glow_env = env_glow_col * env_glow; let glow_env_lum = lum(glow_env);
+  let base_lum = lum(base);
+  let bmax = max(base.r, max(base.g, base.b));
+  let chroma = clamp((bmax - min(base.r, min(base.g, base.b))) / max(bmax, 1e-4), 0.0, 1.0);
+  let sat = P_GLOW_SAT * chroma;
+  let base_pp = max(vec3f(base_lum) + (base - vec3f(base_lum)) * (1.0 + lobe * sat * sun_lum + glow_env_lum * sat), vec3f(0.0));
+  let wgt = (1.0 - metallic) * (vec3f(1.0) - Fr * env_w);
+  let d0 = base_pp * df * wgt;
+  let achroma = (1.0 - chroma) * (1.0 - chroma);
+  let add = base_pp * sun * (lobe * (1.0 - sat)) * wgt + base_pp * (glow_env * (1.0 - sat) + env_irr * env_diffuse) * wgt + d0 * (view_light * sNdotV * sNdotV + max(light_gain - 1.0, 0.0) * achroma);
+  let room = (vec3f(1.0) - d0) / max(add, vec3f(1e-4));
+  let s_max = min(min(room.x, min(room.y, room.z)), 1e4);
+  let knee = select(0.0, s_max * (1.0 - exp(-1.0 / s_max)), s_max > 0.0);
+  let diffuse = (d0 + add * knee) * (1.0 - P_VIEW_DARK * (1.0 - sNdotV) * (1.0 - sNdotV));
+  let under = diffuse + spec + refl;
+  let cNdotV = max(dot(Nc, V), 0.001); let cNdotL = max(dot(Nc, L), 0.0); let cNdotH = max(dot(Nc, H), 0.0);
+  let Fc = fresnel_rk(vec3f(0.04), cNdotV, coat_r, P_GRAZING) * coat;
+  let Fcs = fresnel(vec3f(0.04), VdotH) * coat;
+  let spec_coat = sun * spec_s * lit * (D_GGX(cNdotH, coat_r) * G_Smith(cNdotV, cNdotL, coat_r) * Fcs) / (4.0 * cNdotV * cNdotL + 0.001) * cNdotL;
+  let refl_coat = env_coat * Fc * refl_s;
+  return under * (vec3f(1.0) - Fc) + spec_coat + refl_coat;
+}
+@fragment fn fs_car(i: VO) -> @location(0) vec4f {
+  let uv = i.uvq.xy / i.uvq.z;
+  let albedo = textureSampleBias(tx, sm, uv, u.lodBias);
+  let pk = textureSample(paintTx, sm, uv).rg;
+  let d = 1.0 / max(i.uvq.z, 1e-6);
+  let P = i.ray * d;
+  let p1 = dpdx(P); let p2 = dpdy(P);
+  let uv1 = dpdx(uv); let uv2 = dpdy(uv);
+  let fw = length(fwidth(uv));
+  let a = albedo.a * i.color.a;
+  if (u.alphaRef > 0.0 && a < u.alphaRef) { discard; }
+  var keep = select(1.0, clamp(pk.g / pk.r, 0.0, 1.0), pk.r > 1e-3);
+  keep = pow(keep, P_DARK_POWER);
+  keep = clamp(1.0 - P_DARK_MATTE * (1.0 - keep), 0.0, 1.0);
+  let V = -normalize(P);
+  var Ngeo = normalize(cross(p1, p2));
+  if (dot(Ngeo, P) > 0.0) { Ngeo = -Ngeo; }
+  if (i.nrm.w > 0.5) {
+    var ns = i.nrm.xyz; let l2 = dot(ns, ns);
+    if (l2 > 1e-24) {
+      ns = ns * inverseSqrt(l2);
+      if (dot(ns, Ngeo) < 0.0) { ns = -ns; }
+      let nv = dot(ns, V);
+      if (nv < 0.05) { ns = normalize(ns + V * (0.05 - nv)); }
+      Ngeo = ns;
+    }
+  }
+  let N = Ngeo;
+  let chrome = P_METAL_MAP * keep;
+  let metal_c = clamp(P_METAL * keep + chrome, 0.0, 1.0);
+  let coat_c = clamp(P_COAT * (1.0 - chrome), 0.0, 1.0) * keep;
+  let rough = mix(1.0, P_ROUGH, keep);
+  let cg = 1.0 - P_COAT_GLOSS; let rough_coat = max(cg * cg, 0.02);
+  let T = cotangent(N, p1, p2, uv1, uv2);
+  let fade = clamp(2.0 - fw * P_FLAKE_SCALE, 0.0, 1.0);
+  var Nb = N;
+  if (P_FLAKE * keep * fade > 0.0) { Nb = tilt(T, flake_offset(uv, P_FLAKE_SCALE), P_FLAKE * keep * fade * 0.6); }
+  let Nc = N;
+  let vis = sunVisibility();
+  let sun = SUN_COL * P_SUN_REFL * vis;
+  let env_b = envGain(envK(Nb, V, rough * MAXMIP, P_SUN_REFL * vis), P_ENV_HDR);
+  let env_c = envGain(envK(Nc, V, rough_coat * MAXMIP, P_SUN_REFL * vis), P_ENV_HDR);
+  let env_irr = envCone(N, 60.0, P_ENV_HDR);
+  let env_glow = envCone(N, P_GLOW_ANG, P_ENV_HDR);
+  var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, albedo.rgb, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
+                      coat_c, rough_coat, P_GLOW * keep, P_VIEW_LIGHT * keep, env_irr, env_glow, P_ENV_DIFFUSE * keep, P_ENV_GLOW * keep,
+                      1.0 + (P_LIGHT_GAIN - 1.0) * keep);
+  rgb = mix(albedo.rgb * i.color.rgb, rgb, pk.r);   // texels the game does not paint keep the stock look
+  return vec4f(fog(rgb, i.uvq.z), a);
+}
+// the game's reflection pass over a car page: off the paint, which has its own
+@fragment fn fs_mask(i: VO) -> @location(0) vec4f {
+  let pk = textureSample(paintTx, sm2, i.aux.xy / max(i.aux.z, 1e-6)).r;
+  var r = shade(i);
+  return vec4f(r.rgb, r.a * (1.0 - pk));
+}
 // a cube face (PC dx11_shaders.h EmissiveGain, SunMaskOutput): em = gain, threshold, power (below 0: full-bright vertices only), sun sprite
 @fragment fn fs_cap(i: VO) -> @location(0) vec4f {
   var r = shade(i);
@@ -132,15 +288,23 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     enc.beginRenderPass({ colorAttachments: [{ view: drawView, resolveTarget: colorView, loadOp: 'load', storeOp: 'store' }] }).end();
   };
 
-  const module = device.createShaderModule({ code: SHADER });
+  // ?paintdbg=1..6: what the paint shader sees (1 paint mask: magenta paint, green stock; 2 normal; 3 environment; 4 vertex light; 5 keep/paint/sun visibility; 6 albedo)
+  const paintDbg = Number(new URLSearchParams(location.search).get('paintdbg') ?? 0);
+  const PDBG = ['', 'select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 1.0), pk.r > 0.5)', 'N * 0.5 + 0.5', 'env_b', 'i.color.rgb', 'vec3f(keep, pk.r, vis)', 'albedo.rgb'][paintDbg] ?? '';
+  let code = PDBG ? SHADER.replace('return vec4f(fog(rgb, i.uvq.z), a);', `return vec4f(${PDBG}, 1.0);`) : SHADER;
+  const module = device.createShaderModule({ code });
+  void module.getCompilationInfo().then(ci => { for (const m of ci.messages) log(`[gpu] shader ${m.type} line ${m.lineNum}: ${m.message}`); });
   const blitModule = device.createShaderModule({ code: BLIT });
   const uboLayout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true } }] });
   const texLayout = device.createBindGroupLayout({ entries: [
-    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} }] });
-  const pipeLayout = device.createPipelineLayout({ bindGroupLayouts: [uboLayout, texLayout] });
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} }] });
+  const cubeLayout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} }] });
+  const pipeLayout = device.createPipelineLayout({ bindGroupLayouts: [uboLayout, texLayout, cubeLayout] });
   const vbuf = device.createBuffer({ size: VERTEX_BUFFER, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
   const ubo = device.createBuffer({ size: UBO_SLOTS * UBO_ALIGN, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const uboGroup = device.createBindGroup({ layout: uboLayout, entries: [{ binding: 0, resource: { buffer: ubo, size: 64 } }] });
+  const uboGroup = device.createBindGroup({ layout: uboLayout, entries: [{ binding: 0, resource: { buffer: ubo, size: 192 } }] });
   const uboData = new ArrayBuffer(UBO_SLOTS * UBO_ALIGN);
   const uboF = new Float32Array(uboData);
 
@@ -170,7 +334,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
         { shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x2' },
         { shaderLocation: 2, offset: 24, format: 'unorm8x4' }, { shaderLocation: 3, offset: 28, format: 'unorm8x4' },
         { shaderLocation: 4, offset: 32, format: 'float32x4' }] }] },
-      fragment: { module, entryPoint: cap ? 'fs_cap' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
+      fragment: { module, entryPoint: cap ? 'fs_cap' : key & (1 << 15) ? 'fs_car' : key & (1 << 16) ? 'fs_mask' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
       primitive: { topology: TOPO[topo], cullMode: topo === 0 ? CULL[cull] : 'none', frontFace: 'cw' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: !!zwrite, depthCompare: DEPTH[zcmp] },
       multisample: { count: cap ? 1 : SAMPLES },
@@ -194,14 +358,26 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
 
   const white = device.createTexture({ size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
   queue.writeTexture({ texture: white }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, [1, 1]);
-  interface T { tex: GPUTexture; groups: Map<number, GPUBindGroup>; levels: number }
+  interface T { id?: number; tex: GPUTexture; groups: Map<number, GPUBindGroup>; levels: number; paint?: GPUTexture }
   const textures = new Map<number, T>();
   const whiteT: T = { tex: white, groups: new Map(), levels: 1 };
-  const group = (t: T, key: number) => {
-    let g = t.groups.get(key);
-    if (!g) { g = device.createBindGroup({ layout: texLayout, entries: [{ binding: 0, resource: t.tex.createView() }, { binding: 1, resource: sampler(key) }] }); t.groups.set(key, g); }
+  const noPaint = device.createTexture({ size: [1, 1], format: 'rg8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  const paintSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear' });
+  // pt: the texture whose paint map goes with it (the page itself, or the car page under the game's reflection pass)
+  const group = (t: T, key: number, pt: T | undefined) => {
+    const gk = key + (pt ? (pt === t ? 1 : 2) * 1024 : 0) + (pt && pt !== t ? 4096 * (pt.id ?? 0) : 0);
+    let g = t.groups.get(gk);
+    if (!g) {
+      g = device.createBindGroup({ layout: texLayout, entries: [{ binding: 0, resource: t.tex.createView() }, { binding: 1, resource: sampler(key) },
+        { binding: 2, resource: (pt?.paint ?? noPaint).createView() }, { binding: 3, resource: paintSampler }] });
+      t.groups.set(gk, g);
+    }
     return g;
   };
+  const cubeSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear' });
+  const dummyCube = device.createTexture({ size: [1, 1, 6], format: CUBE_FORMAT, usage: GPUTextureUsage.TEXTURE_BINDING });
+  const cubeGroup = device.createBindGroup({ layout: cubeLayout, entries: [{ binding: 0, resource: cubeTex.createView({ dimension: 'cube' }) }, { binding: 1, resource: cubeSampler }] });
+  const dummyCubeGroup = device.createBindGroup({ layout: cubeLayout, entries: [{ binding: 0, resource: dummyCube.createView({ dimension: 'cube' }) }, { binding: 1, resource: cubeSampler }] });
 
   // the texture's lower levels from level 0 (a partial update of a streamed texture)
   const genSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
@@ -263,7 +439,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     let present = false, draws = 0, verts = 0, ubos = 0;
     let read: { seq: number; x: number; y: number; w: number; h: number; px: number; done: number } | null = null;
     const toFree: GPUTexture[] = [];
-    let curTex: T = whiteT, curSampler = 0, bindDirty = true, pipeKey = -1;
+    let curTex: T = whiteT, curSampler = 0, bindDirty = true, pipeKey = -1, curPaint: T | undefined;
     let sc = [0, 0, lw, lh], scDirty = true, uboOff = 0;
     const begin = () => {
       if (pass) return pass;
@@ -274,6 +450,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
         depthStencilAttachment: { view: capFace >= 0 ? cubeDepthView : depthView, depthLoadOp: load, depthClearValue: 1, depthStoreOp: 'store' },
       });
       pass.setVertexBuffer(0, vbuf);
+      pass.setBindGroup(2, capFace >= 0 ? dummyCubeGroup : cubeGroup);
       pipeKey = -1; bindDirty = true; scDirty = true;
       return pass;
     };
@@ -298,34 +475,49 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
           const id = cmd[i], w = cmd[i + 1], h = cmd[i + 2], levels = cmd[i + 3]; i += 4;
           const old = textures.get(id);
           if (old) toFree.push(old.tex);
-          textures.set(id, { tex: device.createTexture({ size: [w, h], format: 'rgba8unorm', mipLevelCount: levels,
+          if (old?.paint) toFree.push(old.paint);
+          textures.set(id, { id, tex: device.createTexture({ size: [w, h], format: 'rgba8unorm', mipLevelCount: levels,
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT }), groups: new Map(), levels });
           break; }
         case C.TEX_DESTROY: {
           const id = cmd[i++], t = textures.get(id);
-          if (t) { toFree.push(t.tex); textures.delete(id); }
+          if (t) { toFree.push(t.tex); if (t.paint) toFree.push(t.paint); textures.delete(id); }
           break; }
         case C.TEX_WRITE: {
           const id = cmd[i], level = cmd[i + 1], x = cmd[i + 2], y = cmd[i + 3], w = cmd[i + 4], h = cmd[i + 5], ofs = cmd[i + 6]; i += 7;
           const t = textures.get(id);
           if (t) queue.writeTexture({ texture: t.tex, mipLevel: level, origin: [x, y] }, mem as unknown as ArrayBuffer, { offset: upPtr + ofs, bytesPerRow: w * 4, rowsPerImage: h }, [w, h]);
           break; }
+        case C.PAINT: {
+          const id = cmd[i], w = cmd[i + 1], h = cmd[i + 2], ofs = cmd[i + 3]; i += 4;
+          const t = textures.get(id);
+          if (t) {
+            if (t.paint) toFree.push(t.paint);
+            t.paint = undefined;
+            if (w) {
+              t.paint = device.createTexture({ size: [w, h], format: 'rg8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+              queue.writeTexture({ texture: t.paint }, mem as unknown as ArrayBuffer, { offset: upPtr + ofs, bytesPerRow: w * 2, rowsPerImage: h }, [w, h]);
+            }
+            t.groups.clear();
+            for (const o of textures.values()) if (o !== t) for (const k of [...o.groups.keys()]) if (k >= 4096) o.groups.delete(k);
+          }
+          break; }
         case C.TEX_GENMIPS: { const t = textures.get(cmd[i++]); if (t) genMips(t); break; }
         case C.SCISSOR: sc = [cmd[i], cmd[i + 1], cmd[i + 2], cmd[i + 3]]; i += 4; scDirty = true; break;
         case C.PIPE: { const k = cmd[i++]; if (k !== pipeKey) { pipeKey = k; begin().setPipeline(pipeline(k)); } break; }
-        case C.BIND: { const id = cmd[i++]; curSampler = cmd[i++]; curTex = (id && textures.get(id)) || whiteT; bindDirty = true; break; }
+        case C.BIND: { const id = cmd[i++]; curSampler = cmd[i++]; const pid = cmd[i++]; curTex = (id && textures.get(id)) || whiteT; curPaint = pid ? textures.get(pid) : undefined; bindDirty = true; break; }
         case C.UNIFORM: {
           if (ubos < UBO_SLOTS) {
             uboOff = ubos * UBO_ALIGN;
-            uboF.set(cf.subarray(i, i + 16), uboOff / 4);
+            uboF.set(cf.subarray(i, i + 48), uboOff / 4);
             ubos++;
             begin().setBindGroup(0, uboGroup, [uboOff]);
           }
-          i += 16;
+          i += 48;
           break; }
         case C.DRAW: {
           const first = cmd[i++], count = cmd[i++], p = begin();
-          if (bindDirty) { p.setBindGroup(1, group(curTex, curSampler)); bindDirty = false; }
+          if (bindDirty) { p.setBindGroup(1, group(curTex, curSampler, curPaint)); bindDirty = false; }
           if (scDirty) {
             const tw = capFace >= 0 ? CUBE_SIZE : W, th = capFace >= 0 ? CUBE_SIZE : H;
             const x0 = Math.max(0, Math.floor(sc[0] * tw / lw)), y0 = Math.max(0, Math.floor(sc[1] * th / lh));

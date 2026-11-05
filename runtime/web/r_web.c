@@ -22,12 +22,13 @@ void guest_wait_begin(void);
 void guest_wait_end(void);
 
 /* ---- protocol ---- */
-enum { C_VIDEO = 1, C_TEX_CREATE, C_TEX_DESTROY, C_TEX_WRITE, C_TEX_GENMIPS, C_SCISSOR, C_PIPE, C_BIND, C_UNIFORM, C_DRAW, C_PRESENT, C_READRECT, C_TARGET, C_CUBE_MIPS };
+enum { C_VIDEO = 1, C_TEX_CREATE, C_TEX_DESTROY, C_TEX_WRITE, C_TEX_GENMIPS, C_SCISSOR, C_PIPE, C_BIND, C_UNIFORM, C_DRAW, C_PRESENT, C_READRECT, C_TARGET, C_CUBE_MIPS, C_PAINT };
 #define SEGS 3
 #define CMD_WORDS (1u << 18)
 #define VTX_BYTES (24u << 20)
 #define UP_BYTES  (24u << 20)
 #define VSIZE 48
+#define UNI 48                 /* floats of a draw's uniform block */
 typedef struct {
     volatile int32_t ready;         /* 0 free, 1 published (game -> page -> 0) */
     uint32_t cmd_words, vtx_bytes, up_bytes, has_present;
@@ -99,7 +100,7 @@ static int g_filter = 1, g_clamp_s = 1, g_clamp_t = 1; static float g_lodbias;
 static int g_clip[4], g_clipvalid;
 /* textures */
 #define MAX_TEX 8192
-typedef struct { int used, w, h, fmt, levels, cutout, keyed, seg; } Tex;
+typedef struct { int used, w, h, fmt, levels, cutout, keyed, seg, paint; } Tex;
 static Tex g_tex[MAX_TEX];
 static int g_bound;             /* slot + 1, 0 none */
 #define LFB_SLOT (MAX_TEX - 1)
@@ -120,9 +121,10 @@ static int hard_wanted(void){
 
 /* what the next draw needs; sent when it differs from what this segment last sent */
 static uint32_t g_s_pipe = ~0u, g_s_sampler = ~0u, g_s_tex = ~0u, g_s_scissor[4]; static int g_s_scissor_ok, g_s_video;
-static float g_s_uni[16]; static int g_s_uni_ok;
+static float g_s_uni[UNI]; static int g_s_uni_ok;
+static uint32_t g_s_paint = ~0u;
 static uint32_t g_draw_first, g_draw_count; static int g_draw_open;
-static void dirty_all(void){ g_s_pipe = g_s_sampler = g_s_tex = ~0u; g_s_scissor_ok = g_s_uni_ok = g_s_video = 0; }
+static void dirty_all(void){ g_s_pipe = g_s_sampler = g_s_tex = g_s_paint = ~0u; g_s_scissor_ok = g_s_uni_ok = g_s_video = 0; }
 static void close_draw(void){
     if (g_draw_open && g_draw_count){       /* in cmd_room's margin: seg_publish comes here too */
         g_cmd[g_ncmd++] = C_DRAW; g_cmd[g_ncmd++] = g_draw_first; g_cmd[g_ncmd++] = g_draw_count;
@@ -130,17 +132,42 @@ static void close_draw(void){
     g_draw_open = 0; g_draw_count = 0;
 }
 /* the states of one draw, in full */
-typedef struct { int blend, zcmp, zwrite, cull, topo, colorwrite; int tex; int filter, cs, ct, mips; float alpharef, bias, fogon; int hard; float depthbias; } DrawState;
+typedef struct { int blend, zcmp, zwrite, cull, topo, colorwrite; int tex; int filter, cs, ct, mips; float alpharef, bias, fogon; int hard; float depthbias; int paint, paint_tex; } DrawState;
 
 /* a cube face is the target (pu_cube.c) */
-static int g_cap, g_cap_clear, g_cap_opaque, g_cap_sun;
+static int g_cap, g_cap_clear, g_cap_opaque, g_cap_sun, g_cube_faces;
+extern float g_paint_sun[3];
+/* the paint shader's camera (PC car_reflection.cpp BuildConstants, materials.cpp): basis rows, projection, the pixels' centre and half size,
+ * the game's car light in camera space */
+static void paint_uniform(float *u){
+    const uint32_t eagl = MR32(0x0069E0D4u), engine = MR32(0x00628130u);
+    const uint32_t view = engine ? MR32(engine + 0x10) : 0, cam = view ? MR32(view + 0x0C) : 0;
+    if (!eagl || !cam) return;
+    float R[3], U[3], F[3], f;
+    memcpy(R, g_mem + view + 0xE8, 12); memcpy(U, g_mem + view + 0xF4, 12); memcpy(F, g_mem + view + 0x100, 12);
+    for (int k = 0; k < 3; k++){ u[16 + k] = R[k]; u[20 + k] = U[k]; u[24 + k] = F[k]; }
+    u[19] = g_cube_faces >= 6 ? 1.0f : 0.0f;    /* the cube holds a whole capture */
+    u[23] = u[19];                             /* its alpha is the sun mask */
+    memcpy(&f, g_mem + cam + 0x148, 4); u[28] = f;
+    memcpy(&f, g_mem + cam + 0x15C, 4); u[29] = -f;
+    memcpy(&f, g_mem + cam + 0x168, 4); u[30] = -f;
+    memcpy(&f, g_mem + cam + 0x16C, 4); u[31] = -f;
+    memcpy(&u[32], g_mem + eagl + 0x38, 4); memcpy(&u[33], g_mem + eagl + 0x3C, 4);
+    memcpy(&u[34], g_mem + eagl + 0x2C, 4); memcpy(&u[35], g_mem + eagl + 0x30, 4);
+    const float *sd = g_paint_sun;
+    float sc[3] = { R[0] * sd[0] + R[1] * sd[1] + R[2] * sd[2], U[0] * sd[0] + U[1] * sd[1] + U[2] * sd[2], -(F[0] * sd[0] + F[1] * sd[1] + F[2] * sd[2]) };
+    const float l = sqrtf(sc[0] * sc[0] + sc[1] * sc[1] + sc[2] * sc[2]);
+    if (l > 1e-6f) for (int k = 0; k < 3; k++) u[36 + k] = sc[k] / l;
+}
 static void emit_state(const DrawState *d){
     /* a change of anything closes the running draw */
     uint32_t pipe = (uint32_t)d->blend | (uint32_t)d->zcmp << 3 | (uint32_t)d->zwrite << 6 | (uint32_t)d->cull << 7 |
                     (uint32_t)d->topo << 9 | (uint32_t)d->colorwrite << 11;
+    pipe |= (uint32_t)(d->paint == 1) << 15 | (uint32_t)(d->paint == 2) << 16;
     if (g_cap) pipe |= 1u << 12 | (uint32_t)(g_cap_clear && d->blend == 0) << 13 | (uint32_t)(g_cap_sun && d->blend == 1) << 14;
     uint32_t sam = (uint32_t)d->filter | (uint32_t)d->cs << 1 | (uint32_t)d->ct << 3 | (uint32_t)d->mips << 5;
-    float u[16];
+    float u[UNI];
+    memset(u, 0, sizeof u);
     u[0] = (float)g_lw; u[1] = (float)g_lh; u[2] = d->alpharef; u[3] = d->depthbias;
     u[4] = (float)((g_fogcolor >> 16) & 255) / 255.0f; u[5] = (float)((g_fogcolor >> 8) & 255) / 255.0f;
     u[6] = (float)(g_fogcolor & 255) / 255.0f; u[7] = d->fogon;
@@ -161,20 +188,22 @@ static void emit_state(const DrawState *d){
         }
         u[15] = g_cap_sun && d->blend == 1 ? 1.0f : 0.0f;
     }
+    if (d->paint) paint_uniform(u);
     int sc[4] = { 0, 0, g_lw, g_lh };
     if (g_clipvalid) memcpy(sc, g_clip, sizeof sc);
     int ch = pipe != g_s_pipe || sam != g_s_sampler || (uint32_t)d->tex != g_s_tex || !g_s_uni_ok || memcmp(u, g_s_uni, sizeof u) ||
              !g_s_scissor_ok || memcmp(sc, g_s_scissor, sizeof sc) || !g_s_video;
     if (!ch) return;
     close_draw();
-    cmd_room(40);
+    cmd_room(80);
     if (!g_s_video){ g_cmd[g_ncmd++] = C_VIDEO; g_cmd[g_ncmd++] = (uint32_t)g_lw; g_cmd[g_ncmd++] = (uint32_t)g_lh; g_s_video = 1; }
     if (pipe != g_s_pipe){ g_cmd[g_ncmd++] = C_PIPE; g_cmd[g_ncmd++] = pipe; g_s_pipe = pipe; }
-    if (sam != g_s_sampler || (uint32_t)d->tex != g_s_tex){
-        g_cmd[g_ncmd++] = C_BIND; g_cmd[g_ncmd++] = (uint32_t)d->tex; g_cmd[g_ncmd++] = sam; g_s_sampler = sam; g_s_tex = (uint32_t)d->tex;
+    if (sam != g_s_sampler || (uint32_t)d->tex != g_s_tex || (uint32_t)d->paint_tex != g_s_paint){
+        g_cmd[g_ncmd++] = C_BIND; g_cmd[g_ncmd++] = (uint32_t)d->tex; g_cmd[g_ncmd++] = sam; g_cmd[g_ncmd++] = (uint32_t)d->paint_tex;
+        g_s_sampler = sam; g_s_tex = (uint32_t)d->tex; g_s_paint = (uint32_t)d->paint_tex;
         if (d->tex > 0 && d->tex <= MAX_TEX) g_tex[d->tex - 1].seg = g_seg_serial;
     }
-    if (!g_s_uni_ok || memcmp(u, g_s_uni, sizeof u)){ g_cmd[g_ncmd++] = C_UNIFORM; memcpy(g_cmd + g_ncmd, u, sizeof u); g_ncmd += 16; memcpy(g_s_uni, u, sizeof u); g_s_uni_ok = 1; }
+    if (!g_s_uni_ok || memcmp(u, g_s_uni, sizeof u)){ g_cmd[g_ncmd++] = C_UNIFORM; memcpy(g_cmd + g_ncmd, u, sizeof u); g_ncmd += UNI; memcpy(g_s_uni, u, sizeof u); g_s_uni_ok = 1; }
     if (!g_s_scissor_ok || memcmp(sc, g_s_scissor, sizeof sc)){
         g_cmd[g_ncmd++] = C_SCISSOR; for (int i = 0; i < 4; i++) g_cmd[g_ncmd++] = (uint32_t)sc[i];
         memcpy(g_s_scissor, sc, sizeof sc); g_s_scissor_ok = 1;
@@ -233,7 +262,9 @@ static void ui_rects(DV *verts, int n){
 }
 static int tan_substitute(int bound);
 static float tan_voffset(int bound);
+static int g_paint_on = -1, g_mask_slot;
 static void game_state(DrawState *d, int topo){
+    if (g_paint_on < 0){ const char *e = getenv("PAINT"); g_paint_on = !(e && *e == '0'); }
     d->blend = g_blend; d->zcmp = g_zcmp; d->zwrite = g_zwrite; d->cull = g_cull; d->topo = topo; d->colorwrite = 1;
     d->tex = tan_substitute(g_bound); d->filter = g_filter; d->cs = g_clamp_s; d->ct = g_clamp_t; d->mips = g_race ? 1 : 0;
     d->alpharef = g_alpharef; d->fogon = g_fogon ? 1.0f : 0.0f; d->depthbias = g_depthbias;
@@ -241,6 +272,11 @@ static void game_state(DrawState *d, int topo){
     d->hard = hard_wanted();
     d->bias = d->mips ? g_lodbias : 0.0f;
     if (!(d->bias > -16.0f && d->bias < 16.0f)) d->bias = 0.0f;
+    d->paint = 0; d->paint_tex = 0;
+    if (g_race && !g_cap && g_paint_on && topo == 0){
+        if (d->tex > 0 && g_tex[d->tex - 1].paint){ d->paint = 1; d->paint_tex = d->tex; }
+        else if (g_mask_slot){ d->paint = 2; d->paint_tex = g_mask_slot; }
+    }
 }
 /* The frontend's loading screen comes after the race's video mode (pu_hooks.c) and is laid out in 640x480 around the screen's
  * centre: scaled to the screen until the race's first 3D draw. */
@@ -291,6 +327,8 @@ static void sprite(const uint8_t *p0, const uint8_t *p1){
     tr.x = b.x; tr.u = b.u; bl.y = b.y; bl.v = b.v;
     quad((uint8_t *)&tl, (uint8_t *)&tr, (uint8_t *)&br, (uint8_t *)&bl);
 }
+static uint32_t g_pv_vb, g_pv_ib; static int g_pv_count, g_pv_slot;
+static float g_pv_uv[MAX_VERTS * 2];
 void r_draw(const char *n, const uint32_t *a){
     const int count = (int)a[0];
     if (!strcmp(n, "drawtri@12")){ DV v[3]; v[0] = conv(GP(a[0])); v[1] = conv(GP(a[1])); v[2] = conv(GP(a[2])); flush_verts(v, 3, 0); return; }
@@ -319,6 +357,19 @@ void r_draw(const char *n, const uint32_t *a){
     if (!strcmp(n, "drawtrimesh@12")){
         int nv = count * 3; if (nv > MAX_VERTS) nv = MAX_VERTS;
         for (int i = 0; i < nv; i++) o[i] = conv(VI(vb, ib, i));
+        const int bound = tan_substitute(g_bound);
+        if (g_race && !g_cap && bound && g_tex[bound - 1].paint){
+            g_pv_vb = a[1]; g_pv_ib = a[2]; g_pv_count = count; g_pv_slot = bound;
+            for (int i = 0; i < nv; i++){ g_pv_uv[i * 2] = o[i].u; g_pv_uv[i * 2 + 1] = o[i].v; }
+        }
+        else if (g_race && !g_cap && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && g_pv_slot){
+            for (int i = 0; i < nv; i++){ o[i].rect[0] = g_pv_uv[i * 2]; o[i].rect[1] = g_pv_uv[i * 2 + 1]; o[i].rect[2] = 0.0f; o[i].rect[3] = 7.0f; }
+            g_mask_slot = g_pv_slot;
+            flush_verts(o, nv, 0);
+            g_mask_slot = 0;
+            return;
+        }
+        else g_pv_vb = 0;
         flush_verts(o, nv, 0); return; }
     if (!strcmp(n, "drawtrifan@12")){
         if (count < 3) return;
@@ -637,6 +688,7 @@ static float tan_voffset(int bound){
     const TanEntry *e = &g_tan[g_tan_of[bound - 1] - 1];
     return e->kind == 2 ? (float)(tan_ticks() & 0x3FF) * e->scroll : 0.0f;     /* whole repeats at the wrap */
 }
+int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg);
 void r_tupdate(uint32_t t, uint32_t data, int palette){
     (void)palette;
     if (!t || t > LFB_SLOT || !data || !g_tex[t - 1].used) return;
@@ -653,6 +705,20 @@ void r_tupdate(uint32_t t, uint32_t data, int palette){
     upload_chain(slot, rgba);
     free(rgba);
     tan_upload(slot);
+    /* runtime/pu_paint.c: a car page's paint map, RG8 */
+    const uint32_t bytes = (uint32_t)n * 2u;
+    uint8_t *rg = malloc(bytes);
+    const int had = g_tex[slot].paint;
+    g_tex[slot].paint = rg && bytes <= UP_BYTES && paint_map(data, w, h, g_tex[slot].fmt, rg);
+    if (g_tex[slot].paint || had){
+        if (g_tex[slot].seg == g_seg_serial || g_nup + bytes > UP_BYTES) seg_publish(0);
+        cmd_room(6);
+        if (g_tex[slot].paint) memcpy(g_up + g_nup, rg, bytes);
+        uint32_t *c = g_cmd + g_ncmd; g_ncmd += 5;
+        c[0] = C_PAINT; c[1] = (uint32_t)slot + 1; c[2] = g_tex[slot].paint ? (uint32_t)w : 0u; c[3] = (uint32_t)h; c[4] = g_nup;
+        if (g_tex[slot].paint) g_nup += bytes;
+    }
+    free(rg);
 }
 void r_tupdaterect(uint32_t t, int mip, int x, int y, int rw, int rh, int pitch, uint32_t data, int fmt){
     if (!t || t > LFB_SLOT || !data || !g_tex[t - 1].used) return;
@@ -742,7 +808,7 @@ void r_restore(void){ close_draw(); seg_publish(0); }
 void r_setvideomode(int w, int h, int bpp){
     g_race = bpp == 32 && w > 640;         /* the frontend is 640x480x32 too (patches), the race never (pu_hooks.c) */
     g_st[THRASH_STATE_SCREEN_WIDTH] = w; g_st[THRASH_STATE_SCREEN_HEIGHT] = h;
-    if (w > 0 && h > 0 && (w != g_lw || h != g_lh)){ close_draw(); g_lw = w; g_lh = h; g_s_video = 0; g_clipvalid = 0; }   /* the old clip is the old mode's: the loading screen comes before the next THRASH_clip */
+    if (w > 0 && h > 0 && (w != g_lw || h != g_lh)){ close_draw(); g_lw = w; g_lh = h; g_cube_faces = 0; g_s_video = 0; g_clipvalid = 0; }   /* the old clip is the old mode's: the loading screen comes before the next THRASH_clip */
 }
 void r_window(int idx){ if (idx >= 0 && idx <= 7) g_curwin = idx; }
 void r_clip(int x1, int y1, int x2, int y2){ g_clip[0] = x1; g_clip[1] = y1; g_clip[2] = x2; g_clip[3] = y2; g_clipvalid = 1; }
@@ -883,6 +949,7 @@ void r_capture_target(int face){
     dirty_all();
 }
 void r_capture_mips(int face){
+    g_cube_faces++;
     cmd_room(4);
     g_cmd[g_ncmd++] = C_CUBE_MIPS; g_cmd[g_ncmd++] = (uint32_t)face;
 }
