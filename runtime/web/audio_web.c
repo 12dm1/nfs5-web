@@ -8,6 +8,10 @@
 #include <unistd.h>
 
 void pu_audio_render(float *out, int frames, int rate, int64_t t_ahead_us);
+extern volatile uint32_t g_audio_resyncs;
+void audio_lead_report(void);
+#include <time.h>
+static uint64_t mono_us(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u; }
 
 #define RATE 48000
 #define CAP (1u << 14)                  /* frames, a power of two: 340 ms */
@@ -21,11 +25,30 @@ static float g_tmp[480 * 2];
 
 static void *audio_thread(void *arg){
     (void)arg;
+    /* AUDIOSTAT=1: every 10 s the lowest fill, the times the ring ran dry, the longest pause of this thread and of a render */
+    const char *st = getenv("AUDIOSTAT");
+    const int stat = st && *st && *st != '0';
+    uint64_t t_stat = mono_us(), t_last = t_stat, gap_max = 0, render_max = 0; uint32_t q_min = ~0u, dry = 0, renders = 0;
     for (;;){
         const uint32_t wr = g_ring.wr, rd = __atomic_load_n(&g_ring.rd, __ATOMIC_ACQUIRE);
         const uint32_t queued = wr - rd;
+        if (stat){
+            const uint64_t t = mono_us();
+            if (t - t_last > gap_max) gap_max = t - t_last;
+            t_last = t;
+            if (queued < q_min) q_min = queued;
+            if (t - t_stat >= 10000000u){
+                fprintf(stderr, "[audiostat] t %llu s min fill %u frames, dry %u, longest pause %llu us, longest render %llu us, renders %u, resyncs %u\n",
+                        (unsigned long long)(t / 1000000u), q_min, dry, (unsigned long long)gap_max, (unsigned long long)render_max, renders, g_audio_resyncs);
+                audio_lead_report();
+                t_stat = t; q_min = ~0u; dry = 0; gap_max = 0; render_max = 0; renders = 0;
+            }
+        }
         if (queued + 480 > TARGET){ usleep(3000); continue; }
+        if (queued == 0) dry++;
+        const uint64_t r0 = stat ? mono_us() : 0;
         pu_audio_render(g_tmp, 480, RATE, (int64_t)queued * 1000000 / RATE);
+        if (stat){ const uint64_t r = mono_us() - r0; if (r > render_max) render_max = r; renders++; }
         for (uint32_t i = 0; i < 480; i++){
             const uint32_t k = (wr + i) & (CAP - 1);
             g_ring.data[k * 2] = g_tmp[i * 2]; g_ring.data[k * 2 + 1] = g_tmp[i * 2 + 1];

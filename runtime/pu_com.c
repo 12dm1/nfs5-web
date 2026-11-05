@@ -132,6 +132,20 @@ static uint64_t now_us(void){
 #define SBUF_MAX 256
 static uint32_t g_sbuf[SBUF_MAX]; static int g_nsbuf;
 static pthread_mutex_t g_amx = PTHREAD_MUTEX_INITIALIZER;
+/* AUDIOSTAT: where the game last locked each buffer (end of the region), and how far ahead of the mixer that was */
+static int g_audio_stat;
+static uint32_t g_lock_end[SBUF_MAX], g_lock_buf[SBUF_MAX];
+static int32_t g_lead_min[SBUF_MAX]; static uint32_t g_lead_over[SBUF_MAX], g_lead_n[SBUF_MAX];
+static int lock_slot(uint32_t b){ for (int i = 0; i < SBUF_MAX; i++){ if (g_lock_buf[i] == b) return i; if (!g_lock_buf[i]){ g_lock_buf[i] = b; g_lead_min[i] = 0x7fffffff; return i; } } return -1; }
+void audio_lead_report(void){
+    for (int i = 0; i < SBUF_MAX && g_lock_buf[i]; i++){
+        if (!g_lead_n[i]) continue;
+        const uint32_t b = g_lock_buf[i];
+        fprintf(stderr, "[audiostat] buf 0x%08x size %u bps %u: min lead %.1f ms, mixer past the game's writes %u of %u blocks\n",
+                b, BUF_SIZE(b), BUF_BPS(b), BUF_BPS(b) ? g_lead_min[i] * 1000.0 / BUF_BPS(b) : 0.0, g_lead_over[i], g_lead_n[i]);
+        g_lead_min[i] = 0x7fffffff; g_lead_over[i] = 0; g_lead_n[i] = 0;
+    }
+}
 static void sbuf_add(uint32_t b){ pthread_mutex_lock(&g_amx); if (g_nsbuf < SBUF_MAX) g_sbuf[g_nsbuf++] = b; pthread_mutex_unlock(&g_amx); }
 static void sbuf_del(uint32_t b){ pthread_mutex_lock(&g_amx);
     for (int i = 0; i < g_nsbuf; i++) if (g_sbuf[i] == b){ g_sbuf[i] = g_sbuf[--g_nsbuf]; break; }
@@ -398,6 +412,7 @@ static uint32_t dsbuf_call(CPU *c, uint32_t b, int m, const uint32_t *a){
         if (fl & 2u){ off = 0; want = sz; }     /* DSBLOCK_ENTIREBUFFER */
         off %= sz; if (!want || want > sz) want = sz;
         uint32_t b1 = want <= sz - off ? want : sz - off, b2 = want - b1;
+        if (g_audio_stat){ const int k = lock_slot(b); if (k >= 0) g_lock_end[k] = (off + want) % sz; }
         if (a[3]) MR32(a[3]) = BUF_DATA(b) + off;
         if (a[4]) MR32(a[4]) = b1;
         if (a[5]) MR32(a[5]) = b2 ? BUF_DATA(b) : 0u;
@@ -530,13 +545,20 @@ void com_report(void){
  * is heard is what the game's cursor says is playing.  Volume (1/100 dB),
  * pan, SetFrequency, 8/16-bit, mono/stereo; 3D parameters not yet. */
 static volatile int g_audio_muted;
+volatile uint32_t g_audio_resyncs;
 void audio_set_muted(int on){ g_audio_muted = on; }
 static double db_gain(int32_t v){ if (v >= 0) return 1.0; if (v <= -10000) return 0.0; return pow(10.0, v / 2000.0); }
 void pu_audio_render(float *out, int frames, int rate, int64_t t_ahead_us){
     static double s_t = -1;                  /* mixer time of the next frame, us */
     memset(out, 0, sizeof(float) * 2u * (size_t)frames);
-    const double now = (double)now_us() + (double)t_ahead_us;
-    if (s_t < 0 || fabs(s_t - now) > 40000.0) s_t = now;   /* start / after a stall: resync */
+    /* The mixer reads at the play cursor, not t_ahead_us ahead of it: the game streams into its one 400 ms buffer only a little
+     * past the write cursor (10 ms ahead), so reading 30-50 ms ahead played what it had not written yet (crackle after minutes,
+     * AUDIOSTAT showed up to 65 % of the blocks past its writes). What is heard lags the cursors by the ring's ~40 ms. */
+    (void)t_ahead_us;
+    const double now = (double)now_us();
+    static int s_stat = -1; if (s_stat < 0){ const char *e = getenv("AUDIOSTAT"); s_stat = e && *e && *e != '0'; }
+    g_audio_stat = s_stat;
+    if (s_t < 0 || fabs(s_t - now) > 40000.0){ if (s_t >= 0) g_audio_resyncs++; s_t = now; }   /* start / after a stall: resync */
     else s_t += (now - s_t) * 0.01;                         /* follow the clock's drift gently */
     const double dt = 1e6 / rate;
     static int dbg = -1; static double s_dbg; if (dbg < 0) dbg = getenv("AUDIODBG") != 0;
@@ -579,6 +601,18 @@ void pu_audio_render(float *out, int frames, int rate, int64_t t_ahead_us){
                     l0 = (p0[0] - 128) / 128.f; r0 = ch == 2 ? (p0[1] - 128) / 128.f : l0; l1 = (p1[0] - 128) / 128.f; r1 = ch == 2 ? (p1[1] - 128) / 128.f : l1; }
                 out[2 * i]     += (float)gl * (l0 + (l1 - l0) * w);
                 out[2 * i + 1] += (float)gr * (r0 + (r1 - r0) * w);
+            }
+            if (loop && s_stat){                                    /* how far the game's last write is ahead of this block's end */
+                const int k = lock_slot(b);
+                if (k >= 0){
+                    double f = (s_t + frames * dt - t0) * 1e-6 * fps + pos0;
+                    f = fmod(f, (double)nfr);
+                    const uint32_t rd = (uint32_t)f * al;
+                    const int32_t lead = (int32_t)((g_lock_end[k] + sz - rd) % sz);
+                    if (lead < g_lead_min[k]) g_lead_min[k] = lead;
+                    if ((uint32_t)lead > sz * 3u / 4u) g_lead_over[k]++;
+                    g_lead_n[k]++;
+                }
             }
         }
         pthread_mutex_unlock(&g_amx);
