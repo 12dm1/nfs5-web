@@ -15,7 +15,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | AI on converted tracks (AI1, AI2, AI4-6, `ai_tuning.cpp`, stuck reset of `race_trace.cpp`) | done | instruction hooks, `runtime/ext/hs_ai.cpp`; the [ai] values are constants; lap times not compared with the PC yet |
 | Animated textures (HZ4, `tex_anim.cpp`, `.tan`) | done | in `r_web.c`, names from an override of 004677D0; tables load, the look is not checked |
 | Animated objects, smackables (HZ2-3) | check | data-driven; look in a race whether anything is missing |
-| Bank-size guard on the mixer thread (HS15, `audio_guard.cpp`) | next | the sound arena overrun is a game bug that converted tracks reach |
+| Sound arena overrun (HS15) | done | fixed in the data on the PC (loops start at 0, banks up to 28000 samples), the layer brings them; `audio_guard.cpp` is diagnostics only |
 | Sky horizon, sky-only strip (HZ1, SKY1, G9) | check | mostly data; the renderer's cutout code came with dx11z |
 
 ## Picture
@@ -37,7 +37,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Similar opponents in Quick Race (OS1 `opponent_similar.cpp`) | later | |
 | Eight racers, cop cars in the list (`race_cars8.cpp`, `cop_cars.cpp`) | later | with the pursuit port |
 | Hot pursuit (PUR1-14: `cop_ai`, `pursuit_rules`, `pursuit_radio`, `pursuit_fx`, `hot_pursuit_menu`) | later | about 6000 lines; self-contained hooks, data in the layer |
-| Car-car collision fix (PHYS1 `collision_probe.cpp`) | next | small, gameplay bug |
+| Car-car collision fix (PHYS1 `collision_probe.cpp`) | done | normal gate: patches/exe_v35.txt; remote car velocity: override 004980D0; the race and the native IP race run, the feel of a hit is not checked |
 | Music after focus loss (MUS1 `music_focus.cpp`) | check | byte patch; test by hiding the tab |
 | Gamepad (GP1, NE1) | next | Gamepad API instead of SDL3 |
 

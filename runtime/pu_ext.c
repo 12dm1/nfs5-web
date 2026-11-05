@@ -239,3 +239,23 @@ void sub_0043e120(CPU *restrict c){
     if (other) morph_run(c, lodobj, other_lod, g_morph_other, other);
     POP32(c->eip);
 }
+
+/* ---- PHYS1 (PC wrapper collision_probe.cpp): in a network race a remote car's own physics velocity is not what it is doing; the
+ * car-car solve (004980D0, cdecl a, b) takes the velocity of its last packet (cm/s), and the car keeps its own afterwards. ---- */
+static int car_remote(uint32_t car){ return MR32(0x00657404u) != 0 && MR32(car + 0xDAC) != 0; }
+static void car_packet_vel(uint32_t car){
+    for (uint32_t i = 0; i < 3; i++){
+        const float v = (float)*(int16_t *)(g_mem + car + 0x4A + i * 2) * 0.01f;
+        memcpy(g_mem + car + 0x33C + i * 4, &v, 4);
+    }
+}
+void sub_004980d0(CPU *restrict c){
+    const uint32_t a = MR32(c->esp + 4), b = MR32(c->esp + 8);
+    const int ra = car_remote(a), rb = car_remote(b);
+    uint8_t own_a[12], own_b[12];
+    if (ra){ memcpy(own_a, g_mem + a + 0x33C, 12); car_packet_vel(a); }
+    if (rb){ memcpy(own_b, g_mem + b + 0x33C, 12); car_packet_vel(b); }
+    sub_004980d0_orig(c);
+    if (ra) memcpy(g_mem + a + 0x33C, own_a, 12);
+    if (rb) memcpy(g_mem + b + 0x33C, own_b, 12);
+}
