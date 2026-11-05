@@ -71,7 +71,7 @@ const PI = 3.14159265;
 const P_METAL = 0.2; const P_GRAZING = 0.5; const P_FLAKE_SCALE = 1200.0; const P_FLAKE = 0.015; const P_SILVER = 0.5;
 const P_COAT = 1.0; const P_COAT_GLOSS = 0.0; const P_PEEL = 0.0; const P_ROUGH = 0.15; const P_METAL_MAP = 0.0;
 const P_SPEC = 20.0; const P_REFL = 1.0; const P_GLOW = 35.8; const P_GLOW_ANG = 15.0; const P_GLOW_SAT = 0.6;
-const P_VIEW_LIGHT = 1.2; const P_VIEW_DARK = 0.25; const P_ENV_DIFFUSE = 0.3; const P_ENV_GLOW = 0.0; const P_ENV_HDR = 9.0;
+const P_VIEW_LIGHT = 1.2; const P_VIEW_DARK = 0.25; const P_ENV_DIFFUSE = 0.3; const P_ENV_GLOW = 0.0;
 const P_SUN_FOG = 150.0; const P_LIGHT_GAIN = 1.7; const P_DARK_MATTE = 1.0; const P_DARK_POWER = 4.0; const P_SUN_REFL = 0.1;
 const MAXMIP = 8.0;
 const SUN_COL = vec3f(1.0, 0.95, 0.85);
@@ -191,10 +191,10 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   let Nc = N;
   let vis = sunVisibility();
   let sun = SUN_COL * P_SUN_REFL * vis;
-  let env_b = envGain(envK(Nb, V, rough * MAXMIP, P_SUN_REFL * vis), P_ENV_HDR);
-  let env_c = envGain(envK(Nc, V, rough_coat * MAXMIP, P_SUN_REFL * vis), P_ENV_HDR);
-  let env_irr = envCone(N, 60.0, P_ENV_HDR);
-  let env_glow = envCone(N, P_GLOW_ANG, P_ENV_HDR);
+  let env_b = envGain(envK(Nb, V, rough * MAXMIP, P_SUN_REFL * vis), u.x0.x);
+  let env_c = envGain(envK(Nc, V, rough_coat * MAXMIP, P_SUN_REFL * vis), u.x0.x);
+  let env_irr = envCone(N, 60.0, u.x0.x);
+  let env_glow = envCone(N, P_GLOW_ANG, u.x0.x);
   var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, albedo.rgb, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
                       coat_c, rough_coat, P_GLOW * keep, P_VIEW_LIGHT * keep, env_irr, env_glow, P_ENV_DIFFUSE * keep, P_ENV_GLOW * keep,
                       1.0 + (P_LIGHT_GAIN - 1.0) * keep);

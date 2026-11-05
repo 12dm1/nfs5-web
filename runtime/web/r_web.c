@@ -147,14 +147,17 @@ static void paint_uniform(float *u){
     memcpy(R, g_mem + view + 0xE8, 12); memcpy(U, g_mem + view + 0xF4, 12); memcpy(F, g_mem + view + 0x100, 12);
     for (int k = 0; k < 3; k++){ u[16 + k] = R[k]; u[20 + k] = U[k]; u[24 + k] = F[k]; }
     u[19] = g_cube_faces >= 6 ? 1.0f : 0.0f;    /* the cube holds a whole capture */
-    u[23] = u[19];                             /* its alpha is the sun mask */
+    const int menu = MR32(0x0065B928u) != 0;
+    u[23] = menu ? 0.0f : u[19];               /* its alpha is the sun mask; a room has no sun sprite */
+    u[40] = menu ? 0.5f : 9.0f;                /* [car_paint] env_hdr_menu (the showroom's lamps are close and bright), env_hdr */
     memcpy(&f, g_mem + cam + 0x148, 4); u[28] = f;
     memcpy(&f, g_mem + cam + 0x15C, 4); u[29] = -f;
     memcpy(&f, g_mem + cam + 0x168, 4); u[30] = -f;
     memcpy(&f, g_mem + cam + 0x16C, 4); u[31] = -f;
     memcpy(&u[32], g_mem + eagl + 0x38, 4); memcpy(&u[33], g_mem + eagl + 0x3C, 4);
     memcpy(&u[34], g_mem + eagl + 0x2C, 4); memcpy(&u[35], g_mem + eagl + 0x30, 4);
-    const float *sd = g_paint_sun;
+    static const float k_menu_sun[3] = { 0.0f, 1.0f, 0.0f };   /* the showroom's light comes from above: [car_paint] menu_sun_dir */
+    const float *sd = menu ? k_menu_sun : g_paint_sun;
     float sc[3] = { R[0] * sd[0] + R[1] * sd[1] + R[2] * sd[2], U[0] * sd[0] + U[1] * sd[1] + U[2] * sd[2], -(F[0] * sd[0] + F[1] * sd[1] + F[2] * sd[2]) };
     const float l = sqrtf(sc[0] * sc[0] + sc[1] * sc[1] + sc[2] * sc[2]);
     if (l > 1e-6f) for (int k = 0; k < 3; k++) u[36 + k] = sc[k] / l;
@@ -273,7 +276,7 @@ static void game_state(DrawState *d, int topo){
     d->bias = d->mips ? g_lodbias : 0.0f;
     if (!(d->bias > -16.0f && d->bias < 16.0f)) d->bias = 0.0f;
     d->paint = 0; d->paint_tex = 0;
-    if (g_race && !g_cap && g_paint_on && topo == 0){
+    if ((g_race || MR32(0x0065B928u)) && !g_cap && g_paint_on && topo == 0){
         if (d->tex > 0 && g_tex[d->tex - 1].paint){ d->paint = 1; d->paint_tex = d->tex; }
         else if (g_mask_slot){ d->paint = 2; d->paint_tex = g_mask_slot; }
     }
@@ -358,11 +361,12 @@ void r_draw(const char *n, const uint32_t *a){
         int nv = count * 3; if (nv > MAX_VERTS) nv = MAX_VERTS;
         for (int i = 0; i < nv; i++) o[i] = conv(VI(vb, ib, i));
         const int bound = tan_substitute(g_bound);
-        if (g_race && !g_cap && bound && g_tex[bound - 1].paint){
+        const int paintable = (g_race || MR32(0x0065B928u)) && !g_cap;
+        if (paintable && bound && g_tex[bound - 1].paint){
             g_pv_vb = a[1]; g_pv_ib = a[2]; g_pv_count = count; g_pv_slot = bound;
             for (int i = 0; i < nv; i++){ g_pv_uv[i * 2] = o[i].u; g_pv_uv[i * 2 + 1] = o[i].v; }
         }
-        else if (g_race && !g_cap && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && g_pv_slot){
+        else if (paintable && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && g_pv_slot){
             for (int i = 0; i < nv; i++){ o[i].rect[0] = g_pv_uv[i * 2]; o[i].rect[1] = g_pv_uv[i * 2 + 1]; o[i].rect[2] = 0.0f; o[i].rect[3] = 7.0f; }
             g_mask_slot = g_pv_slot;
             flush_verts(o, nv, 0);
@@ -953,6 +957,7 @@ void r_capture_mips(int face){
     cmd_room(4);
     g_cmd[g_ncmd++] = C_CUBE_MIPS; g_cmd[g_ncmd++] = (uint32_t)face;
 }
+void r_cube_reset(void){ g_cube_faces = 0; }
 void r_capture_phase(int clear_alpha, int opaque_gain){ g_cap_clear = clear_alpha; g_cap_opaque = opaque_gain; }
 void r_capture_sun(int on){ g_cap_sun = on; }
 int r_window_mode(int *w, int *h){
