@@ -3,11 +3,11 @@
 //
 // Ring (bytes): magic 0, seg_count 4, published 8, consumed 12, presents_pub 16, presents_done 20, segments 24 (32 bytes each:
 // ready, cmd_words, vtx_bytes, up_bytes, has_present, cmd, vtx, up).
-const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12 };
+const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14 };
 const VSIZE = 48, VERTEX_BUFFER = 24 << 20, UBO_ALIGN = 256, UBO_SLOTS = 65536 / 256 * 64;
 
 const SHADER = /* wgsl */`
-struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDensity: f32, fogScale: f32, hard: f32, lodBias: f32 };
+struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDensity: f32, fogScale: f32, hard: f32, lodBias: f32, em: vec4f };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tx: texture_2d<f32>;
 @group(1) @binding(1) var sm: sampler;
@@ -32,7 +32,7 @@ fn fog(rgb: vec3f, q: f32) -> vec3f {
   let f = clamp((1.0 - exp(-u.fogDensity * w)) * u.fogScale, 0.0, 1.0);
   return mix(rgb, u.fogColor.rgb, f);
 }
-@fragment fn fs(i: VO) -> @location(0) vec4f {
+fn shade(i: VO) -> vec4f {
   var uv = i.uvq.xy / i.uvq.z;
   let dim = vec2f(textureDimensions(tx, 0));
   if (i.rect.z > i.rect.x && i.rect.w > i.rect.y) {
@@ -49,6 +49,19 @@ fn fog(rgb: vec3f, q: f32) -> vec3f {
   if (u.alphaRef > 0.0 && r.a < u.alphaRef) { discard; }
   if (u.hard > 0.5) { r.a = 1.0; }
   return vec4f(fog(r.rgb, i.uvq.z), r.a);
+}
+@fragment fn fs(i: VO) -> @location(0) vec4f { return shade(i); }
+// a cube face (PC dx11_shaders.h EmissiveGain, SunMaskOutput): em = gain, threshold, power (below 0: full-bright vertices only), sun sprite
+@fragment fn fs_cap(i: VO) -> @location(0) vec4f {
+  var r = shade(i);
+  if (u.em.x > 1.0) {
+    let peak = max(r.r, max(r.g, r.b));
+    var x = clamp((peak - u.em.y) / max(1.0 - u.em.y, 1e-4), 0.0, 1.0);
+    if (u.em.z < 0.0) { x *= clamp((min(i.color.r, min(i.color.g, i.color.b)) - 0.9) / 0.08, 0.0, 1.0); }
+    r = vec4f(r.rgb * (1.0 + (u.em.x - 1.0) * pow(x, max(abs(u.em.z), 0.01))), r.a);
+  }
+  if (u.em.w > 0.5) { let a = r.rgb * r.a; return vec4f(a, max(a.r, max(a.g, a.b))); }
+  return r;
 }`;
 const BLIT = /* wgsl */`
 @group(0) @binding(0) var tx: texture_2d<f32>;
@@ -131,21 +144,36 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const uboData = new ArrayBuffer(UBO_SLOTS * UBO_ALIGN);
   const uboF = new Float32Array(uboData);
 
+  // The reflection cube (pu_cube.c): HDR, one mip chain, its alpha is the sun mask: the sun's sprites add their light, what stands in front clears it
+  const CUBE_SIZE = 256, CUBE_FORMAT: GPUTextureFormat = 'rgba16float', CUBE_MIPS = 9;
+  const cubeTex = device.createTexture({ size: [CUBE_SIZE, CUBE_SIZE, 6], format: CUBE_FORMAT, mipLevelCount: CUBE_MIPS, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+  const cubeDepth = device.createTexture({ size: [CUBE_SIZE, CUBE_SIZE], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  const cubeDepthView = cubeDepth.createView();
+  const cubeFace = (face: number, mip: number) => cubeTex.createView({ dimension: '2d', baseArrayLayer: face, arrayLayerCount: 1, baseMipLevel: mip, mipLevelCount: 1 });
+  const cubeViews = Array.from({ length: 6 }, (_, f) => Array.from({ length: CUBE_MIPS }, (_, m) => cubeFace(f, m)));
+  let capFace = -1, capClear = false, cubeFaces = 0;
+  const capBlend = (key: number): GPUBlendState | undefined => {
+    const base = BLEND[key & 7];
+    if (key & (1 << 14)) return { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } };
+    const keep: GPUBlendComponent = key & (1 << 13) ? { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' } : { srcFactor: 'zero', dstFactor: 'one' };
+    return { color: base ? base.color : { srcFactor: 'one', dstFactor: 'zero' }, alpha: keep };
+  };
   const pipes = new Map<number, GPURenderPipeline>();
   const pipeline = (key: number) => {
     let p = pipes.get(key);
     if (p) return p;
-    const blend = BLEND[key & 7], zcmp = (key >> 3) & 7, zwrite = (key >> 6) & 1, cull = (key >> 7) & 3, topo = (key >> 9) & 3, cw = (key >> 11) & 1;
+    const cap = (key >> 12) & 1;
+    const blend = cap ? capBlend(key) : BLEND[key & 7], zcmp = (key >> 3) & 7, zwrite = (key >> 6) & 1, cull = (key >> 7) & 3, topo = (key >> 9) & 3, cw = (key >> 11) & 1;
     p = device.createRenderPipeline({
       layout: pipeLayout,
       vertex: { module, entryPoint: 'vs', buffers: [{ arrayStride: VSIZE, attributes: [
         { shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x2' },
         { shaderLocation: 2, offset: 24, format: 'unorm8x4' }, { shaderLocation: 3, offset: 28, format: 'unorm8x4' },
         { shaderLocation: 4, offset: 32, format: 'float32x4' }] }] },
-      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
+      fragment: { module, entryPoint: cap ? 'fs_cap' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
       primitive: { topology: TOPO[topo], cullMode: topo === 0 ? CULL[cull] : 'none', frontFace: 'cw' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: !!zwrite, depthCompare: DEPTH[zcmp] },
-      multisample: { count: SAMPLES },
+      multisample: { count: cap ? 1 : SAMPLES },
     });
     pipes.set(key, p);
     return p;
@@ -182,7 +210,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const blitPipeLayout = device.createPipelineLayout({ bindGroupLayouts: [blitLayout] });
   const blitPipe = (format: GPUTextureFormat) => device.createRenderPipeline({ layout: blitPipeLayout,
     vertex: { module: blitModule, entryPoint: 'vs' }, fragment: { module: blitModule, entryPoint: 'fs', targets: [{ format }] }, primitive: { topology: 'triangle-list' } });
-  const genPipe = blitPipe('rgba8unorm'), presentPipe = blitPipe(canvasFormat);
+  const genPipe = blitPipe('rgba8unorm'), presentPipe = blitPipe(canvasFormat), cubeMipPipe = blitPipe(CUBE_FORMAT);
   const makePresentGroup = () => device.createBindGroup({ layout: blitLayout, entries: [{ binding: 0, resource: colorView }, { binding: 1, resource: genSampler }] });
   let presentGroup = makePresentGroup();
   const genMips = (t: T) => {
@@ -220,6 +248,8 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
 
   // a segment: its uploads first, then its draws in one pass
   let frameJs = 0, lastPresentAt = 0;
+  const cubeLog = new URLSearchParams(location.search).has('cubelog');
+  let cubeRead = -1;
   const runSegment = (s: number) => {
     const t0 = performance.now();
     const b = 6 + s * 8;
@@ -237,9 +267,11 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     let sc = [0, 0, lw, lh], scDirty = true, uboOff = 0;
     const begin = () => {
       if (pass) return pass;
+      const load: GPULoadOp = capFace >= 0 && capClear ? 'clear' : 'load';
+      capClear = false;
       pass = enc.beginRenderPass({
-        colorAttachments: [{ view: drawView, loadOp: 'load', storeOp: 'store' }],
-        depthStencilAttachment: { view: depthView, depthLoadOp: 'load', depthStoreOp: 'store' },
+        colorAttachments: [{ view: capFace >= 0 ? cubeViews[capFace][0] : drawView, loadOp: load, storeOp: 'store', clearValue: [0, 0, 0, 0] }],
+        depthStencilAttachment: { view: capFace >= 0 ? cubeDepthView : depthView, depthLoadOp: load, depthClearValue: 1, depthStoreOp: 'store' },
       });
       pass.setVertexBuffer(0, vbuf);
       pipeKey = -1; bindDirty = true; scDirty = true;
@@ -295,20 +327,38 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
           const first = cmd[i++], count = cmd[i++], p = begin();
           if (bindDirty) { p.setBindGroup(1, group(curTex, curSampler)); bindDirty = false; }
           if (scDirty) {
-            const x0 = Math.max(0, Math.floor(sc[0] * W / lw)), y0 = Math.max(0, Math.floor(sc[1] * H / lh));
-            const x1 = Math.min(W, Math.floor((sc[2] | 0) * W / lw)), y1 = Math.min(H, Math.floor((sc[3] | 0) * H / lh));
-            p.setScissorRect(Math.min(x0, W), Math.min(y0, H), Math.max(0, x1 - x0), Math.max(0, y1 - y0));
+            const tw = capFace >= 0 ? CUBE_SIZE : W, th = capFace >= 0 ? CUBE_SIZE : H;
+            const x0 = Math.max(0, Math.floor(sc[0] * tw / lw)), y0 = Math.max(0, Math.floor(sc[1] * th / lh));
+            const x1 = Math.min(tw, Math.floor((sc[2] | 0) * tw / lw)), y1 = Math.min(th, Math.floor((sc[3] | 0) * th / lh));
+            p.setScissorRect(Math.min(x0, tw), Math.min(y0, th), Math.max(0, x1 - x0), Math.max(0, y1 - y0));
             scDirty = false;
           }
           p.draw(count, 1, first);
           draws++; verts += count;
           break; }
         case C.PRESENT: present = true; break;
+        case C.TARGET: {
+          if (pass) { (pass as GPURenderPassEncoder).end(); pass = null; }
+          capFace = cmd[i++] | 0; capClear = capFace >= 0; pipeKey = -1; scDirty = true;
+          break; }
+        case C.CUBE_MIPS: {
+          const f = cmd[i++];
+          for (let m = 1; m < CUBE_MIPS; m++) {
+            const mp = enc.beginRenderPass({ colorAttachments: [{ view: cubeViews[f][m], loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }] });
+            mp.setPipeline(cubeMipPipe);
+            mp.setBindGroup(0, device.createBindGroup({ layout: blitLayout, entries: [{ binding: 0, resource: cubeViews[f][m - 1] }, { binding: 1, resource: genSampler }] }));
+            mp.draw(3); mp.end();
+          }
+          cubeFaces++;
+          if (cubeLog && cubeFaces % 360 < 6) cubeRead = f;
+          break; }
         case C.READRECT: { read = { seq: cmd[i], x: cmd[i + 1] | 0, y: cmd[i + 2] | 0, w: cmd[i + 3], h: cmd[i + 4], px: cmd[i + 5], done: cmd[i + 6] }; i += 7; break; }
         default: log(`[gpu] unknown command ${op} at ${i - 1} of ${words}`); i = words; break;
       }
     }
     if (ubos) queue.writeBuffer(ubo, 0, uboData, 0, ubos * UBO_ALIGN);
+    const cubeRb = cubeRead >= 0 && !pass ? { f: cubeRead, b: device.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) } : null;
+    if (cubeRb) { enc.copyTextureToBuffer({ texture: cubeTex, mipLevel: 4, origin: [0, 0, cubeRb.f] }, { buffer: cubeRb.b, bytesPerRow: 256 }, [16, 16]); cubeRead = -1; }
     (pass as GPURenderPassEncoder | null)?.end();
     stats.segments++; stats.draws += draws; stats.lastDraws = draws; stats.lastVerts = verts;
     if (present || read) resolve(enc);
@@ -360,6 +410,17 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
       lastPresentAt = te;
     }
     readBack?.();
+    if (cubeRb) void cubeRb.b.mapAsync(GPUMapMode.READ).then(() => {
+      const h = new Uint16Array(cubeRb.b.getMappedRange());
+      const half = (v: number) => { const e = (v >> 10) & 31, m = v & 1023, s = v & 0x8000 ? -1 : 1; return s * (e === 0 ? m / 16777216 : e === 31 ? 65536 : Math.pow(2, e - 15) * (1 + m / 1024)); };
+      let r = 0, g = 0, b = 0, peak = 0, amax = 0, n = 0;
+      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+        const o = (y * 256 + x * 8) / 2, R = half(h[o]), G = half(h[o + 1]), B = half(h[o + 2]), A = half(h[o + 3]);
+        r += R; g += G; b += B; n++; peak = Math.max(peak, R, G, B); amax = Math.max(amax, A);
+      }
+      log(`[cube] face ${cubeRb.f}: mean ${(r / n).toFixed(3)} ${(g / n).toFixed(3)} ${(b / n).toFixed(3)}, peak ${peak.toFixed(2)}, sun alpha ${amax.toFixed(2)}, faces done ${cubeFaces}`);
+      cubeRb.b.destroy();
+    });
     for (const t of toFree) t.destroy();
     stats.textures = textures.size;
     return present;

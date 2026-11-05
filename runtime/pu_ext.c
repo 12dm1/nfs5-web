@@ -376,6 +376,7 @@ static uint32_t guest_call(CPU *c, uint32_t fn, uint32_t ecx, const uint32_t *ar
     c->esp = sp; c->ecx = keep;
     return r;
 }
+uint32_t pu_guest_call(CPU *c, uint32_t fn, uint32_t ecx, const uint32_t *args, int n){ return guest_call(c, fn, ecx, args, n); }
 static uint32_t guest_vcall(CPU *c, uint32_t obj, uint32_t off){ return guest_call(c, MR32(MR32(obj) + off), obj, NULL, 0); }
 static uint32_t guest_string(const char *text){
     const size_t n = strlen(text) + 1;
@@ -573,6 +574,7 @@ typedef struct {
 #define CAM_RECS 16
 static CamRec g_cam[CAM_RECS];
 static int g_cam_next;
+int g_cam_capture;                  /* pu_cube.c: a cube face is being drawn: exactly 90 degrees on both axes */
 static uint32_t g_cam_call;                /* the camera of the perspective call in progress */
 static float g_cam_view_keep; static uint32_t g_cam_view;      /* V+130 put back after the tree / sky call */
 static int g_tree_on; static float g_tree_half, g_tree_ratio;
@@ -598,6 +600,13 @@ void pu_cam_before(CPU *c){
     const uint32_t camera = c->ecx;
     const float deg = rdf(c->esp), asp = rdf(c->esp + 4), target = cam_target_aspect();
     if (!camera || !(deg > 0.0f && deg < 179.0f) || !(asp > 0.0f) || !isfinite(deg) || !isfinite(asp)) return;
+    if (g_cam_capture){
+        CamRec *q = cam_find(camera);
+        if (q) memset(q, 0, sizeof *q);
+        wrf(c->esp, 90.0f); wrf(c->esp + 4, 1.0f);
+        g_cam_call = camera;
+        return;
+    }
     const double t0 = tan((double)deg * CAM_PI / 360.0);
     const double a = (double)asp * (double)target / (640.0 / 480.0);
     const double ty = t0 / (double)asp, tx = ty * a;
@@ -631,7 +640,7 @@ void pu_cam_replay(CPU *c){
 /* the half angle to draw with for this view, 0 when the game's own stays */
 static float cam_view_half(uint32_t view, CamRec **out){
     const uint32_t camera = MR32(view + 0x0C);
-    CamRec *r = camera ? cam_find(camera) : NULL;
+    CamRec *r = camera && !g_cam_capture ? cam_find(camera) : NULL;
     if (!r || !r->changed || MR32(camera + 0x220) != 0) return 0.0f;
     if (MR32(camera + 0xD4) != r->eff_deg || MR32(camera + 0xD8) != r->eff_aspect) return 0.0f;
     if (fbits(rdf(view + 0x130) * 2.0f) != fbits(r->authored_deg)) return 0.0f;

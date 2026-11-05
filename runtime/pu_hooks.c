@@ -47,10 +47,17 @@ void pu_cam_sky_before(CPU *c);
 void pu_cam_sky_after(CPU *c);
 void pu_loop_stat(CPU *c);
 void pu_interp_restore(void);
+void pu_cube_capture(CPU *c);
+void r_capture_sun(int on) __attribute__((weak));
 int pu_hook(CPU *c, uint32_t ip){
     switch (ip){
     case 0x415C6Eu: pu_loop_stat(c); return 1;
     case 0x415C7Fu: pu_interp_restore(); return 1;
+#ifdef __wasm__
+    case 0x468AA6u: pu_cube_capture(c); return 1;
+    case 0x45D6F6u: case 0x45D25Cu: r_capture_sun(1); return 1;     /* the sun and the flares: their light goes into the cube's alpha */
+    case 0x45D6FBu: case 0x45D261u: r_capture_sun(0); return 1;
+#endif
     case 0x46700Cu: case 0x467162u: pu_cam_before(c); return 1;
     case 0x467011u: case 0x467167u: pu_cam_after(c); return 1;
     case 0x539133u: pu_cam_replay(c); return 1;

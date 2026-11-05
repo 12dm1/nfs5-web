@@ -22,7 +22,7 @@ void guest_wait_begin(void);
 void guest_wait_end(void);
 
 /* ---- protocol ---- */
-enum { C_VIDEO = 1, C_TEX_CREATE, C_TEX_DESTROY, C_TEX_WRITE, C_TEX_GENMIPS, C_SCISSOR, C_PIPE, C_BIND, C_UNIFORM, C_DRAW, C_PRESENT, C_READRECT };
+enum { C_VIDEO = 1, C_TEX_CREATE, C_TEX_DESTROY, C_TEX_WRITE, C_TEX_GENMIPS, C_SCISSOR, C_PIPE, C_BIND, C_UNIFORM, C_DRAW, C_PRESENT, C_READRECT, C_TARGET, C_CUBE_MIPS };
 #define SEGS 3
 #define CMD_WORDS (1u << 18)
 #define VTX_BYTES (24u << 20)
@@ -132,10 +132,13 @@ static void close_draw(void){
 /* the states of one draw, in full */
 typedef struct { int blend, zcmp, zwrite, cull, topo, colorwrite; int tex; int filter, cs, ct, mips; float alpharef, bias, fogon; int hard; float depthbias; } DrawState;
 
+/* a cube face is the target (pu_cube.c) */
+static int g_cap, g_cap_clear, g_cap_opaque, g_cap_sun;
 static void emit_state(const DrawState *d){
     /* a change of anything closes the running draw */
     uint32_t pipe = (uint32_t)d->blend | (uint32_t)d->zcmp << 3 | (uint32_t)d->zwrite << 6 | (uint32_t)d->cull << 7 |
                     (uint32_t)d->topo << 9 | (uint32_t)d->colorwrite << 11;
+    if (g_cap) pipe |= 1u << 12 | (uint32_t)(g_cap_clear && d->blend == 0) << 13 | (uint32_t)(g_cap_sun && d->blend == 1) << 14;
     uint32_t sam = (uint32_t)d->filter | (uint32_t)d->cs << 1 | (uint32_t)d->ct << 3 | (uint32_t)d->mips << 5;
     float u[16];
     u[0] = (float)g_lw; u[1] = (float)g_lh; u[2] = d->alpharef; u[3] = d->depthbias;
@@ -143,6 +146,21 @@ static void emit_state(const DrawState *d){
     u[6] = (float)(g_fogcolor & 255) / 255.0f; u[7] = d->fogon;
     u[8] = g_fogdensity; u[9] = g_fogscale; u[10] = d->hard ? 1.0f : 0.0f; u[11] = d->bias;
     u[12] = u[13] = u[14] = u[15] = 0.0f;
+    /* PC [reflection] emissive: in the HDR cube the additive lights go above 1, and in the dark so do unlit lamp panels */
+    if (g_cap){
+        if (d->blend == 1){ u[12] = 5.0f; u[13] = 0.6f; u[14] = 2.0f; }
+        else if (d->blend == 0 && g_cap_opaque){
+            float dark = 1.0f;
+            const uint32_t sky = MR32(0x006115CCu);
+            if (sky){
+                float amb[3]; memcpy(amb, g_mem + sky + 0x1C, 12);
+                const float al = 0.299f * amb[0] + 0.587f * amb[1] + 0.114f * amb[2];
+                if (al >= 0.0f && al < 16.0f){ dark = (0.5f - al) / 0.2f; dark = dark < 0.0f ? 0.0f : dark > 1.0f ? 1.0f : dark; }
+            }
+            u[12] = 1.0f + 3.0f * dark; u[13] = 0.85f; u[14] = -4.0f;
+        }
+        u[15] = g_cap_sun && d->blend == 1 ? 1.0f : 0.0f;
+    }
     int sc[4] = { 0, 0, g_lw, g_lh };
     if (g_clipvalid) memcpy(sc, g_clip, sizeof sc);
     int ch = pipe != g_s_pipe || sam != g_s_sampler || (uint32_t)d->tex != g_s_tex || !g_s_uni_ok || memcmp(u, g_s_uni, sizeof u) ||
@@ -857,6 +875,19 @@ void r_pageflip(void){
     }
 }
 long r_frames(void){ return g_frames; }
+void r_capture_target(int face){
+    close_draw();
+    cmd_room(4);
+    g_cmd[g_ncmd++] = C_TARGET; g_cmd[g_ncmd++] = (uint32_t)face;
+    g_cap = face >= 0;
+    dirty_all();
+}
+void r_capture_mips(int face){
+    cmd_room(4);
+    g_cmd[g_ncmd++] = C_CUBE_MIPS; g_cmd[g_ncmd++] = (uint32_t)face;
+}
+void r_capture_phase(int clear_alpha, int opaque_gain){ g_cap_clear = clear_alpha; g_cap_opaque = opaque_gain; }
+void r_capture_sun(int on){ g_cap_sun = on; }
 int r_window_mode(int *w, int *h){
     *w = __atomic_load_n(&g_ring.win_w, __ATOMIC_ACQUIRE); *h = __atomic_load_n(&g_ring.win_h, __ATOMIC_ACQUIRE);
     return *w > 640 && *h > 480;
