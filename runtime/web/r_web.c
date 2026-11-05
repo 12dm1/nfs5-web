@@ -1,0 +1,679 @@
+/* nfs5-web WEB3: the renderer behind the THRASH driver (thrash_hle.c r_*) in the browser.
+ *
+ * The game thread records into a shared ring of segments; the page (web/src/gpu/renderer.ts) replays them with
+ * WebGPU. This file holds the same behaviour as the native renderer's base path (renderer/dx11z: dx11_state.cpp,
+ * dx11_texture.cpp, dx11_draw.cpp, thrash_dx11.cpp), without the PC mod's features (materials, cars, reflections).
+ *
+ * A segment: a word stream of commands + its vertices + its texture pixels. Everything of one segment's uploads
+ * reaches the GPU before its draws, so updating a texture this segment already drew with closes the segment first.
+ * The protocol is web/src/gpu/proto.ts. */
+#include "../cpu.h"
+#include "host_abi.h"
+#include "../../renderer/dx11z/thrash_api.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <stdatomic.h>
+
+void guest_wait_begin(void);
+void guest_wait_end(void);
+
+/* ---- protocol ---- */
+enum { C_VIDEO = 1, C_TEX_CREATE, C_TEX_DESTROY, C_TEX_WRITE, C_TEX_GENMIPS, C_SCISSOR, C_PIPE, C_BIND, C_UNIFORM, C_DRAW, C_PRESENT };
+#define SEGS 3
+#define CMD_WORDS (1u << 18)
+#define VTX_BYTES (24u << 20)
+#define UP_BYTES  (24u << 20)
+#define VSIZE 48
+typedef struct {
+    volatile int32_t ready;         /* 0 free, 1 published (game -> page -> 0) */
+    uint32_t cmd_words, vtx_bytes, up_bytes, has_present;
+    uint32_t cmd, vtx, up;          /* addresses in linear memory */
+} Seg;
+typedef struct {
+    uint32_t magic, seg_count;
+    volatile int32_t published, consumed;   /* segment counters; notified on change */
+    volatile int32_t presents_pub, presents_done;
+    Seg seg[SEGS];
+} Ring;
+static Ring g_ring;
+static Seg *g_cur;
+static uint32_t *g_cmd, g_ncmd;
+static uint8_t *g_vtx, *g_up;
+static uint32_t g_nvtx, g_nup;
+
+typedef struct { float x, y, z, w, u, v; uint32_t color, specular; float rect[4]; } DV;
+typedef struct { float x, y, z, rhw; uint32_t color, specular; float u, v; } TV;
+
+static void seg_acquire(void){
+    static int next;
+    Seg *s = &g_ring.seg[next];
+    if (__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE)){
+        guest_wait_begin();
+        while (__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE))
+            __builtin_wasm_memory_atomic_wait32((int32_t *)&s->ready, 1, 100000000LL);
+        guest_wait_end();
+    }
+    next = (next + 1) % SEGS;
+    g_cur = s;
+    g_cmd = (uint32_t *)(uintptr_t)s->cmd; g_vtx = (uint8_t *)(uintptr_t)s->vtx; g_up = (uint8_t *)(uintptr_t)s->up;
+    g_ncmd = g_nvtx = g_nup = 0;
+}
+
+/* the state a segment starts with is unknown to the page: re-sent on demand */
+static int g_seg_serial;
+static void dirty_all(void);
+static void close_draw(void);
+static void seg_publish(int present){
+    close_draw();
+    Seg *s = g_cur;
+    s->cmd_words = g_ncmd; s->vtx_bytes = g_nvtx; s->up_bytes = g_nup; s->has_present = (uint32_t)present;
+    __atomic_store_n(&s->ready, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&g_ring.published, 1, __ATOMIC_ACQ_REL);
+    if (present) __atomic_add_fetch(&g_ring.presents_pub, 1, __ATOMIC_ACQ_REL);
+    __builtin_wasm_memory_atomic_notify((int32_t *)&g_ring.published, 0x7FFFFFFFu);
+    g_seg_serial++;
+    seg_acquire();
+    dirty_all();
+}
+static inline void cmd_room(uint32_t n){ if (g_ncmd + n + 32 > CMD_WORDS) seg_publish(0); }
+
+/* ---- states (dx11_state.cpp) ---- */
+#define NST 0x10100
+static int g_st[NST];
+static int g_vstride = 32, g_istride = 4, g_race;
+static int g_lw = 640, g_lh = 480;
+static int g_zcmp = 3, g_zwrite, g_blend, g_cull;
+static float g_alpharef, g_depthbias, g_fogdensity, g_fogscale = 1.0f;
+static int g_fogon; static uint32_t g_fogcolor, g_clearcolor = 0xFF000000u;
+static int g_filter = 1, g_clamp_s = 1, g_clamp_t = 1; static float g_lodbias;
+static int g_clip[4], g_clipvalid;
+/* textures */
+#define MAX_TEX 8192
+typedef struct { int used, w, h, fmt, levels, cutout, keyed, seg; } Tex;
+static Tex g_tex[MAX_TEX];
+static int g_bound;             /* slot + 1, 0 none */
+#define LFB_SLOT (MAX_TEX - 1)
+
+static void update_fogscale(void){
+    const float w63 = 262144.0f / 5.0f;
+    const float d = 1.0f - expf(-g_fogdensity * w63);
+    g_fogscale = d > 1e-6f ? 1.0f / d : 1.0f;
+}
+static int bound_keyed(void){ return g_bound && g_tex[g_bound - 1].keyed; }
+/* HardCutoutWanted without the per-draw suppress, which comes from the vertices */
+static int hard_wanted(void){
+    if (!g_race || g_blend != 0 || g_zcmp == 7) return 0;
+    if (!g_zwrite) return g_alpharef >= 10.0f / 255.0f && bound_keyed();
+    if (g_alpharef >= 128.0f / 255.0f && g_alpharef <= 160.0f / 255.0f) return bound_keyed();
+    return g_alpharef >= 10.0f / 255.0f && bound_keyed();
+}
+
+/* what the next draw needs; sent when it differs from what this segment last sent */
+static uint32_t g_s_pipe = ~0u, g_s_sampler = ~0u, g_s_tex = ~0u, g_s_scissor[4]; static int g_s_scissor_ok, g_s_video;
+static float g_s_uni[16]; static int g_s_uni_ok;
+static uint32_t g_draw_first, g_draw_count; static int g_draw_open;
+static void dirty_all(void){ g_s_pipe = g_s_sampler = g_s_tex = ~0u; g_s_scissor_ok = g_s_uni_ok = g_s_video = 0; }
+static void close_draw(void){
+    if (g_draw_open && g_draw_count){       /* in cmd_room's margin: seg_publish comes here too */
+        g_cmd[g_ncmd++] = C_DRAW; g_cmd[g_ncmd++] = g_draw_first; g_cmd[g_ncmd++] = g_draw_count;
+    }
+    g_draw_open = 0; g_draw_count = 0;
+}
+/* the states of one draw, in full */
+typedef struct { int blend, zcmp, zwrite, cull, topo, colorwrite; int tex; int filter, cs, ct, mips; float alpharef, bias, fogon; int hard; float depthbias; } DrawState;
+
+static void emit_state(const DrawState *d){
+    /* a change of anything closes the running draw */
+    uint32_t pipe = (uint32_t)d->blend | (uint32_t)d->zcmp << 3 | (uint32_t)d->zwrite << 6 | (uint32_t)d->cull << 7 |
+                    (uint32_t)d->topo << 9 | (uint32_t)d->colorwrite << 11;
+    uint32_t sam = (uint32_t)d->filter | (uint32_t)d->cs << 1 | (uint32_t)d->ct << 3 | (uint32_t)d->mips << 5;
+    float u[16];
+    u[0] = (float)g_lw; u[1] = (float)g_lh; u[2] = d->alpharef; u[3] = d->depthbias;
+    u[4] = (float)((g_fogcolor >> 16) & 255) / 255.0f; u[5] = (float)((g_fogcolor >> 8) & 255) / 255.0f;
+    u[6] = (float)(g_fogcolor & 255) / 255.0f; u[7] = d->fogon;
+    u[8] = g_fogdensity; u[9] = g_fogscale; u[10] = d->hard ? 1.0f : 0.0f; u[11] = d->bias;
+    u[12] = u[13] = u[14] = u[15] = 0.0f;
+    int sc[4] = { 0, 0, g_lw, g_lh };
+    if (g_clipvalid) memcpy(sc, g_clip, sizeof sc);
+    int ch = pipe != g_s_pipe || sam != g_s_sampler || (uint32_t)d->tex != g_s_tex || !g_s_uni_ok || memcmp(u, g_s_uni, sizeof u) ||
+             !g_s_scissor_ok || memcmp(sc, g_s_scissor, sizeof sc) || !g_s_video;
+    if (!ch) return;
+    close_draw();
+    cmd_room(40);
+    if (!g_s_video){ g_cmd[g_ncmd++] = C_VIDEO; g_cmd[g_ncmd++] = (uint32_t)g_lw; g_cmd[g_ncmd++] = (uint32_t)g_lh; g_s_video = 1; }
+    if (pipe != g_s_pipe){ g_cmd[g_ncmd++] = C_PIPE; g_cmd[g_ncmd++] = pipe; g_s_pipe = pipe; }
+    if (sam != g_s_sampler || (uint32_t)d->tex != g_s_tex){
+        g_cmd[g_ncmd++] = C_BIND; g_cmd[g_ncmd++] = (uint32_t)d->tex; g_cmd[g_ncmd++] = sam; g_s_sampler = sam; g_s_tex = (uint32_t)d->tex;
+        if (d->tex > 0 && d->tex <= MAX_TEX) g_tex[d->tex - 1].seg = g_seg_serial;
+    }
+    if (!g_s_uni_ok || memcmp(u, g_s_uni, sizeof u)){ g_cmd[g_ncmd++] = C_UNIFORM; memcpy(g_cmd + g_ncmd, u, sizeof u); g_ncmd += 16; memcpy(g_s_uni, u, sizeof u); g_s_uni_ok = 1; }
+    if (!g_s_scissor_ok || memcmp(sc, g_s_scissor, sizeof sc)){
+        g_cmd[g_ncmd++] = C_SCISSOR; for (int i = 0; i < 4; i++) g_cmd[g_ncmd++] = (uint32_t)sc[i];
+        memcpy(g_s_scissor, sc, sizeof sc); g_s_scissor_ok = 1;
+    }
+}
+
+static void submit(const DV *v, int n, const DrawState *d){
+    if (n <= 0) return;
+    if (g_nvtx + (uint32_t)n * VSIZE > VTX_BYTES){ seg_publish(0); }
+    emit_state(d);
+    if ((uint32_t)n * VSIZE > VTX_BYTES) return;
+    if (!g_draw_open){ g_draw_first = g_nvtx / VSIZE; g_draw_open = 1; g_draw_count = 0; }
+    memcpy(g_vtx + g_nvtx, v, (size_t)n * VSIZE);
+    g_nvtx += (uint32_t)n * VSIZE; g_draw_count += (uint32_t)n;
+}
+
+/* ---- draws (dx11_draw.cpp) ---- */
+#define MAX_VERTS 65536
+static DV g_scratch[MAX_VERTS];
+static inline DV conv(const uint8_t *p){
+    TV s; memcpy(&s, p, sizeof s);
+    DV d; d.x = s.x; d.y = s.y; d.z = s.z; d.w = s.rhw; d.u = s.u; d.v = s.v; d.color = s.color; d.specular = s.specular;
+    d.rect[0] = d.rect[1] = d.rect[2] = d.rect[3] = 0.0f;
+    return d;
+}
+static inline int in_band(const DV *v, float x0, float x1, float y0, float y1){
+    if (v->x != v->x || v->y != v->y || v->w != v->w) return 0;
+    return !(v->x < x0 || v->x > x1 || v->y < y0 || v->y > y1);
+}
+static int guard_filter(DV *v, int n){
+    const float S = 3.0f, w = (float)g_lw, h = (float)g_lh;
+    const float x0 = -(S - 1) * w, x1 = S * w, y0 = -(S - 1) * h, y1 = S * h;
+    int out = 0;
+    for (int t = 0; t + 2 < n; t += 3){
+        if (in_band(v + t, x0, x1, y0, y1) && in_band(v + t + 1, x0, x1, y0, y1) && in_band(v + t + 2, x0, x1, y0, y1) &&
+            v[t].w >= 0.0f && v[t + 1].w >= 0.0f && v[t + 2].w >= 0.0f){
+            if (out != t) memmove(v + out, v + t, 3 * sizeof(DV));
+            out += 3;
+        }
+    }
+    return out;
+}
+static void ui_rects(DV *verts, int n){
+    if (g_race || !g_bound) return;
+    for (int t = 0; t + 2 < n; t += 3){
+        DV *v = verts + t;
+        if ((v[0].w != 1.0f && v[0].w != 0.0f) || (v[1].w != 1.0f && v[1].w != 0.0f) || (v[2].w != 1.0f && v[2].w != 0.0f)) continue;
+        float lo0 = v[0].u, hi0 = v[0].u, lo1 = v[0].v, hi1 = v[0].v;
+        for (int i = 1; i < 3; i++){
+            lo0 = v[i].u < lo0 ? v[i].u : lo0; hi0 = v[i].u > hi0 ? v[i].u : hi0;
+            lo1 = v[i].v < lo1 ? v[i].v : lo1; hi1 = v[i].v > hi1 ? v[i].v : hi1;
+        }
+        if (hi0 <= lo0 || hi1 <= lo1 || lo0 < -1.0f || hi0 > 2.0f || lo1 < -1.0f || hi1 > 2.0f) continue;
+        for (int i = 0; i < 3; i++){ v[i].rect[0] = lo0; v[i].rect[1] = lo1; v[i].rect[2] = hi0; v[i].rect[3] = hi1; }
+    }
+}
+static void game_state(DrawState *d, int topo){
+    d->blend = g_blend; d->zcmp = g_zcmp; d->zwrite = g_zwrite; d->cull = g_cull; d->topo = topo; d->colorwrite = 1;
+    d->tex = g_bound; d->filter = g_filter; d->cs = g_clamp_s; d->ct = g_clamp_t; d->mips = g_race ? 1 : 0;
+    d->alpharef = g_alpharef; d->fogon = g_fogon ? 1.0f : 0.0f; d->depthbias = g_depthbias;
+    if (d->filter == 0 && !g_race) d->filter = 1;            /* point_filter=2: honoured only in the race (G7) */
+    d->hard = hard_wanted();
+    d->bias = d->mips ? g_lodbias : 0.0f;
+    if (!(d->bias > -16.0f && d->bias < 16.0f)) d->bias = 0.0f;
+}
+static void flush_verts(DV *v, int n, int topo){
+    if (n <= 0) return;
+    if (topo == 0){
+        n = guard_filter(v, n);
+        if (n <= 0) return;
+        ui_rects(v, n);
+    }
+    DrawState d; game_state(&d, topo);
+    /* HZ6: a keyed cutout in the sorted queue goes hard only while every vertex is opaque */
+    if (d.hard && !g_zwrite)
+        for (int i = 0; i < n; i++) if ((v[i].color >> 24) < 0xF8){ d.hard = 0; break; }
+    /* the hard path clamps its sampler, unless the triangle's UVs tile (bar5) */
+    if (d.hard){
+        int tile = 0;
+        if (topo == 0) for (int i = 0; i < n && !tile; i++) tile = v[i].u < -0.01f || v[i].u > 1.01f || v[i].v < -0.01f || v[i].v > 1.01f;
+        if (!tile){ d.cs = d.ct = 0; }
+        else for (int t = 0; t + 2 < n; t += 3){      /* the shader's inset stays inside the UV box */
+            DV *q = v + t;
+            float lo0 = q[0].u, hi0 = q[0].u, lo1 = q[0].v, hi1 = q[0].v;
+            for (int i = 1; i < 3; i++){
+                lo0 = q[i].u < lo0 ? q[i].u : lo0; hi0 = q[i].u > hi0 ? q[i].u : hi0;
+                lo1 = q[i].v < lo1 ? q[i].v : lo1; hi1 = q[i].v > hi1 ? q[i].v : hi1;
+            }
+            for (int i = 0; i < 3; i++){ q[i].rect[0] = lo0; q[i].rect[1] = lo1; q[i].rect[2] = hi0; q[i].rect[3] = hi1; }
+        }
+    }
+    submit(v, n, &d);
+}
+static inline uint32_t idx_at(const uint8_t *ib, int i){
+    uint16_t x; memcpy(&x, ib + i * g_istride, 2); return x;
+}
+#define VI(vb, ib, i) ((vb) + idx_at((ib), (i)) * g_vstride)
+#define GP(a) ((a) ? g_mem + (a) : (uint8_t *)0)
+
+static void quad(const uint8_t *a, const uint8_t *b, const uint8_t *c, const uint8_t *e){
+    DV v[6]; v[0] = conv(a); v[1] = conv(b); v[2] = conv(c); v[3] = v[0]; v[4] = v[2]; v[5] = conv(e);
+    flush_verts(v, 6, 0);
+}
+static void line(const uint8_t *a, const uint8_t *b){ DV v[2]; v[0] = conv(a); v[1] = conv(b); flush_verts(v, 2, 1); }
+static void point(const uint8_t *a){ DV v = conv(a); flush_verts(&v, 1, 2); }
+static void sprite(const uint8_t *p0, const uint8_t *p1){
+    TV a, b; memcpy(&a, p0, sizeof a); memcpy(&b, p1, sizeof b);
+    TV tl = a, tr = a, bl = a, br = b;
+    tr.x = b.x; tr.u = b.u; bl.y = b.y; bl.v = b.v;
+    quad((uint8_t *)&tl, (uint8_t *)&tr, (uint8_t *)&br, (uint8_t *)&bl);
+}
+void r_draw(const char *n, const uint32_t *a){
+    const int count = (int)a[0];
+    if (!strcmp(n, "drawtri@12")){ DV v[3]; v[0] = conv(GP(a[0])); v[1] = conv(GP(a[1])); v[2] = conv(GP(a[2])); flush_verts(v, 3, 0); return; }
+    if (!strcmp(n, "drawquad@16")){ quad(GP(a[0]), GP(a[1]), GP(a[2]), GP(a[3])); return; }
+    if (!strcmp(n, "drawline@8")){ line(GP(a[0]), GP(a[1])); return; }
+    if (!strcmp(n, "drawpoint@4")){ point(GP(a[0])); return; }
+    if (!strcmp(n, "drawsprite@8")){ sprite(GP(a[0]), GP(a[1])); return; }
+    const uint8_t *vb = GP(a[1]);
+    if (!vb || count <= 0) return;
+    const int vs = g_vstride;
+    DV *o = g_scratch; int k = 0;
+    if (!strcmp(n, "drawtrifan@8")){
+        for (int i = 1; i < count - 1 && k + 3 <= MAX_VERTS; i++){ o[k++] = conv(vb); o[k++] = conv(vb + i * vs); o[k++] = conv(vb + (i + 1) * vs); }
+        flush_verts(o, k, 0); return; }
+    if (!strcmp(n, "drawtristrip@8")){
+        for (int i = 0; i < count - 2 && k + 3 <= MAX_VERTS; i++){
+            const uint8_t *p0 = vb + i * vs, *p1 = vb + (i + 1) * vs, *p2 = vb + (i + 2) * vs;
+            if (i & 1){ o[k++] = conv(p1); o[k++] = conv(p0); } else { o[k++] = conv(p0); o[k++] = conv(p1); }
+            o[k++] = conv(p2);
+        }
+        flush_verts(o, k, 0); return; }
+    if (!strcmp(n, "drawlinestrip@8")){ for (int i = 0; i < count - 1; i++) line(vb + i * vs, vb + (i + 1) * vs); return; }
+    if (!strcmp(n, "drawpointstrip@8")){ for (int i = 0; i < count; i++) point(vb + i * vs); return; }
+    const uint8_t *ib = GP(a[2]);
+    if (!ib) return;
+    if (!strcmp(n, "drawtrimesh@12")){
+        int nv = count * 3; if (nv > MAX_VERTS) nv = MAX_VERTS;
+        for (int i = 0; i < nv; i++) o[i] = conv(VI(vb, ib, i));
+        flush_verts(o, nv, 0); return; }
+    if (!strcmp(n, "drawtrifan@12")){
+        if (count < 3) return;
+        DV c = conv(VI(vb, ib, 0));
+        for (int i = 0; i < count - 2 && k + 3 <= MAX_VERTS; i++){ o[k++] = c; o[k++] = conv(VI(vb, ib, i + 1)); o[k++] = conv(VI(vb, ib, i + 2)); }
+        flush_verts(o, k, 0); return; }
+    if (!strcmp(n, "drawtristrip@12")){
+        for (int i = 0; i < count - 2 && k + 3 <= MAX_VERTS; i++){
+            if (i & 1){ o[k++] = conv(VI(vb, ib, i + 1)); o[k++] = conv(VI(vb, ib, i)); }
+            else { o[k++] = conv(VI(vb, ib, i)); o[k++] = conv(VI(vb, ib, i + 1)); }
+            o[k++] = conv(VI(vb, ib, i + 2));
+        }
+        flush_verts(o, k, 0); return; }
+    if (!strcmp(n, "drawquadmesh@12")){ for (int i = 0; i < count; i++) quad(VI(vb, ib, i * 4), VI(vb, ib, i * 4 + 1), VI(vb, ib, i * 4 + 2), VI(vb, ib, i * 4 + 3)); return; }
+    if (!strcmp(n, "drawlinemesh@12")){ for (int i = 0; i < count; i++) line(VI(vb, ib, i * 2), VI(vb, ib, i * 2 + 1)); return; }
+    if (!strcmp(n, "drawlinestrip@12")){ for (int i = 0; i < count - 1; i++) line(VI(vb, ib, i), VI(vb, ib, i + 1)); return; }
+    if (!strcmp(n, "drawpointmesh@12")){ for (int i = 0; i < count; i++) point(VI(vb, ib, i)); return; }
+    if (!strcmp(n, "drawspritemesh@12")){ for (int i = 0; i < count; i++) sprite(VI(vb, ib, i * 2), VI(vb, ib, i * 2 + 1)); return; }
+}
+
+/* ---- textures (dx11_texture.cpp) ---- */
+static int mip_count(int w, int h){ int n = 1; while (w > 1 || h > 1){ w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1; n++; } return n; }
+uint32_t r_talloc(int w, int h, int fmt, int flags, int mips){
+    (void)flags; (void)mips;
+    int slot = -1;
+    for (int i = 0; i < LFB_SLOT; i++) if (!g_tex[i].used){ slot = i; break; }
+    if (slot < 0 || w <= 0 || h <= 0) return 0;
+    Tex *t = &g_tex[slot];
+    memset(t, 0, sizeof *t);
+    t->used = 1; t->w = w; t->h = h; t->fmt = fmt; t->levels = mip_count(w, h); t->seg = -1;
+    cmd_room(6);
+    uint32_t *c = g_cmd + g_ncmd; g_ncmd += 5;
+    c[0] = C_TEX_CREATE; c[1] = (uint32_t)slot + 1; c[2] = (uint32_t)w; c[3] = (uint32_t)h; c[4] = (uint32_t)t->levels;
+    return (uint32_t)slot + 1;
+}
+static void tex_destroy(int slot){
+    if (!g_tex[slot].used) return;
+    g_tex[slot].used = 0;
+    /* the page frees it after this segment's draws */
+    cmd_room(3);
+    g_cmd[g_ncmd++] = C_TEX_DESTROY; g_cmd[g_ncmd++] = (uint32_t)slot + 1;
+}
+void r_tfree(uint32_t t){
+    if (!t || t >= LFB_SLOT + 1u) return;
+    if ((int)t == g_bound) g_bound = 0;
+    close_draw();
+    tex_destroy((int)t - 1);
+}
+void r_treset(void){
+    close_draw();
+    for (int i = 0; i < LFB_SLOT; i++) tex_destroy(i);
+    g_bound = 0;
+}
+void r_settexture(uint32_t t){ g_bound = (t && t < LFB_SLOT + 1u && g_tex[t - 1].used) ? (int)t : 0; }
+
+static void to_rgba(const void *src, uint32_t *dst, int w, int h, int fmt){
+    const int n = w * h;
+    switch (fmt){
+    case 3: case 11: case 0: case 10:
+        for (int i = 0; i < n; i++){
+            uint16_t c = ((const uint16_t *)src)[i];
+            uint32_t a = (fmt == 11) ? 0xFF : ((c & 0x8000) ? 0xFF : 0);
+            uint32_t r = ((c >> 10) & 0x1F) * 255 / 31, g = ((c >> 5) & 0x1F) * 255 / 31, b = (c & 0x1F) * 255 / 31;
+            dst[i] = a << 24 | b << 16 | g << 8 | r;
+        }
+        break;
+    case 4: case 1: case 9:
+        for (int i = 0; i < n; i++){
+            uint16_t c = ((const uint16_t *)src)[i];
+            uint32_t r = ((c >> 11) & 0x1F) * 255 / 31, g = ((c >> 5) & 0x3F) * 255 / 63, b = (c & 0x1F) * 255 / 31;
+            dst[i] = 0xFF000000u | b << 16 | g << 8 | r;
+        }
+        break;
+    case 7: case 2:
+        for (int i = 0; i < n; i++){
+            uint16_t c = ((const uint16_t *)src)[i];
+            uint32_t a = ((c >> 12) & 0xF) * 17, r = ((c >> 8) & 0xF) * 17, g = ((c >> 4) & 0xF) * 17, b = (c & 0xF) * 17;
+            dst[i] = a << 24 | b << 16 | g << 8 | r;
+        }
+        break;
+    case 8:
+        for (int i = 0; i < n; i++){
+            uint8_t c = ((const uint8_t *)src)[i];
+            uint32_t a = ((c >> 4) & 0xF) * 17, l = (c & 0xF) * 17;
+            dst[i] = a << 24 | l << 16 | l << 8 | l;
+        }
+        break;
+    case 5:
+        for (int i = 0; i < n; i++){
+            const uint8_t *p = (const uint8_t *)src + i * 3;
+            dst[i] = 0xFF000000u | (uint32_t)p[2] | (uint32_t)p[1] << 8 | (uint32_t)p[0] << 16;
+        }
+        break;
+    default:
+        for (int i = 0; i < n; i++){
+            uint32_t c = ((const uint32_t *)src)[i];
+            dst[i] = (c & 0xFF00FF00u) | ((c & 0x00FF0000u) >> 16) | ((c & 0xFFu) << 16);
+        }
+        break;
+    }
+}
+static void classify(const uint32_t *px, int n, int *cutout, int *clear_, int *mid_, int *solid_){
+    int clear = 0, solid = 0, mid = 0;
+    for (int i = 0; i < n; i++){
+        unsigned a = px[i] >> 24;
+        if (a < 8) clear++; else if (a >= 128) solid++; else mid++;
+    }
+    *clear_ = clear; *mid_ = mid; *solid_ = solid;
+    *cutout = !(!clear || !solid || mid * 20 > n || clear * 12 < n);
+}
+static int edge_opaque(const uint32_t *px, int w, int h, int e){
+    int n = 0;
+    if (e < 2){ const uint32_t *row = px + (e ? (h - 1) * w : 0); for (int x = 0; x < w; x++) n += (row[x] >> 24) >= 8; }
+    else { const int x = e == 2 ? 0 : w - 1; for (int y = 0; y < h; y++) n += (px[y * w + x] >> 24) >= 8; }
+    return n;
+}
+static void clear_border(uint32_t *px, int w, int h){
+    if (w < 4 || h < 4) return;
+    const int top = edge_opaque(px, w, h, 0), bot = edge_opaque(px, w, h, 1), l = edge_opaque(px, w, h, 2), r = edge_opaque(px, w, h, 3);
+    if (top * 8 < w) for (int x = 0; x < w; x++) px[x] &= 0x00FFFFFFu;
+    if (bot * 8 < w) for (int x = 0; x < w; x++) px[(h - 1) * w + x] &= 0x00FFFFFFu;
+    if (l * 8 < h) for (int y = 0; y < h; y++) px[y * w] &= 0x00FFFFFFu;
+    if (r * 8 < h) for (int y = 0; y < h; y++) px[y * w + w - 1] &= 0x00FFFFFFu;
+}
+/* flood the nearest opaque RGB into the A=0 texels, frontier by frontier */
+static void dilate(uint32_t *px, int w, int h){
+    const int n = w * h;
+    int any_clear = 0, any_solid = 0;
+    for (int i = 0; i < n && !(any_clear && any_solid); i++){ if (px[i] >> 24) any_solid = 1; else any_clear = 1; }
+    if (!any_clear || !any_solid) return;
+    uint8_t *has = malloc((size_t)n), *queued = calloc((size_t)n, 1);
+    int *fr = malloc((size_t)n * sizeof(int)), *nx = malloc((size_t)n * sizeof(int));
+    uint32_t *val = malloc((size_t)n * 4);
+    for (int i = 0; i < n; i++) has[i] = (px[i] >> 24) != 0;
+    static const int dx[8] = { -1, -1, -1, 0, 0, 1, 1, 1 }, dy[8] = { -1, 0, 1, -1, 1, -1, 0, 1 };
+    int nf = 0;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++){
+        const int i = y * w + x;
+        if (has[i]) continue;
+        for (int k = 0; k < 8; k++){
+            const int xx = x + dx[k], yy = y + dy[k];
+            if (xx >= 0 && yy >= 0 && xx < w && yy < h && has[yy * w + xx]){ fr[nf++] = i; queued[i] = 1; break; }
+        }
+    }
+    const int limit = w > h ? w : h;
+    for (int pass = 0; pass < limit && nf; pass++){
+        for (int f = 0; f < nf; f++){
+            const int i = fr[f], x = i % w, y = i / w;
+            unsigned r = 0, g = 0, b = 0, c = 0;
+            for (int k = 0; k < 8; k++){
+                const int xx = x + dx[k], yy = y + dy[k];
+                if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                const int j = yy * w + xx;
+                if (!has[j]) continue;
+                const uint32_t p = px[j];
+                r += p & 255; g += (p >> 8) & 255; b += (p >> 16) & 255; c++;
+            }
+            val[f] = (px[i] & 0xFF000000u) | (b / c) << 16 | (g / c) << 8 | (r / c);
+        }
+        for (int f = 0; f < nf; f++){ px[fr[f]] = val[f]; has[fr[f]] = 1; }
+        int nn = 0;
+        for (int f = 0; f < nf; f++){
+            const int i = fr[f], x = i % w, y = i / w;
+            for (int k = 0; k < 8; k++){
+                const int xx = x + dx[k], yy = y + dy[k];
+                if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                const int j = yy * w + xx;
+                if (has[j] || queued[j]) continue;
+                queued[j] = 1; nx[nn++] = j;
+            }
+        }
+        int *t = fr; fr = nx; nx = t; nf = nn;
+    }
+    free(has); free(queued); free(fr); free(nx); free(val);
+}
+static void downsample(const uint32_t *src, int sw, int sh, uint32_t *dst, int dw, int dh){
+    for (int y = 0; y < dh; y++){
+        const int y0 = (2 * y) * sw, y1 = (sh > 1) ? (2 * y + 1) * sw : y0;
+        for (int x = 0; x < dw; x++){
+            const int x0 = 2 * x, x1 = (sw > 1) ? x0 + 1 : x0;
+            unsigned aR = 0, aG = 0, aB = 0, aA = 0, sR = 0, sG = 0, sB = 0;
+            const int idx[4] = { y0 + x0, y0 + x1, y1 + x0, y1 + x1 };
+            for (int i = 0; i < 4; i++){
+                const uint32_t p = src[idx[i]];
+                const unsigned r = p & 255, g = (p >> 8) & 255, b = (p >> 16) & 255, a = p >> 24;
+                aR += r * a; aG += g * a; aB += b * a; sR += r; sG += g; sB += b; aA += a;
+            }
+            const unsigned r = aA ? aR / aA : sR / 4, g = aA ? aG / aA : sG / 4, b = aA ? aB / aA : sB / 4;
+            dst[y * dw + x] = (aA / 4) << 24 | b << 16 | g << 8 | r;
+        }
+    }
+}
+/* one level's pixels into the segment; a texture this segment drew with waits for the next */
+static void tex_write(int slot, int level, int x, int y, int w, int h, const uint32_t *px){
+    const uint32_t bytes = (uint32_t)w * (uint32_t)h * 4u;
+    if (bytes > UP_BYTES){ fprintf(stderr, "[gpu] upload of %ux%u is too big\n", w, h); return; }
+    if (g_tex[slot].seg == g_seg_serial || g_nup + bytes > UP_BYTES) seg_publish(0);
+    cmd_room(9);
+    memcpy(g_up + g_nup, px, bytes);
+    uint32_t *c = g_cmd + g_ncmd; g_ncmd += 8;
+    c[0] = C_TEX_WRITE; c[1] = (uint32_t)slot + 1; c[2] = (uint32_t)level; c[3] = (uint32_t)x; c[4] = (uint32_t)y; c[5] = (uint32_t)w; c[6] = (uint32_t)h; c[7] = g_nup;
+    g_nup += bytes;
+}
+static void upload_chain(int slot, uint32_t *mip0){
+    int w = g_tex[slot].w, h = g_tex[slot].h;
+    const int levels = g_tex[slot].levels;
+    tex_write(slot, 0, 0, 0, w, h, mip0);
+    if (levels <= 1) return;
+    uint32_t *src = mip0; int free_src = 0;
+    for (int l = 1; l < levels; l++){
+        const int dw = w > 1 ? w / 2 : 1, dh = h > 1 ? h / 2 : 1;
+        uint32_t *dst = malloc((size_t)dw * dh * 4);
+        downsample(src, w, h, dst, dw, dh);
+        tex_write(slot, l, 0, 0, dw, dh, dst);
+        if (free_src) free(src);
+        src = dst; free_src = 1; w = dw; h = dh;
+    }
+    if (free_src) free(src);
+}
+void r_tupdate(uint32_t t, uint32_t data, int palette){
+    (void)palette;
+    if (!t || t > LFB_SLOT || !data || !g_tex[t - 1].used) return;
+    const int slot = (int)t - 1, w = g_tex[slot].w, h = g_tex[slot].h, n = w * h;
+    uint32_t *rgba = malloc((size_t)n * 4);
+    to_rgba(g_mem + data, rgba, w, h, g_tex[slot].fmt);
+    dilate(rgba, w, h);
+    int cutout, clear, mid, solid;
+    classify(rgba, n, &cutout, &clear, &mid, &solid);
+    /* HZ6 keyed: car pages' rule needs the texture's name, which the mod's material system knows: not here yet */
+    const int keyed = cutout || (solid && clear * 100 >= n && mid * 100 <= n);
+    g_tex[slot].cutout = cutout; g_tex[slot].keyed = keyed;
+    if (keyed) clear_border(rgba, w, h);
+    upload_chain(slot, rgba);
+    free(rgba);
+}
+void r_tupdaterect(uint32_t t, int mip, int x, int y, int rw, int rh, int pitch, uint32_t data, int fmt){
+    if (!t || t > LFB_SLOT || !data || !g_tex[t - 1].used) return;
+    const int slot = (int)t - 1;
+    int tw = g_tex[slot].w, th = g_tex[slot].h, sf = fmt >= 0 ? fmt : g_tex[slot].fmt;
+    if (mip < 0 || mip >= g_tex[slot].levels) return;
+    for (int m = 0; m < mip; m++){ tw = tw > 1 ? tw / 2 : 1; th = th > 1 ? th / 2 : 1; }
+    if (x + rw > tw) rw = tw - x;
+    if (y + rh > th) rh = th - y;
+    if (rw <= 0 || rh <= 0) return;
+    uint32_t *rgba = malloc((size_t)rw * rh * 4);
+    for (int r = 0; r < rh; r++) to_rgba(g_mem + data + (uint32_t)(r * pitch), rgba + r * rw, rw, 1, sf);
+    tex_write(slot, mip, x, y, rw, rh, rgba);
+    free(rgba);
+    if (mip == 0 && g_tex[slot].levels > 1){ cmd_room(3); g_cmd[g_ncmd++] = C_TEX_GENMIPS; g_cmd[g_ncmd++] = (uint32_t)slot + 1; }
+}
+
+/* ---- driver calls (thrash_dx11.cpp) ---- */
+void r_setstate(int id, int value){
+    if (id < 0 || id >= NST) return;
+    if ((id == THRASH_STATE_ZBUFFER_COMPARE && (value < 0 || value > 7)) || (id == THRASH_STATE_ZBUFFER_MODE && (value < 0 || value > 2))) return;
+    g_st[id] = value;
+    switch (id){
+    case THRASH_STATE_CLEAR_COLOR: g_clearcolor = (uint32_t)value; break;
+    case THRASH_STATE_ZBUFFER_MODE:
+        g_zcmp = value ? g_st[THRASH_STATE_ZBUFFER_COMPARE] : 7;
+        g_zwrite = value != 0;
+        break;
+    case THRASH_STATE_ZBUFFER_COMPARE: g_zcmp = value; break;
+    case THRASH_STATE_ZBUFFER_WRITE: g_zwrite = value != 0; break;
+    case THRASH_STATE_ALPHA_TEST_REF: g_alpharef = (float)(value & 0xFF) / 255.0f; break;
+    case THRASH_STATE_BLEND_MODE: if (value >= 0 && value < 4) g_blend = value; break;
+    case THRASH_STATE_CULL_MODE: if (value >= 0 && value <= 2) g_cull = value; break;
+    case THRASH_STATE_DEPTH_BIAS:
+        if (value < -1000000 || value > 1000000) value = 0;
+        g_depthbias = (float)value / 4096.0f;
+        break;
+    case THRASH_STATE_TEXTURE_FILTER: if (value == 0 || value == 1) g_filter = value; break;
+    case THRASH_STATE_TEXTURE_LOD_BIAS: memcpy(&g_lodbias, &value, 4); break;
+    case THRASH_STATE_TEXTURE_CLAMP_S: if (value >= 0 && value <= 2) g_clamp_s = value; break;
+    case THRASH_STATE_TEXTURE_CLAMP_T: if (value >= 0 && value <= 2) g_clamp_t = value; break;
+    case THRASH_STATE_VERTEX_STRIDE: if (value >= 24 && value <= 128) g_vstride = value; break;
+    case THRASH_STATE_INDEX_FORMAT:
+        switch (value){ case 1: g_istride = 1; break; case 2: g_istride = 2; break; case 3: g_istride = 4; break; case 4: g_istride = 8; break; default: g_istride = 2; }
+        break;
+    case THRASH_STATE_FOG_MODE_GLIDE: if (value == 0 || value == 1) g_fogon = value != 0; break;
+    case THRASH_STATE_FOG_DENSITY: {
+        float d = 0.0f;
+        if (value != 0 && (value & 0xFFFFF000) == 0) d = 1.0f / (float)value; else memcpy(&d, &value, 4);
+        if (!(d >= 0.0f && d < 64.0f)) d = 0.0f;
+        g_fogdensity = d; update_fogscale();
+        break; }
+    case THRASH_STATE_FOG_COLOR_GLIDE: g_fogcolor = (uint32_t)value; break;
+    default: break;
+    }
+}
+int r_getstate(int id){ return id >= 0 && id < NST ? g_st[id] : 0; }
+
+static long g_frames;
+static int g_curwin;
+int r_init(int w, int h){
+    if (w <= 0) w = 640;
+    if (h <= 0) h = 480;
+    g_lw = w; g_lh = h;
+    if (!g_cur){
+        g_ring.magic = 0x4E465335u; g_ring.seg_count = SEGS;
+        for (int i = 0; i < SEGS; i++){
+            g_ring.seg[i].cmd = (uint32_t)(uintptr_t)malloc(CMD_WORDS * 4);
+            g_ring.seg[i].vtx = (uint32_t)(uintptr_t)malloc(VTX_BYTES);
+            g_ring.seg[i].up = (uint32_t)(uintptr_t)malloc(UP_BYTES);
+            if (!g_ring.seg[i].cmd || !g_ring.seg[i].vtx || !g_ring.seg[i].up){ fprintf(stderr, "[gpu] no memory for the frames\n"); return 0; }
+        }
+        seg_acquire();
+        nfsu2_register(HOST_KIND_GPU, &g_ring, sizeof g_ring);
+    }
+    memset(g_st, 0, sizeof g_st);
+    g_st[THRASH_STATE_CLEAR_COLOR] = (int)0xFF000000u;
+    g_st[THRASH_STATE_ZBUFFER_COMPARE] = 3;
+    g_st[0x1E] = 32; g_st[0x46] = 3; g_st[0x43] = 0x3F800000; g_st[0x2E] = 0x3F800000; g_st[0x17] = 0x3F800000; g_st[0x3E] = 1;
+    g_st[THRASH_STATE_SCREEN_WIDTH] = w; g_st[THRASH_STATE_SCREEN_HEIGHT] = h;
+    g_vstride = 32; g_istride = 4; g_clipvalid = 0;
+    dirty_all();
+    fprintf(stderr, "[gpu] renderer ready, %dx%d\n", w, h);
+    return 1;
+}
+void r_restore(void){ close_draw(); seg_publish(0); }
+void r_setvideomode(int w, int h, int bpp){
+    g_race = bpp == 32;
+    g_st[THRASH_STATE_SCREEN_WIDTH] = w; g_st[THRASH_STATE_SCREEN_HEIGHT] = h;
+    if (w > 0 && h > 0 && (w != g_lw || h != g_lh)){ close_draw(); g_lw = w; g_lh = h; g_s_video = 0; }
+}
+void r_window(int idx){ if (idx >= 0 && idx <= 7) g_curwin = idx; }
+void r_clip(int x1, int y1, int x2, int y2){ g_clip[0] = x1; g_clip[1] = y1; g_clip[2] = x2; g_clip[3] = y2; g_clipvalid = 1; }
+void r_flushwindow(void){ }
+/* a quad at the far plane through the clip, with its own state: the depth-only window (3) keeps the colour */
+void r_clearwindow(void){
+    DrawState d; memset(&d, 0, sizeof d);
+    d.blend = 4; d.zcmp = 7; d.zwrite = 1; d.colorwrite = g_curwin != 3; d.filter = 1; d.cs = d.ct = 0;
+    const float W = (float)g_lw, H = (float)g_lh;
+    const uint32_t c = g_clearcolor;
+    DV v[6]; memset(v, 0, sizeof v);
+    const float xs[6] = { 0, W, W, 0, W, 0 }, ys[6] = { 0, 0, H, 0, H, H };
+    for (int i = 0; i < 6; i++){ v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 1.0f; v[i].w = 1.0f; v[i].color = c; }
+    submit(v, 6, &d);
+}
+/* the software frame (loading screens): RGB565, one opaque full-screen quad */
+void r_unlockwindow(uint32_t pixels, int w, int h, int pitch){
+    if (!pixels || w <= 0 || h <= 0) return;
+    Tex *t = &g_tex[LFB_SLOT];
+    if (!t->used || t->w != w || t->h != h){
+        close_draw();
+        if (t->used){ cmd_room(3); g_cmd[g_ncmd++] = C_TEX_DESTROY; g_cmd[g_ncmd++] = LFB_SLOT + 1; }
+        t->used = 1; t->w = w; t->h = h; t->levels = 1; t->seg = -1;
+        cmd_room(6);
+        uint32_t *c = g_cmd + g_ncmd; g_ncmd += 5;
+        c[0] = C_TEX_CREATE; c[1] = LFB_SLOT + 1; c[2] = (uint32_t)w; c[3] = (uint32_t)h; c[4] = 1;
+    }
+    uint32_t *rgba = malloc((size_t)w * h * 4);
+    for (int y = 0; y < h; y++) to_rgba(g_mem + pixels + (uint32_t)(y * pitch), rgba + y * w, w, 1, 4);
+    tex_write(LFB_SLOT, 0, 0, 0, w, h, rgba);
+    free(rgba);
+    DrawState d; memset(&d, 0, sizeof d);
+    d.blend = 4; d.zcmp = 7; d.colorwrite = 1; d.tex = LFB_SLOT + 1; d.filter = 1;
+    const float W = (float)g_lw, H = (float)g_lh;
+    DV v[6]; memset(v, 0, sizeof v);
+    const float xs[6] = { 0, W, W, 0, W, 0 }, ys[6] = { 0, 0, H, 0, H, H }, us[6] = { 0, 1, 1, 0, 1, 0 }, vs[6] = { 0, 0, 1, 0, 1, 1 };
+    for (int i = 0; i < 6; i++){ v[i].x = xs[i]; v[i].y = ys[i]; v[i].w = 1.0f; v[i].u = us[i]; v[i].v = vs[i]; v[i].color = 0xFFFFFFFFu; }
+    submit(v, 6, &d);
+}
+/* the screen's pixels are in the GPU, a frame away: the game's only use is the lens flares' sun test (G7);
+ * WEB3: reads as black, which leaves the flare test without a change to see */
+int r_readrect(int x, int y, int w, int h, uint32_t buf){
+    (void)x; (void)y;
+    if (!buf || w <= 0 || h <= 0 || w > 4096 || h > 4096) return 0;
+    memset(g_mem + buf, 0, (size_t)w * h * 2);
+    return 1;
+}
+void r_pageflip(void){
+    g_frames++;
+    close_draw();
+    cmd_room(2);
+    g_cmd[g_ncmd++] = C_PRESENT;
+    seg_publish(1);
+    /* one frame queued at most: the page's display rate paces the game */
+    int pub = __atomic_load_n(&g_ring.presents_pub, __ATOMIC_ACQUIRE);
+    int done = __atomic_load_n(&g_ring.presents_done, __ATOMIC_ACQUIRE);
+    if (pub - done > 1){
+        guest_wait_begin();
+        while (pub - (done = __atomic_load_n(&g_ring.presents_done, __ATOMIC_ACQUIRE)) > 1)
+            __builtin_wasm_memory_atomic_wait32((int32_t *)&g_ring.presents_done, done, 100000000LL);
+        guest_wait_end();
+    }
+}
+long r_frames(void){ return g_frames; }
