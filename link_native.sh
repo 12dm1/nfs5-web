@@ -12,11 +12,12 @@ OUT=out/native; mkdir -p "$OUT/gen" "$OUT/rt"
 export CC OPT OUT
 # lifted code: rebuilt only when the C is newer than its object
 ls gen/all/*.c | xargs -P "${JOBS:-16}" -I{} sh -c 'o="$OUT/gen/$(basename {} .c).o"; [ "$o" -nt "{}" ] || "$CC" $OPT -g1 -c -w -Iruntime -Igen/all "{}" -o "$o" || echo "FAILED: {}"'
-RT="win32 win32_ext fileio mem heap dispatch module genexec lifecycle debug watchdog sha256 res modheap pu_stubs pu_hooks nettest pu_com pu_imports thrash_hle"
+RT="win32 win32_ext fileio mem heap dispatch module genexec lifecycle debug watchdog sha256 res modheap pu_stubs pu_hooks nettest pu_com pu_imports thrash_hle pu_ext"
 pids=""
 for f in $RT; do
   "$CC" $OPT -g -c -w -include win/posix_compat.h -Iruntime -Igen/all "runtime/$f.c" -o "$OUT/rt/$f.o" & pids="$pids $!"
 done
+for f in runtime/ext/*.cpp; do "${CC%clang}clang++" -std=c++17 $OPT -g -fno-exceptions -fno-rtti -w -c "$f" -o "$OUT/rt/ext_$(basename "$f" .cpp).o" & pids="$pids $!"; done
 for f in runtime/win/*.c; do
   "$CC" $OPT -g -c -w -include win/posix_compat.h -Iruntime -Igen/all "$f" -o "$OUT/rt/win_$(basename "$f" .c).o" & pids="$pids $!"
 done

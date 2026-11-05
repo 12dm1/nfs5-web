@@ -23,9 +23,10 @@ CFLAGS="$TARGET $OPT $FEAT $DEFS -fno-delete-null-pointer-checks -w -include run
 SHARDFLAGS="-DNFSU2_GUEST_OBJ"
 export CC CFLAGS SHARDFLAGS OUT
 ls gen/all/shard_*.c gen/all/fntab.c gen/all/impargs.c | xargs -P "$J" -I{} sh -c 'o="$OUT/obj/$(basename {} .c).o"; [ "$o" -nt "{}" ] || "$CC" $CFLAGS $SHARDFLAGS -c "{}" -o "$o" || echo "FAILED {}"'
-RT="win32 win32_ext fileio mem heap dispatch module genexec lifecycle debug watchdog sha256 res modheap pu_stubs pu_hooks nettest pu_com pu_imports thrash_hle"
+RT="win32 win32_ext fileio mem heap dispatch module genexec lifecycle debug watchdog sha256 res modheap pu_stubs pu_hooks nettest pu_com pu_imports thrash_hle pu_ext"
 pids=""; fail=0
 for f in $RT; do "$CC" $CFLAGS -c "runtime/$f.c" -o "$OUT/rt/$f.o" & pids="$pids $!"; done
+for f in runtime/ext/*.cpp; do "${CC%clang.exe}clang++.exe" -std=c++17 $TARGET $OPT $FEAT -fno-exceptions -fno-rtti -fno-threadsafe-statics -w -c "$f" -o "$OUT/rt/ext_$(basename "$f" .cpp).o" & pids="$pids $!"; done
 for f in runtime/web/*.c; do b=$(basename "$f" .c)
   case "$b" in thread_exit) fl="$TARGET $OPT $FEAT" ;; *) fl="$CFLAGS" ;; esac
   "$CC" $fl -c "$f" -o "$OUT/rt/web_$b.o" & pids="$pids $!"

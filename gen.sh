@@ -11,7 +11,9 @@ SRC="${1:-$NFS5_EXE}"
 PY="${PY:-python}"
 export JTSWITCH="${JTSWITCH:-1}"
 # instruction hooks served by runtime/pu_hooks.c
-export HOOKS="${HOOKS:-0x4D2B80,0x4D3D00,0x41562E,0x4B6CB9}"   # guest_hook sites (runtime/pu_hooks.c): network autotest only; loops yield by themselves (GUEST_BACKEDGE)
+export HOOKS="${HOOKS:-0x4D2B80,0x4D3D00,0x41562E,0x4B6CB9,0x40B6FD,0x40BA91,0x40BAF0,0x40C865,0x40C8DA,0x41041E,0x43A3B0,0x43C431}"   # guest_hook sites (runtime/pu_hooks.c): network autotest only; loops yield by themselves (GUEST_BACKEDGE)
+# lifted functions replaced in runtime/pu_ext.c (the original stays as sub_x_orig)
+export OVERRIDE="${OVERRIDE:-0x4E06D0,0x40F480,0x498FF0,0x4677D0,0x43E120}"
 mkdir -p out gen/all
 "$PY" tools/exe.py prepare "$SRC" out/PORSCHE.EXE
 "$PY" tools/relocs.py out/PORSCHE.EXE

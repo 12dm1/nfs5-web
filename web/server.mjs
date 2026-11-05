@@ -1,5 +1,5 @@
 // nfs5-web WEB3 development server: page + module + game files, with the COOP/COEP headers SharedArrayBuffer needs.
-//   node web/server.mjs [--port 8077] [--data M:/Games/nfs5_clean] [--exe out/PORSCHE.EXE] [--password x]
+//   node web/server.mjs [--port 8077] [--data M:/Games/nfs5_clean] [--exe out/PORSCHE.EXE] [--mod out/mod] [--password x]
 // /data-manifest + /data/<path>?b=<first block>&n=<blocks> are what web/src/host/io-worker.ts reads. The game files
 // come from the player's own folder and are never part of this repository. The patched EXE (./gen.sh) is served
 // as /data/PORSCHE.EXE in place of the folder's own.
@@ -14,27 +14,31 @@ const PORT = +arg('port', 8077), DATA = arg('data', 'M:/Games/nfs5_clean'), EXE 
 const PASSWORD = arg('password', '');
 // A copy of the game without the menu music (GameData/Music is optional at install time): this folder takes its place.
 const MUSIC = arg('music', path.join(ROOT, 'out/save/gamedata/music'));
+const MOD = arg('mod', path.join(ROOT, 'out/mod'));
 const BLOCK = 1 << 20, MAX_RUN = 16;
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.json': 'application/json', '.map': 'application/json' };
 
+// The game's file list: the folder, the optional music, the mod layer (tools/make_mod_layer.py) over them, in any letter case.
+let files = new Map();
 function listFiles() {
-  const out = [];
-  const walk = (dir, rel) => {
+  files = new Map();
+  const walk = (dir, rel, top) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = rel ? rel + '/' + e.name : e.name, full = path.join(dir, e.name);
-      if (e.isDirectory()) { out.push({ p, d: 1 }); walk(full, p); }
+      if (e.isDirectory()) { if (!files.has(p.toLowerCase())) files.set(p.toLowerCase(), { p, d: 1 }); walk(full, files.get(p.toLowerCase()).p, top); }
       else if (e.isFile()) {
-        if (!rel && e.name.toLowerCase() === 'porsche.exe') continue;
-        const st = fs.statSync(full);
-        out.push({ p, s: st.size, m: Math.floor(st.mtimeMs / 1000) });
+        if (!rel && top && e.name.toLowerCase() === 'porsche.exe') continue;
+        const old = files.get(p.toLowerCase()), st = fs.statSync(full);
+        files.set(p.toLowerCase(), { p: old ? old.p : p, s: st.size, m: Math.floor(st.mtimeMs / 1000), full });
       }
     }
   };
-  walk(DATA, '');
-  if (fs.existsSync(MUSIC) && !out.some(f => f.p.toLowerCase() === 'gamedata/music')) { out.push({ p: 'GameData/Music', d: 1 }); walk(MUSIC, 'GameData/Music'); }
+  walk(DATA, '', true);
+  if (fs.existsSync(MUSIC) && !files.has('gamedata/music')) { files.set('gamedata/music', { p: 'GameData/Music', d: 1 }); walk(MUSIC, 'GameData/Music'); }
+  if (fs.existsSync(MOD)) walk(MOD, '');
   const st = fs.statSync(EXE);
-  out.push({ p: 'PORSCHE.EXE', s: st.size, m: Math.floor(st.mtimeMs / 1000) });
-  return out;
+  files.set('porsche.exe', { p: 'PORSCHE.EXE', s: st.size, m: Math.floor(st.mtimeMs / 1000), full: EXE });
+  return [...files.values()].map(({ p, d, s, m }) => d ? { p, d } : { p, s, m });
 }
 const manifest = () => JSON.stringify({ files: listFiles(), blocks: { url: '/data/', size: BLOCK, max: MAX_RUN } });
 
@@ -46,13 +50,8 @@ function sendFile(res, file, type, extra = {}) {
   });
 }
 function dataPath(rel) {
-  if (rel.toLowerCase() === 'porsche.exe') return EXE;
-  if (rel.toLowerCase().startsWith('gamedata/music/') && !fs.existsSync(path.join(DATA, 'GameData/Music'))) {
-    const m = path.resolve(MUSIC, rel.slice(15));
-    return m.startsWith(path.resolve(MUSIC)) ? m : null;
-  }
-  const full = path.resolve(DATA, rel);
-  return full.startsWith(path.resolve(DATA)) ? full : null;
+  if (!files.size) listFiles();
+  return files.get(rel.toLowerCase())?.full ?? null;
 }
 function authorized(req) {
   if (!PASSWORD) return true;

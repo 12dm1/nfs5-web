@@ -207,9 +207,11 @@ static void ui_rects(DV *verts, int n){
         for (int i = 0; i < 3; i++){ v[i].rect[0] = lo0; v[i].rect[1] = lo1; v[i].rect[2] = hi0; v[i].rect[3] = hi1; }
     }
 }
+static int tan_substitute(int bound);
+static float tan_voffset(int bound);
 static void game_state(DrawState *d, int topo){
     d->blend = g_blend; d->zcmp = g_zcmp; d->zwrite = g_zwrite; d->cull = g_cull; d->topo = topo; d->colorwrite = 1;
-    d->tex = g_bound; d->filter = g_filter; d->cs = g_clamp_s; d->ct = g_clamp_t; d->mips = g_race ? 1 : 0;
+    d->tex = tan_substitute(g_bound); d->filter = g_filter; d->cs = g_clamp_s; d->ct = g_clamp_t; d->mips = g_race ? 1 : 0;
     d->alpharef = g_alpharef; d->fogon = g_fogon ? 1.0f : 0.0f; d->depthbias = g_depthbias;
     if (d->filter == 0 && !g_race) d->filter = 1;            /* point_filter=2: honoured only in the race (G7) */
     d->hard = hard_wanted();
@@ -218,6 +220,7 @@ static void game_state(DrawState *d, int topo){
 }
 static void flush_verts(DV *v, int n, int topo){
     if (n <= 0) return;
+    { const float dv = tan_voffset(g_bound); if (dv != 0.0f) for (int i = 0; i < n; i++) v[i].v += dv; }
     if (topo == 0){
         n = guard_filter(v, n);
         if (n <= 0) return;
@@ -325,6 +328,8 @@ uint32_t r_talloc(int w, int h, int fmt, int flags, int mips){
     c[0] = C_TEX_CREATE; c[1] = (uint32_t)slot + 1; c[2] = (uint32_t)w; c[3] = (uint32_t)h; c[4] = (uint32_t)t->levels;
     return (uint32_t)slot + 1;
 }
+static void tan_free(int slot);
+static void tan_reset(void);
 static void tex_destroy(int slot){
     if (!g_tex[slot].used) return;
     g_tex[slot].used = 0;
@@ -336,12 +341,14 @@ void r_tfree(uint32_t t){
     if (!t || t >= LFB_SLOT + 1u) return;
     if ((int)t == g_bound) g_bound = 0;
     close_draw();
+    tan_free((int)t - 1);
     tex_destroy((int)t - 1);
 }
 void r_treset(void){
     close_draw();
     for (int i = 0; i < LFB_SLOT; i++) tex_destroy(i);
     g_bound = 0;
+    tan_reset();
 }
 void r_settexture(uint32_t t){ g_bound = (t && t < LFB_SLOT + 1u && g_tex[t - 1].used) ? (int)t : 0; }
 
@@ -509,6 +516,101 @@ static void upload_chain(int slot, uint32_t *mip0){
     }
     if (free_src) free(src);
 }
+/* ---- HZ4: the NFS4 animated textures of a converted track, GameData/Track/<track>.tan (PC wrapper tex_anim.cpp).
+ * "TAN1", count, then per entry: tag[4], kind (1 frames, 2 scroll), frames, delay (1/64 s), float scroll (v per 1/64 s),
+ * w, h, then BGRA of frames 1..n-1. An upload of the base texture brings its other frames along as extra slots. ---- */
+#define TAN_FRAMES 8
+typedef struct { char tag[4]; int kind, frames, delay; float scroll; int w, h; uint8_t *px; } TanEntry;
+static TanEntry *g_tan; static int g_ntan, g_tan_loaded;
+static char g_tan_track[64], g_tex_name[12];
+static short g_tan_of[MAX_TEX], g_tan_slot[MAX_TEX][TAN_FRAMES];    /* entry + 1; frame slot + 1 */
+int fileio_resolve_game(const char *win, char *out, size_t outsz);
+void r_tex_name(const char *name){ snprintf(g_tex_name, sizeof g_tex_name, "%s", name); }
+static uint32_t tan_ticks(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint32_t)(t.tv_sec * 64 + t.tv_nsec / 15625000); }
+static void tan_load(void){
+    const char *track = (const char *)(g_mem + 0x00657444u);
+    if (g_tan_loaded && !strncmp(track, g_tan_track, sizeof g_tan_track - 1)) return;
+    for (int i = 0; i < g_ntan; i++) free(g_tan[i].px);
+    free(g_tan); g_tan = NULL; g_ntan = 0;
+    snprintf(g_tan_track, sizeof g_tan_track, "%s", track);
+    g_tan_loaded = 1;
+    char win[128], path[1024];
+    snprintf(win, sizeof win, "GameData\\Track\\%s.tan", g_tan_track);
+    FILE *f = fileio_resolve_game(win, path, sizeof path) ? fopen(path, "rb") : NULL;
+    if (!f) return;
+    char magic[4]; uint32_t count = 0;
+    if (fread(magic, 1, 4, f) == 4 && !memcmp(magic, "TAN1", 4) && fread(&count, 4, 1, f) == 1 && count < 1024){
+        g_tan = calloc(count ? count : 1, sizeof *g_tan);
+        for (uint32_t i = 0; i < count; i++){
+            TanEntry *e = &g_tan[g_ntan];
+            uint8_t kind, frames; uint16_t delay, w, h;
+            if (fread(e->tag, 1, 4, f) != 4 || fread(&kind, 1, 1, f) != 1 || fread(&frames, 1, 1, f) != 1 || fread(&delay, 2, 1, f) != 1 ||
+                fread(&e->scroll, 4, 1, f) != 1 || fread(&w, 2, 1, f) != 1 || fread(&h, 2, 1, f) != 1 ||
+                frames < 1 || frames > TAN_FRAMES || !w || !h || w > 1024 || h > 1024) break;
+            e->kind = kind; e->frames = frames; e->delay = delay ? delay : 1; e->w = w; e->h = h;
+            const size_t bytes = (size_t)(frames - 1) * w * h * 4;
+            e->px = malloc(bytes ? bytes : 1);
+            if (bytes && fread(e->px, 1, bytes, f) != bytes){ free(e->px); e->px = NULL; break; }
+            g_ntan++;
+        }
+    }
+    fclose(f);
+    fprintf(stderr, "[hs] %s: %d animated textures\n", win, g_ntan);
+}
+static void tan_free(int slot){
+    for (int k = 0; k < TAN_FRAMES; k++){
+        if (g_tan_slot[slot][k]) tex_destroy(g_tan_slot[slot][k] - 1);
+        g_tan_slot[slot][k] = 0;
+    }
+    g_tan_of[slot] = 0;
+}
+static void tan_upload(int slot){
+    if (g_tan_of[slot]) tan_free(slot);
+    if (!g_tex_name[0] || g_tex_name[0] == '?') return;
+    tan_load();
+    const int w = g_tex[slot].w, h = g_tex[slot].h;
+    for (int i = 0; i < g_ntan; i++){
+        const TanEntry *e = &g_tan[i];
+        if (memcmp(e->tag, g_tex_name, 4)) continue;
+        if (w > e->w || h > e->h || e->w % w || e->h % h) return;
+        g_tan_of[slot] = (short)(i + 1);
+        const int fx = e->w / w, fy = e->h / h;
+        for (int k = 1; k < e->frames; k++){
+            const uint8_t *src = e->px + (size_t)(k - 1) * e->w * e->h * 4;
+            const uint32_t t = r_talloc(w, h, g_tex[slot].fmt, 0, 0);
+            if (!t) return;
+            uint32_t *px = malloc((size_t)w * h * 4);
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++){       /* box filter down to the uploaded size; BGRA -> RGBA */
+                uint32_t acc[4] = { 0, 0, 0, 0 };
+                for (int j = 0; j < fy; j++) for (int m = 0; m < fx; m++){
+                    const uint8_t *p = src + ((size_t)(y * fy + j) * e->w + x * fx + m) * 4;
+                    for (int c = 0; c < 4; c++) acc[c] += p[c];
+                }
+                const uint32_t d = (uint32_t)(fx * fy);
+                px[y * w + x] = (acc[2] / d) | (acc[1] / d) << 8 | (acc[0] / d) << 16 | (acc[3] / d) << 24;
+            }
+            g_tex[t - 1].cutout = g_tex[slot].cutout; g_tex[t - 1].keyed = g_tex[slot].keyed;
+            upload_chain((int)t - 1, px);
+            free(px);
+            g_tan_slot[slot][k] = (short)t;
+        }
+        return;
+    }
+}
+static void tan_reset(void){ memset(g_tan_of, 0, sizeof g_tan_of); memset(g_tan_slot, 0, sizeof g_tan_slot); g_tan_loaded = 0; }
+static int tan_substitute(int bound){
+    if (!bound || !g_tan_of[bound - 1]) return bound;
+    const TanEntry *e = &g_tan[g_tan_of[bound - 1] - 1];
+    if (e->kind != 1 || e->frames < 2) return bound;
+    const int k = (int)((tan_ticks() / (uint32_t)e->delay) % (uint32_t)e->frames);
+    const int t = k ? g_tan_slot[bound - 1][k] : 0;
+    return t ? t : bound;
+}
+static float tan_voffset(int bound){
+    if (!bound || !g_tan_of[bound - 1]) return 0.0f;
+    const TanEntry *e = &g_tan[g_tan_of[bound - 1] - 1];
+    return e->kind == 2 ? (float)(tan_ticks() & 0x3FF) * e->scroll : 0.0f;     /* whole repeats at the wrap */
+}
 void r_tupdate(uint32_t t, uint32_t data, int palette){
     (void)palette;
     if (!t || t > LFB_SLOT || !data || !g_tex[t - 1].used) return;
@@ -524,6 +626,7 @@ void r_tupdate(uint32_t t, uint32_t data, int palette){
     if (keyed) clear_border(rgba, w, h);
     upload_chain(slot, rgba);
     free(rgba);
+    tan_upload(slot);
 }
 void r_tupdaterect(uint32_t t, int mip, int x, int y, int rw, int rh, int pitch, uint32_t data, int fmt){
     if (!t || t > LFB_SLOT || !data || !g_tex[t - 1].used) return;
