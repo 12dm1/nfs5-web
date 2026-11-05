@@ -42,6 +42,7 @@ void mprot_arm(uint32_t);
  * (mem_is_committed, genexec, autotest probes) and the statistics; release
  * zeroes the whole 16 KB pages so a released range still reads as zero
  * (heap.c relies on it).  No page is ever given back to the browser. */
+uint32_t g_gwin_lo = 0, g_gwin_hi = 0;   /* no heap window above the runtime (guest_span.h) */
 void mem_init(void){ }
 void mem_commit(uint32_t addr, uint32_t size){
     uint64_t lo = addr & ~0x3FFFull;

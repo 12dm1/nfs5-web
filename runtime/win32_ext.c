@@ -203,6 +203,10 @@ static void gil_gave(void){
 #include "web/ticketlock.h"
 #include "web/host_abi.h"
 static ticketlock g_gil = TICKETLOCK_INIT;
+volatile long g_gil_waiting;
+uint64_t g_fy_calls, g_fy_hand;
+long win32_gil_waiting(void){ return g_gil_waiting; }
+long win32_gil_gen(void){ return 0; }
 /* NFSU2_GIL=mutex (measurement only): the old unordered pthread mutex, with
  * the same statistics, to compare against the ticket lock */
 static pthread_mutex_t g_gil_mx = PTHREAD_MUTEX_INITIALIZER;
@@ -260,7 +264,9 @@ static void gil_acquire(CPU *who){
         tl_acq_ms = nfsu2_now_ms(); tl_acq_blk = nfsu2_blocked_ms(); tl_holding = 1;
         return; }
     double t0 = nfsu2_now_ms();
+    __atomic_add_fetch(&g_gil_waiting, 1, __ATOMIC_SEQ_CST);   /* GUEST_BACKEDGE (cpu.h) looks at it */
     ticket_wait(&g_gil, me);
+    __atomic_sub_fetch(&g_gil_waiting, 1, __ATOMIC_SEQ_CST);
     double t1 = nfsu2_now_ms(), h = t1 - g_gil_rel_ms;
     if (h < 0) h = 0;
     GilStat *s = gil_stat_for(who); if (s) s->n++; g_gs_tot.n++; g_gs_win.n++;

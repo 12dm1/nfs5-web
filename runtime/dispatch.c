@@ -65,7 +65,7 @@ void dispatch_init(void){
 int  win32_call(CPU*, uint32_t);
 int  run_generated(CPU*, uint32_t);
 void genexec_report(void);
-int  com_call(CPU*, uint32_t);
+void com_call(CPU*, uint32_t);
 int  g_guest_exited = 0;
 
 /* --- run-time patches: replace indirect call targets ---
