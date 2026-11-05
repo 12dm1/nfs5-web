@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <math.h>
 #include <stdatomic.h>
 
@@ -21,7 +22,7 @@ void guest_wait_begin(void);
 void guest_wait_end(void);
 
 /* ---- protocol ---- */
-enum { C_VIDEO = 1, C_TEX_CREATE, C_TEX_DESTROY, C_TEX_WRITE, C_TEX_GENMIPS, C_SCISSOR, C_PIPE, C_BIND, C_UNIFORM, C_DRAW, C_PRESENT };
+enum { C_VIDEO = 1, C_TEX_CREATE, C_TEX_DESTROY, C_TEX_WRITE, C_TEX_GENMIPS, C_SCISSOR, C_PIPE, C_BIND, C_UNIFORM, C_DRAW, C_PRESENT, C_READRECT };
 #define SEGS 3
 #define CMD_WORDS (1u << 18)
 #define VTX_BYTES (24u << 20)
@@ -654,10 +655,49 @@ void r_unlockwindow(uint32_t pixels, int w, int h, int pitch){
 }
 /* the screen's pixels are in the GPU, a frame away: the game's only use is the lens flares' sun test (G7);
  * WEB3: reads as black, which leaves the flare test without a change to see */
+/* The lens flare's sun test (FUN_00460290 takes 4x4 pixels under the sun once as its reference, FUN_00460460 reads them again
+ * every 200 ms and counts the equal ones). The picture lives on the GPU, on the page's side. A read stalls the game for up to
+ * three queued frames, too much five times a second, so only the reference (the first read, or the first after a pause)
+ * waits; the later ones ask for the pixels and return the answer to the previous question, 200 ms old. */
+#define READ_MAX 64
+static uint16_t g_read_px[READ_MAX * READ_MAX], g_read_last[READ_MAX * READ_MAX];
+static volatile int32_t g_read_done;
+static int32_t g_read_seq;
+static int g_read_w, g_read_h;
+static double g_read_time;
+static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 int r_readrect(int x, int y, int w, int h, uint32_t buf){
-    (void)x; (void)y;
-    if (!buf || w <= 0 || h <= 0 || w > 4096 || h > 4096) return 0;
-    memset(g_mem + buf, 0, (size_t)w * h * 2);
+    if (!buf || w <= 0 || h <= 0) return 0;
+    if (w > READ_MAX || h > READ_MAX){ memset(g_mem + buf, 0, (size_t)w * h * 2); return 1; }
+    const double now = now_s();
+    const int wait = w != g_read_w || h != g_read_h || now - g_read_time > 1.0;
+    int32_t done = __atomic_load_n(&g_read_done, __ATOMIC_ACQUIRE);
+    if (done == g_read_seq && !wait) memcpy(g_read_last, g_read_px, (size_t)w * h * 2);
+    if (done == g_read_seq || wait){
+        g_read_seq++;
+        close_draw();
+        cmd_room(10);
+        g_cmd[g_ncmd++] = C_READRECT; g_cmd[g_ncmd++] = (uint32_t)g_read_seq;
+        g_cmd[g_ncmd++] = (uint32_t)x; g_cmd[g_ncmd++] = (uint32_t)y; g_cmd[g_ncmd++] = (uint32_t)w; g_cmd[g_ncmd++] = (uint32_t)h;
+        g_cmd[g_ncmd++] = (uint32_t)(uintptr_t)g_read_px; g_cmd[g_ncmd++] = (uint32_t)(uintptr_t)&g_read_done;
+        seg_publish(0);
+    }
+    if (wait){
+        const double t0 = now;
+        guest_wait_begin();
+        while ((done = __atomic_load_n(&g_read_done, __ATOMIC_ACQUIRE)) - g_read_seq < 0 && now_s() - t0 < 1.0)
+            __builtin_wasm_memory_atomic_wait32((int32_t *)&g_read_done, done, 100000000LL);
+        guest_wait_end();
+        if (done == g_read_seq) memcpy(g_read_last, g_read_px, (size_t)w * h * 2);
+        else memset(g_read_last, 0, (size_t)w * h * 2);
+        g_read_w = w; g_read_h = h;
+        if (getenv("NFS5_READLOG")) fprintf(stderr, "[read] reference (%d,%d %dx%d) %04x %04x, %.1f ms\n", x, y, w, h, g_read_last[0], g_read_last[w + 1], (now_s() - t0) * 1e3);
+    }
+    else if (getenv("NFS5_READLOG")){
+        static int n; if (n++ < 40) fprintf(stderr, "[read] (%d,%d) %04x %04x\n", x, y, g_read_last[0], g_read_last[w + 1]);
+    }
+    g_read_time = now;
+    memcpy(g_mem + buf, g_read_last, (size_t)w * h * 2);
     return 1;
 }
 void r_pageflip(void){

@@ -11,8 +11,8 @@ lifter this repository started from (`licenses/`).
 > Not affiliated with or endorsed by Electronic Arts. This repository contains none of the game's code or data:
 > no EXE, no DLL, no game files, no lifted C, no compiled module. All of that is made locally from your copy.
 
-**Status:** step 1 (see [docs/PLAN.md](docs/PLAN.md)). The EXE lifts to C and compiles for x64 and wasm32;
-the runtime does not exist yet, so nothing runs.
+**Status:** step 1 (see [docs/PLAN.md](docs/PLAN.md)). The game runs in Chrome on your own PC: menus, sound, a race.
+The NFS5 Reforged features, the High Stakes tracks and online play come next.
 
 ## What you need
 
@@ -36,14 +36,27 @@ TARGET=wasm ./build.sh                # compile check, wasm32       (out/wobj)
 `gen.sh` checks the EXE, applies `patches/exe_v35.txt` to a copy (`out/PORSCHE.EXE`; your file is never
 changed) and lifts it: 8,711 functions, 0 missing callees, ~50 MB of C.
 
+## Run it in the browser
+
+Needs [wasi-sdk](https://github.com/WebAssembly/wasi-sdk/releases) in `deps/`, Node.js, a browser with WebGPU (Chrome)
+and an installed copy of the game (default `M:/Games/nfs5_clean`, or `--data <folder>`).
+
+```sh
+./gen.sh "/path/to/nfspu_v35.zip"     # once
+./web/build.sh                        # the module, out/web/nfs5.wasm
+run_web.bat --data "C:/Games/Porsche" # builds the page, starts the server, opens http://127.0.0.1:8077/
+```
+
+Saves live in the browser's own storage (OPFS) of that address. The server takes `--port` and `--password`.
+
 ## How it works
 
 - **`tools/`:** a Python lifter (Capstone) turns every function of `PORSCHE.EXE` into C over a `CPU` struct.
   Guest addresses are wasm linear-memory addresses, so the game's globals sit where they sit on Windows.
 - **`patches/`:** byte patches applied to the EXE before lifting (ours; byte values only).
-- **`runtime/`** (to come): Windows, DirectSound, DirectInput 5 and the THRASH renderer reimplemented, the
+- **`runtime/`**: Windows, DirectSound, DirectInput 5 and the THRASH renderer reimplemented, the
   browser parts in `runtime/web/`.
-- **`web/`** (to come): the page (game threads as workers on one shared memory, WebGPU, AudioWorklet) and the
+- **`web/`**: the page (game threads as workers on one shared memory, WebGPU, AudioWorklet) and the
   server (password-protected; serves the page, the module and your game folder; WebSocket bridge for online play).
 
 More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

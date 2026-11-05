@@ -55,7 +55,13 @@ async function main() {
     initialPages: info.pages,
     onLog: (s, _fd, tid) => log(`[${tid}] ${s}`),
     onNote: s => log(s),
-    onExit: code => { log(`[exit] ${code}`); setStatus(`The game ended (${code}).`); },
+    onExit: code => {
+      log(`[exit] ${code}`);
+      // a page cannot close its own tab
+      document.getElementById('stage')!.remove();
+      statusEl.className = 'ended';
+      statusEl.innerHTML = code === 0 ? 'The game has ended. <a href="">Play again</a>' : `The game stopped with an error (${code}). <a href="">Start again</a>`;
+    },
   });
   const g = globalThis as unknown as Record<string, unknown>;
   g.game = p;

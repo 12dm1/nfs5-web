@@ -12,6 +12,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.dirname(H
 const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 ? process.argv[i + 1] : d; };
 const PORT = +arg('port', 8077), DATA = arg('data', 'M:/Games/nfs5_clean'), EXE = arg('exe', path.join(ROOT, 'out/PORSCHE.EXE'));
 const PASSWORD = arg('password', '');
+// A copy of the game without the menu music (GameData/Music is optional at install time): this folder takes its place.
+const MUSIC = arg('music', path.join(ROOT, 'out/save/gamedata/music'));
 const BLOCK = 1 << 20, MAX_RUN = 16;
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.json': 'application/json', '.map': 'application/json' };
 
@@ -29,6 +31,7 @@ function listFiles() {
     }
   };
   walk(DATA, '');
+  if (fs.existsSync(MUSIC) && !out.some(f => f.p.toLowerCase() === 'gamedata/music')) { out.push({ p: 'GameData/Music', d: 1 }); walk(MUSIC, 'GameData/Music'); }
   const st = fs.statSync(EXE);
   out.push({ p: 'PORSCHE.EXE', s: st.size, m: Math.floor(st.mtimeMs / 1000) });
   return out;
@@ -44,6 +47,10 @@ function sendFile(res, file, type, extra = {}) {
 }
 function dataPath(rel) {
   if (rel.toLowerCase() === 'porsche.exe') return EXE;
+  if (rel.toLowerCase().startsWith('gamedata/music/') && !fs.existsSync(path.join(DATA, 'GameData/Music'))) {
+    const m = path.resolve(MUSIC, rel.slice(15));
+    return m.startsWith(path.resolve(MUSIC)) ? m : null;
+  }
   const full = path.resolve(DATA, rel);
   return full.startsWith(path.resolve(DATA)) ? full : null;
 }

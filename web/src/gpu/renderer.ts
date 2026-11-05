@@ -3,7 +3,7 @@
 //
 // Ring (bytes): magic 0, seg_count 4, published 8, consumed 12, presents_pub 16, presents_done 20, segments 24 (32 bytes each:
 // ready, cmd_words, vtx_bytes, up_bytes, has_present, cmd, vtx, up).
-const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11 };
+const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12 };
 const VSIZE = 48, VERTEX_BUFFER = 24 << 20, UBO_ALIGN = 256, UBO_SLOTS = 65536 / 256 * 64;
 
 const SHADER = /* wgsl */`
@@ -188,6 +188,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     const enc = device.createCommandEncoder();
     let pass: GPURenderPassEncoder | null = null;
     let present = false, draws = 0, verts = 0, ubos = 0;
+    let read: { seq: number; x: number; y: number; w: number; h: number; px: number; done: number } | null = null;
     const toFree: GPUTexture[] = [];
     let curTex: T = whiteT, curSampler = 0, bindDirty = true, pipeKey = -1;
     let sc = [0, 0, lw, lh], scDirty = true, uboOff = 0;
@@ -247,6 +248,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
           draws++; verts += count;
           break; }
         case C.PRESENT: present = true; break;
+        case C.READRECT: { read = { seq: cmd[i], x: cmd[i + 1] | 0, y: cmd[i + 2] | 0, w: cmd[i + 3], h: cmd[i + 4], px: cmd[i + 5], done: cmd[i + 6] }; i += 7; break; }
         default: log(`[gpu] unknown command ${op} at ${i - 1} of ${words}`); i = words; break;
       }
     }
@@ -265,7 +267,33 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
         void queue.onSubmittedWorkDone().then(async () => { await rb.mapAsync(GPUMapMode.READ); stats.shots.set(frame, rb.getMappedRange().slice(0)); rb.destroy(); });
       }
     }
+    // the lens flare's pixels (r_readrect): the last command of its segment, after the pass; RGB565 like a Glide frame read
+    let readBack: (() => void) | null = null;
+    if (read) {
+      const { seq, x, y, w, h, px, done } = read as { seq: number; x: number; y: number; w: number; h: number; px: number; done: number };
+      const sx = (v: number) => Math.floor(v * W / lw), sy = (v: number) => Math.floor(v * H / lh);
+      const x0 = Math.max(0, sx(x)), y0 = Math.max(0, sy(y)), x1 = Math.min(W, Math.max(sx(x + w), sx(x) + 1)), y1 = Math.min(H, Math.max(sy(y + h), sy(y) + 1));
+      const finish = (data: Uint8Array | null, row: number) => {
+        const out = new Uint16Array(memory.buffer as unknown as SharedArrayBuffer, px, w * h);
+        for (let j = 0; j < h; j++) for (let k = 0; k < w; k++) {
+          const tx = sx(x + k), ty = sy(y + j);
+          if (!data || tx < x0 || tx >= x1 || ty < y0 || ty >= y1) { out[j * w + k] = 0; continue; }
+          const o = (ty - y0) * row + (tx - x0) * 4;
+          out[j * w + k] = (data[o] >> 3) << 11 | (data[o + 1] >> 2) << 5 | data[o + 2] >> 3;
+        }
+        const d = new Int32Array(memory.buffer as unknown as SharedArrayBuffer, done, 1);
+        Atomics.store(d, 0, seq); Atomics.notify(d, 0);
+      };
+      if (x1 <= x0 || y1 <= y0) readBack = () => finish(null, 0);
+      else {
+        const row = (((x1 - x0) * 4 + 255) >> 8) << 8;
+        const rb = device.createBuffer({ size: row * (y1 - y0), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        enc.copyTextureToBuffer({ texture: colorTex, origin: [x0, y0] }, { buffer: rb, bytesPerRow: row }, [x1 - x0, y1 - y0]);
+        readBack = () => { void rb.mapAsync(GPUMapMode.READ).then(() => { finish(new Uint8Array(rb.getMappedRange()), row); rb.destroy(); }, () => { finish(null, 0); rb.destroy(); }); };
+      }
+    }
     queue.submit([enc.finish()]);
+    readBack?.();
     for (const t of toFree) t.destroy();
     stats.textures = textures.size;
     return present;
