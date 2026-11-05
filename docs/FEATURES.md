@@ -24,7 +24,8 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 |---|---|---|
 | Base renderer, fog, cutouts, guard band, UI rects, LOD bias, flares (G1-G11) | done | `r_web.c`, `renderer.ts` |
 | Car LOD: LOD1 in races (L1, L3 `car_lod.cpp`) | done | hooks 0043A3B0, 0043C431, override 0043E120, size reference patch; the look is not checked |
-| HUD scaling, draw distance, text (NE1 `enhanced/`) | later | shader + patches |
+| HUD scaling (NE1 `hud_scaling`) | done | 61 size reads patched to a virtual size in patches/exe_v35.txt, mode hooks, layout override 0041E170, font scale around the text loop; the digital-gauge option is left out |
+| Draw distance, text quality (NE1 `detail`, `text`) | later | patches, shader |
 | Car reflection cube (R1, R2, `car_reflection.cpp`), car paint (CAR1-2, CP1, `car_paint.cpp`, `car_shading.cpp`), materials (MAT, `materials.cpp`) | later | a large port: render passes into cube faces, WGSL version of the material shader |
 | Motion blur (MB1-2), MSAA + A2C (AA1), PBR road reflections (MAT14) | later | after the cube and materials |
 | Widescreen (P0-P7, `camera_hooks.cpp`, `scene_probe.cpp`) | later | camera patches; the canvas is 4:3 until then |

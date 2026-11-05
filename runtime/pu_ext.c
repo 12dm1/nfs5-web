@@ -464,3 +464,69 @@ void sub_004f57a0(CPU *restrict c){
     c->eax = r;
     POP32(c->eip); c->esp += 4;
 }
+
+/* ---- NE1 HUD scaling (PC wrapper enhanced/subsystems/hud_scaling): the HUD code reads a virtual size of one scale for both axes, so the
+ * layout records stay the 640x480 ones and the HUD's orthographic camera stretches them. The text keeps its own pixel size, so the
+ * fonts go up by the same factor while the HUD's text loop runs; fonts are shared with the frontend and get their scale back. ---- */
+#define HUD_VW 0x006C1F00u
+#define HUD_VH 0x006C1F04u
+#define HUD_REF_HEIGHT 480
+static float g_hud_fx = 1.0f, g_hud_fy = 1.0f;
+static void hud_virtualize(int w, int h, int *vw, int *vh){
+    float scale = (float)h / HUD_REF_HEIGHT;
+    if (scale < 1.0f) scale = 1.0f;
+    *vw = (int)lroundf((float)w / scale); *vh = (int)lroundf((float)h / scale);
+}
+/* 0044E324, 0044EC58: the mode setters, just after the screen size was written */
+void pu_hud_mode(void){
+    const int w = (int)MR32(0x00619784u), h = (int)MR32(0x00619788u);
+    int vw = w, vh = h;
+    if (w > 0 && h > 0) hud_virtualize(w, h, &vw, &vh);
+    MR32(HUD_VW) = (uint32_t)vw; MR32(HUD_VH) = (uint32_t)vh;
+    g_hud_fx = vw > 0 ? (float)w / (float)vw : 1.0f;
+    g_hud_fy = vh > 0 ? (float)h / (float)vh : 1.0f;
+}
+/* 0041E170, the layout loader, cdecl (name, set, width, height): the race and the Display page ask for the same record */
+void sub_0041e170(CPU *restrict c){
+    int vw, vh;
+    hud_virtualize((int)MR32(c->esp + 12), (int)MR32(c->esp + 16), &vw, &vh);
+    MR32(c->esp + 12) = (uint32_t)vw; MR32(c->esp + 16) = (uint32_t)vh;
+    sub_0041e170_orig(c);
+}
+/* 004CBBDE, 004CBBF9: the Display page's preview, eax = the selected race size just read; the race modes are 4:3 */
+void pu_hud_preview(CPU *c, int height){
+    const uint32_t ref = height ? 480u : 640u;
+    if (c->eax > ref) c->eax = ref;
+}
+static void font_set_scale(CPU *c, uint32_t font, float x, float y){
+    const uint32_t eax = c->eax, edx = c->edx;
+    uint32_t args[2];
+    memcpy(&args[0], &x, 4); memcpy(&args[1], &y, 4);
+    guest_call(c, 0x00536CE0u, font, args, 2);
+    c->eax = eax; c->edx = edx;
+}
+#define HUD_FONTS 16
+static struct { uint32_t font; float x, y; } g_hud_font[HUD_FONTS];
+static uint32_t g_hud_scaled; static float g_hud_keep_x, g_hud_keep_y;
+/* 0041A495 in the HUD's text loop (0041A330): esi = the text entry, edi = its font holder. The loop calls set scale only when the
+ * entry's scale is not 1, a font otherwise stays as it was: the last scale the game gave it counts. */
+void pu_hud_text_begin(CPU *c){
+    if (g_hud_fx == 1.0f && g_hud_fy == 1.0f) return;
+    const uint32_t font = MR32(c->edi + 4);
+    if (!font) return;
+    float ex, ey;
+    memcpy(&ex, g_mem + c->esi + 0x18, 4); memcpy(&ey, g_mem + c->esi + 0x1C, 4);
+    int i = 0;
+    while (i < HUD_FONTS && g_hud_font[i].font && g_hud_font[i].font != font) i++;
+    if (i == HUD_FONTS) i = 0;
+    if (g_hud_font[i].font != font){ g_hud_font[i].font = font; g_hud_font[i].x = g_hud_font[i].y = 1.0f; }
+    if (ex != 1.0f || ey != 1.0f){ g_hud_font[i].x = ex; g_hud_font[i].y = ey; }
+    g_hud_scaled = font; g_hud_keep_x = g_hud_font[i].x; g_hud_keep_y = g_hud_font[i].y;
+    font_set_scale(c, font, g_hud_keep_x * g_hud_fx, g_hud_keep_y * g_hud_fy);
+}
+/* 0041A4AE, after the draw */
+void pu_hud_text_end(CPU *c){
+    if (!g_hud_scaled) return;
+    font_set_scale(c, g_hud_scaled, g_hud_keep_x, g_hud_keep_y);
+    g_hud_scaled = 0;
+}
