@@ -251,6 +251,16 @@ export function raceMode(): [number, number] {
   return [Math.round(h * aspect / 8) * 8, h];
 }
 
+// The pixels the game's screen (lw x lh) is drawn at: the largest of its shape inside the window's real pixels, at most 2160 lines
+// (?rh=<lines> caps them). A window of another size changes only these; its shape changes the game's screen too (r_web.c r_reshape).
+function fitTarget(lw: number, lh: number): [number, number] {
+  const q = new URLSearchParams(location.search);
+  const dpr = devicePixelRatio || 1, pw = Math.max(1, innerWidth * dpr), ph = Math.max(1, innerHeight * dpr);
+  const aspect = lw / lh, cap = Math.min(2160, Number(q.get('rh') ?? 2160) || 2160);
+  const h = Math.max(480, Math.min(cap, Math.round(Math.min(ph, pw / aspect)))) & ~1;
+  return [Math.max(2, Math.round(h * aspect / 2) * 2), h];
+}
+
 export interface RendererStats { jsSum: number; jsMax: number; gapMax: number; slow: number; submitMax: number; frames: number; segments: number; draws: number; lastDraws: number; lastVerts: number; textures: number; shots: Map<number, ArrayBuffer>; shotNext: boolean; shotVideo: boolean; }
 
 export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, canvas: HTMLCanvasElement, log: (s: string) => void, wantShots: number[] = []) {
@@ -418,7 +428,8 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   };
   setShape(lw, lh);
   // for the game: the mode its next race starts with (r_web.c r_window_mode)
-  const putWindow = () => { const [w, h] = raceMode(); Atomics.store(ring, 30, w); Atomics.store(ring, 31, h); setShape(lw, lh); };
+  let refit = true, frameStart = true;
+  const putWindow = () => { const [w, h] = raceMode(); Atomics.store(ring, 30, w); Atomics.store(ring, 31, h); setShape(lw, lh); refit = true; };
   putWindow();
   addEventListener('resize', putWindow);
 
@@ -426,6 +437,17 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   let frameJs = 0, lastPresentAt = 0;
   const cubeLog = new URLSearchParams(location.search).has('cubelog');
   let cubeRead = -1;
+  // new targets for the game's screen in this window; the old ones go after this segment's work
+  const retarget = (toFree: GPUTexture[]) => {
+    refit = false;
+    const [nw, nh] = fitTarget(lw, lh);
+    if (nw === W && nh === H) return;
+    toFree.push(colorTex, depthTex); if (msTex) toFree.push(msTex);
+    W = nw; H = nh; canvas.width = W; canvas.height = H;
+    ({ colorTex, msTex, depthTex, colorView, depthView, drawView } = makeTargets());
+    presentGroup = makePresentGroup();
+    log(`[gpu] screen ${lw}x${lh} drawn at ${W}x${H}`);
+  };
   const runSegment = (s: number) => {
     const t0 = performance.now();
     const b = 6 + s * 8;
@@ -441,6 +463,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     const toFree: GPUTexture[] = [];
     let curTex: T = whiteT, curSampler = 0, bindDirty = true, pipeKey = -1, curPaint: T | undefined;
     let sc = [0, 0, lw, lh], scDirty = true, uboOff = 0;
+    if (refit && frameStart) retarget(toFree);   // a resized window: between two frames
     const begin = () => {
       if (pass) return pass;
       const load: GPULoadOp = capFace >= 0 && capClear ? 'clear' : 'load';
@@ -461,16 +484,10 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
           if (stats.shotVideo && cmd[i] > lw) for (const k of [1, 2, 3, 6, 12]) shotSet.add(stats.frames + k);
           const nw = cmd[i++], nh = cmd[i++];
           if (nw !== lw || nh !== lh) setShape(nw, nh);
-          // a race's mode is the render size: the race draws pixel for pixel. The menus keep the targets, they are scaled.
-          if (nw > 640 && (nw !== W || nh !== H)) {
-            if (pass) { (pass as GPURenderPassEncoder).end(); pass = null; }
-            toFree.push(colorTex, depthTex); if (msTex) toFree.push(msTex);
-            W = nw; H = nh; canvas.width = W; canvas.height = H;
-            ({ colorTex, msTex, depthTex, colorView, depthView, drawView } = makeTargets());
-            presentGroup = makePresentGroup();
-            log(`[gpu] race ${W}x${H}`);
-          }
-          lw = nw; lh = nh; scDirty = true; break; }
+          lw = nw; lh = nh; scDirty = true;
+          if (pass) { (pass as GPURenderPassEncoder).end(); pass = null; }
+          retarget(toFree);
+          break; }
         case C.TEX_CREATE: {
           const id = cmd[i], w = cmd[i + 1], h = cmd[i + 2], levels = cmd[i + 3]; i += 4;
           const old = textures.get(id);
@@ -561,9 +578,15 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
       out.setPipeline(presentPipe); out.setBindGroup(0, presentGroup); out.draw(3); out.end();
       if (shotSet.has(frame) || stats.shotNext) {
         stats.shotNext = false;
-        const rb = device.createBuffer({ size: W * H * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-        enc.copyTextureToBuffer({ texture: colorTex }, { buffer: rb, bytesPerRow: W * 4 }, [W, H]);
-        void queue.onSubmittedWorkDone().then(async () => { await rb.mapAsync(GPUMapMode.READ); stats.shots.set(frame, rb.getMappedRange().slice(0)); rb.destroy(); });
+        const sw = W, sh = H, row = ((sw * 4 + 255) >> 8) << 8;
+        const rb = device.createBuffer({ size: row * sh, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        enc.copyTextureToBuffer({ texture: colorTex }, { buffer: rb, bytesPerRow: row }, [sw, sh]);
+        void queue.onSubmittedWorkDone().then(async () => {
+          await rb.mapAsync(GPUMapMode.READ);
+          const src = new Uint8Array(rb.getMappedRange()), px = new Uint8Array(sw * sh * 4);
+          for (let y = 0; y < sh; y++) px.set(src.subarray(y * row, y * row + sw * 4), y * sw * 4);
+          stats.shots.set(frame, px.buffer); rb.destroy();
+        });
       }
     }
     // the lens flare's pixels (r_readrect): the last command of its segment, after the pass; RGB565 like a Glide frame read
@@ -596,6 +619,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     const te = performance.now();
     if (te - ts > stats.submitMax) stats.submitMax = te - ts;
     frameJs += te - t0;
+    frameStart = present;
     if (present) {
       stats.jsSum += frameJs; if (frameJs > stats.jsMax) stats.jsMax = frameJs; frameJs = 0;
       if (lastPresentAt) { const gap = te - lastPresentAt; if (gap > stats.gapMax) stats.gapMax = gap; if (gap > 25) stats.slow++; }

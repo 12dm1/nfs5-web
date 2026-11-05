@@ -506,7 +506,9 @@ void sub_0044f1a0(CPU *restrict c){
     draw_limits(drawn);
 }
 /* 0044E324, 0044EC58: the mode setters, just after the screen size was written */
+static void rects_forget(void);
 void pu_hud_mode(void){
+    rects_forget();
     const int w = (int)MR32(0x00619784u), h = (int)MR32(0x00619788u);
     int vw = w, vh = h;
     if (w > 0 && h > 0) hud_virtualize(w, h, &vw, &vh);
@@ -620,7 +622,9 @@ void pu_cam_before(CPU *c){
     r->eff_deg = fbits(eff_deg); r->eff_aspect = fbits(eff_asp);
     wrf(c->esp, eff_deg); wrf(c->esp + 4, eff_asp);
     static int logs = 6;
-    if (r->changed && logs > 0){ logs--; fprintf(stderr, "[widescreen] camera 0x%08x %.2f deg aspect %.4f -> %.2f deg aspect %.4f\n", camera, deg, asp, eff_deg, eff_asp); }
+    static float logged_asp;   /* and the main camera's (authored 4:3) whenever the screen's shape changes */
+    const int main_cam = fabsf(asp - 4.0f / 3.0f) < 1e-3f;
+    if (r->changed && (logs > 0 || (main_cam && fabsf(eff_asp - logged_asp) > 1e-3f))){ if (logs > 0) logs--; if (main_cam) logged_asp = eff_asp; fprintf(stderr, "[widescreen] camera 0x%08x %.2f deg aspect %.4f -> %.2f deg aspect %.4f\n", camera, deg, asp, eff_deg, eff_asp); }
     g_cam_call = camera;
 }
 /* after them (00467011 / 00467167) */
@@ -740,9 +744,59 @@ void pu_loop_stat(CPU *c){
 
 /* 00414FF0, one simulation step of the race loop: render interpolation records the state it left */
 void pu_interp_step(void);
+/* ---- the race's screen takes the window's shape mid-race (r_web.c r_reshape_wanted). Every view gave its camera a pixel rectangle
+ * from its fractions of the screen through 00538DA0 when it was made; those calls are kept and made again with the new width. ---- */
+int r_reshape_wanted(int *pw) __attribute__((weak));
+void r_reshape(int nw) __attribute__((weak));
+#define CAM_RECTS 16
+static struct { uint32_t camera, a[6]; int screen_w; } g_rects[CAM_RECTS];
+/* 00538DA0, the camera's pixel rectangle: thiscall(x, y, w, h, near?, far?) ret 18h */
+void sub_00538da0(CPU *restrict c){
+    if (!g_cam_capture && c->ecx){
+        int k = -1;
+        for (int i = 0; i < CAM_RECTS && k < 0; i++) if (g_rects[i].camera == c->ecx) k = i;
+        for (int i = 0; i < CAM_RECTS && k < 0; i++) if (!g_rects[i].camera) k = i;
+        if (k >= 0){
+            g_rects[k].camera = c->ecx; g_rects[k].screen_w = (int)MR32(0x00619784u);
+            for (int i = 0; i < 6; i++) g_rects[k].a[i] = MR32(c->esp + 4 + 4u * (uint32_t)i);
+        }
+    }
+    sub_00538da0_orig(c);
+}
+/* 0044E324, 0044EC58 (pu_hud_mode): a new mode, the race's views come anew */
+static void rects_forget(void){ memset(g_rects, 0, sizeof g_rects); }
+static void race_reshape(CPU *c){
+    int nw;
+    if (!r_reshape_wanted || !r_reshape_wanted(&nw)) return;
+    const uint32_t eax = c->eax, ecx = c->ecx, edx = c->edx;
+    MR32(0x00619784u) = (uint32_t)nw;
+    MR32(0x005DEAC8u) = (uint32_t)nw;     /* the 3D driver's copy (00467A10), which 00538DA0 clamps the rectangles to */
+    r_reshape(nw);
+    for (int i = 0; i < CAM_RECTS; i++){
+        if (!g_rects[i].camera || g_rects[i].screen_w <= 0) continue;
+        uint32_t a[6];
+        memcpy(a, g_rects[i].a, sizeof a);
+        const float k = (float)nw / (float)g_rects[i].screen_w;
+        float x, w;
+        memcpy(&x, &a[0], 4); memcpy(&w, &a[2], 4);
+        x *= k; w *= k;
+        memcpy(&a[0], &x, 4); memcpy(&a[2], &w, 4);
+        pu_guest_call(c, 0x00538DA0u, g_rects[i].camera, a, 6);
+    }
+    /* the HUD's virtual size follows; pu_hud_mode would forget the views */
+    const int h = (int)MR32(0x00619788u);
+    int vw = nw, vh = h;
+    hud_virtualize(nw, h, &vw, &vh);
+    MR32(HUD_VW) = (uint32_t)vw; MR32(HUD_VH) = (uint32_t)vh;
+    MR32(0x0060C900u) = (uint32_t)vw; MR32(0x0060C81Cu) = (uint32_t)vh;   /* the size the HUD layout was loaded for (0041E170), read by its element queries */
+    g_hud_fx = vw > 0 ? (float)nw / (float)vw : 1.0f;
+    g_hud_fy = vh > 0 ? (float)h / (float)vh : 1.0f;
+    c->eax = eax; c->ecx = ecx; c->edx = edx;
+}
 void sub_00414ff0(CPU *restrict c){
     sub_00414ff0_orig(c);
     pu_interp_step();
+    race_reshape(c);
 }
 
 /* ---- The game's timer on an exact schedule (PC wrapper enhanced qpc_timer.cpp, SilentPatch). The game re-arms a one-shot

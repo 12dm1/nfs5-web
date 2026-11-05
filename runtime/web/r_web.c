@@ -925,6 +925,27 @@ int r_readrect(int x, int y, int w, int h, uint32_t buf){
     memcpy(g_mem + buf, g_read_last, (size_t)w * h * 2);
     return 1;
 }
+/* a window of another shape during a race: the game's screen takes the window's shape at the race's height (the page draws at the
+ * window's pixels in any case). The width is asked for once it has held for 10 frames; pu_ext.c moves the game's views over. */
+int r_reshape_wanted(int *pw){
+    static int want, stable;
+    if (!g_race) return 0;
+    const int ww = __atomic_load_n(&g_ring.win_w, __ATOMIC_ACQUIRE), wh = __atomic_load_n(&g_ring.win_h, __ATOMIC_ACQUIRE);
+    if (ww <= 0 || wh <= 0) return 0;
+    const int nw = ((int)lroundf((float)g_lh * (float)ww / (float)wh) + 4) & ~7;
+    if (abs(nw - g_lw) < 8){ stable = 0; return 0; }
+    if (nw != want){ want = nw; stable = 0; return 0; }
+    if (++stable < 10) return 0;
+    stable = 0;
+    *pw = nw;
+    return 1;
+}
+void r_reshape(int nw){
+    fprintf(stderr, "[reshape] race screen %dx%d -> %dx%d\n", g_lw, g_lh, nw, g_lh);
+    close_draw();
+    g_st[THRASH_STATE_SCREEN_WIDTH] = nw;
+    g_lw = nw; g_s_video = 0; g_clipvalid = 0;
+}
 void r_pageflip(void){
     g_frames++;
     close_draw();
