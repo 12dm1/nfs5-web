@@ -37,8 +37,8 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 |---|---|---|
 | Career additions, club events, bonus garage (NP1 `new_profile.cpp`, race mode part done) | later | hooks + layout files |
 | Similar opponents in Quick Race (OS1 `opponent_similar.cpp`) | done | overrides of the accessor, `runtime/ext/opp_similar.cpp`, counts in patches/exe_v35.txt; the police part comes with the pursuit |
-| Eight racers, cop cars in the list (`race_cars8.cpp`, `cop_cars.cpp`) | later | with the pursuit port |
-| Hot pursuit (PUR1-14: `cop_ai`, `pursuit_rules`, `pursuit_radio`, `pursuit_fx`, `hot_pursuit_menu`) | later | about 6000 lines; self-contained hooks, data in the layer |
+| Eight racers (`race_cars8.cpp`) | later | cop cars dropped with the pursuit |
+| Hot pursuit (PUR1-14: `cop_ai`, `pursuit_rules`, `pursuit_radio`, `pursuit_fx`, `hot_pursuit_menu`) | dropped | not ported (decision 2026-11-05) |
 | Car-car collision fix (PHYS1 `collision_probe.cpp`) | done | normal gate: patches/exe_v35.txt; remote car velocity: override 004980D0; the race and the native IP race run, the feel of a hit is not checked |
 | Music after focus loss (MUS1 `music_focus.cpp`) | check | byte patch; test by hiding the tab |
 | Gamepad (GP1) | done | Gamepad API, standard mapping only: menus in `web/src/input.ts` (stick = cursor, A click, B/Start Esc, d-pad arrows, right stick wheel), race merged into the packet at 00413800, impact rumble from 0040F740; checked with a scripted pad (`browser_test.mjs --fakepad`), a real pad and the rumble are not |
@@ -48,7 +48,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Feature | Verdict | How |
 |---|---|---|
 | IP race in the runtime (WEB2n) | done (native) | browser: WebSocket relay |
-| N1 entry server, race modes, host bots, net pursuit (`net_redirect`, `race_modes`, `net_host_bots`, `net_pursuit`) | later | step 4 |
+| N1 entry server, race modes, host bots, net pursuit (`net_redirect`, `race_modes`, `net_host_bots`) | later | step 4, the nfsu2-web virtual LAN (docs/PLAN.md); no net pursuit |
 
 ## Not needed in the browser
 

@@ -34,8 +34,19 @@ Acceptance per feature in the browser (the PC mod's acceptance list as the check
 
 ## Step 4 — online
 
-The game's IP mode over a WebSocket bridge to the N1 server (lobby, PvP / PvE / pursuit modes), browser and PC
-players in one lobby.
+Decided 2026-11-05: the nfsu2-web way (github.com/th0mk/nfsu2-web, revision in `_mod/web/upstream/REVISION`), not started yet.
+
+- A virtual LAN: the runtime's Winsock answers the game's sockets with a virtual stack (their `runtime/web/net_lan.c`):
+  every browser gets a 10.77.x.x address, UDP / TCP / ICMP go through a mailbox ring in wasm memory (their
+  `runtime/web/net_proto.h`) to the page and over one WebSocket to a switch in our web server (their
+  `web/server-rs/crates/lan`), which forwards frames by virtual address. TCP over the switch needs no retransmission.
+- The game's own code stays unchanged: its IP mode works between browsers as on a LAN, race traffic goes player to
+  player through the switch (a star around the game's creator); the server never parses it.
+- The Internet mode: our N1 server (`_mod/netserver/server.js`, the NetGather session host) sits on the virtual LAN as
+  the EA entry host, as their `crates/online` stands in for EA's servers at 10.77.0.1. PC players over real UDP as a
+  later option.
+- Hosting behind HTTPS (their `web/deploy`: Docker, Caddy or Cloudflare).
+- Not in scope: hot pursuit (dropped 2026-11-05) and the police parts of other features.
 
 ## Rules
 
