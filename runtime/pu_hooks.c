@@ -9,9 +9,10 @@ void nettest_hook(CPU *c, uint32_t ip);
 /* The race's video mode: 00467FC0(w, h, bpp, 2) at race start and in network games (PC mod NP1). A new profile asks for
  * 640x480x16, where the LOD selector (00439F90 divides by the width) picks low-poly cars close by; so 32 bits and the
  * picture's own size whatever the settings say. */
+int thrash_race_width(void);
 static void race_mode(CPU *c){
     const uint32_t a = c->esp;
-    MR32(a) = 1280; MR32(a + 4) = 960; MR32(a + 8) = 32;
+    MR32(a) = (uint32_t)thrash_race_width(); MR32(a + 4) = 960; MR32(a + 8) = 32;
 }
 
 /* AI on the converted tracks (runtime/ext/hs_ai.cpp): the PC wrapper's call patches, as hooks before the same instructions */
@@ -34,8 +35,24 @@ void pu_hud_mode(void);
 void pu_hud_preview(CPU *c, int height);
 void pu_hud_text_begin(CPU *c);
 void pu_hud_text_end(CPU *c);
+void pu_cam_before(CPU *c);
+void pu_cam_after(CPU *c);
+void pu_cam_replay(CPU *c);
+void pu_cam_tree_before(CPU *c);
+void pu_cam_tree_after(CPU *c);
+void pu_cam_footprint(CPU *c);
+void pu_cam_sky_before(CPU *c);
+void pu_cam_sky_after(CPU *c);
 int pu_hook(CPU *c, uint32_t ip){
     switch (ip){
+    case 0x46700Cu: case 0x467162u: pu_cam_before(c); return 1;
+    case 0x467011u: case 0x467167u: pu_cam_after(c); return 1;
+    case 0x539133u: pu_cam_replay(c); return 1;
+    case 0x47FB6Fu: pu_cam_tree_before(c); return 1;
+    case 0x47FB74u: pu_cam_tree_after(c); return 1;
+    case 0x47F642u: pu_cam_footprint(c); return 1;
+    case 0x45B3BEu: case 0x45BD7Eu: pu_cam_sky_before(c); return 1;
+    case 0x45B3C3u: case 0x45BD83u: pu_cam_sky_after(c); return 1;
     case 0x44E324u: case 0x44EC58u: pu_hud_mode(); return 1;
     case 0x4CBBDEu: pu_hud_preview(c, 0); return 1;
     case 0x4CBBF9u: pu_hud_preview(c, 1); return 1;

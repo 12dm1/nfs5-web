@@ -555,3 +555,122 @@ void pu_hud_text_end(CPU *c){
     font_set_scale(c, g_hud_scaled, g_hud_keep_x, g_hud_keep_y);
     g_hud_scaled = 0;
 }
+
+/* ---- Widescreen (PC wrapper camera_hooks.cpp, P0-P7): Hor+ for a race mode wider than 4:3. The game's two perspective calls
+ * (0046700C, 00467162 -> 005391B0, thiscall(fullDeg, aspect, near, far)) get the widened angle and aspect, the camera's
+ * sphere test planes (C+F8..104) follow after the call; the activation replay (0053912E) only redoes the planes. The tree
+ * traversal's footprint (0047F550, 0047F210) and the sky dome's edge directions (0045AAF0) read the view's half angle
+ * (V+130) themselves: it is the widened one for the length of the call. A 4:3 mode keeps the game's own values. ---- */
+#define CAM_PI 3.14159265358979323846
+typedef struct {
+    uint32_t camera, eff_deg, eff_aspect;      /* the camera, the bits of the angle and aspect it was given */
+    float authored_deg, authored_aspect, tan_x, tan_y;
+    int changed;
+} CamRec;
+#define CAM_RECS 16
+static CamRec g_cam[CAM_RECS];
+static int g_cam_next;
+static uint32_t g_cam_call;                /* the camera of the perspective call in progress */
+static float g_cam_view_keep; static uint32_t g_cam_view;      /* V+130 put back after the tree / sky call */
+static int g_tree_on; static float g_tree_half, g_tree_ratio;
+static uint32_t fbits(float f){ uint32_t b; memcpy(&b, &f, 4); return b; }
+static float rdf(uint32_t a){ float f; memcpy(&f, g_mem + a, 4); return f; }
+static void wrf(uint32_t a, float f){ memcpy(g_mem + a, &f, 4); }
+static float cam_target_aspect(void){
+    const uint32_t w = MR32(0x00619784u), h = MR32(0x00619788u);
+    return w && h ? (float)w / (float)h : 640.0f / 480.0f;
+}
+static CamRec *cam_find(uint32_t camera){
+    for (int i = 0; i < CAM_RECS; i++) if (g_cam[i].camera == camera) return &g_cam[i];
+    return NULL;
+}
+static void cam_sides(uint32_t camera, float full_deg, float aspect){
+    const double tx = tan((double)full_deg * CAM_PI / 360.0), ty = tx / (double)aspect;
+    wrf(camera + 0xF8, (float)tx); wrf(camera + 0xFC, (float)(1.0 / sqrt(1.0 + tx * tx)));
+    wrf(camera + 0x100, (float)ty); wrf(camera + 0x104, (float)(1.0 / sqrt(1.0 + ty * ty)));
+}
+/* before 0046700C / 00467162: ecx = the camera, [esp] = the full angle, [esp+4] = the aspect */
+void pu_cam_before(CPU *c){
+    g_cam_call = 0;
+    const uint32_t camera = c->ecx;
+    const float deg = rdf(c->esp), asp = rdf(c->esp + 4), target = cam_target_aspect();
+    if (!camera || !(deg > 0.0f && deg < 179.0f) || !(asp > 0.0f) || !isfinite(deg) || !isfinite(asp)) return;
+    const double t0 = tan((double)deg * CAM_PI / 360.0);
+    const double a = (double)asp * (double)target / (640.0 / 480.0);
+    const double ty = t0 / (double)asp, tx = ty * a;
+    CamRec *r = cam_find(camera);
+    if (!r){ r = &g_cam[g_cam_next]; g_cam_next = (g_cam_next + 1) % CAM_RECS; }
+    memset(r, 0, sizeof *r);
+    r->camera = camera; r->authored_deg = deg; r->authored_aspect = asp; r->tan_x = (float)tx; r->tan_y = (float)ty;
+    r->changed = fabs(a - (double)asp) > 1e-6 * (double)asp;
+    float eff_deg = deg, eff_asp = asp;
+    if (r->changed){ eff_deg = (float)(2.0 * atan(tx) * 180.0 / CAM_PI); eff_asp = (float)a; }
+    r->eff_deg = fbits(eff_deg); r->eff_aspect = fbits(eff_asp);
+    wrf(c->esp, eff_deg); wrf(c->esp + 4, eff_asp);
+    static int logs = 6;
+    if (r->changed && logs > 0){ logs--; fprintf(stderr, "[widescreen] camera 0x%08x %.2f deg aspect %.4f -> %.2f deg aspect %.4f\n", camera, deg, asp, eff_deg, eff_asp); }
+    g_cam_call = camera;
+}
+/* after them (00467011 / 00467167) */
+void pu_cam_after(CPU *c){
+    (void)c;
+    const uint32_t camera = g_cam_call;
+    g_cam_call = 0;
+    if (camera) cam_sides(camera, rdf(camera + 0xD4), rdf(camera + 0xD8));
+}
+/* after the activation replay 0053912E (esi = the camera): the stored values are already the effective ones */
+void pu_cam_replay(CPU *c){
+    const uint32_t camera = c->esi;
+    if (!camera) return;
+    const float deg = rdf(camera + 0xD4), asp = rdf(camera + 0xD8);
+    if (deg > 0.0f && deg < 179.0f && asp > 0.0f && cam_find(camera)) cam_sides(camera, deg, asp);
+}
+/* the half angle to draw with for this view, 0 when the game's own stays */
+static float cam_view_half(uint32_t view, CamRec **out){
+    const uint32_t camera = MR32(view + 0x0C);
+    CamRec *r = camera ? cam_find(camera) : NULL;
+    if (!r || !r->changed || MR32(camera + 0x220) != 0) return 0.0f;
+    if (MR32(camera + 0xD4) != r->eff_deg || MR32(camera + 0xD8) != r->eff_aspect) return 0.0f;
+    if (fbits(rdf(view + 0x130) * 2.0f) != fbits(r->authored_deg)) return 0.0f;
+    float half = (float)(atan((double)r->tan_x) * 180.0 / CAM_PI);
+    if (half > 89.0f) half = 89.0f;
+    if (out) *out = r;
+    return half;
+}
+static void cam_view_swap(uint32_t view, float half){
+    g_cam_view = view; g_cam_view_keep = rdf(view + 0x130);
+    wrf(view + 0x130, half);
+}
+static void cam_view_restore(void){
+    if (g_cam_view) wrf(g_cam_view + 0x130, g_cam_view_keep);
+    g_cam_view = 0;
+}
+/* before 0047FB6F: call 0047F550(rotation = V+B8, translation = V+DC, distance) */
+void pu_cam_tree_before(CPU *c){
+    g_tree_on = 0;
+    const uint32_t rot = MR32(c->esp), trans = MR32(c->esp + 4);
+    if (!rot || trans != rot - 0xB8 + 0xDC) return;
+    const uint32_t view = rot - 0xB8;
+    CamRec *r = NULL;
+    const float half = cam_view_half(view, &r);
+    if (!(half > 0.0f)) return;
+    const double t0 = tan((double)r->authored_deg * CAM_PI / 360.0);
+    double vert = t0 * fmax(0.75, 1.0 / (double)r->authored_aspect);
+    if ((double)r->tan_y > vert) vert = r->tan_y;
+    g_tree_on = 1; g_tree_half = half; g_tree_ratio = (float)(vert / (double)r->tan_x);
+    cam_view_swap(view, half);
+}
+void pu_cam_tree_after(CPU *c){ (void)c; cam_view_restore(); g_tree_on = 0; }
+/* before 0047F642: call 0047F210(half angle, distance, 0.75, out): the vertical ratio of the widened footprint */
+void pu_cam_footprint(CPU *c){
+    if (g_tree_on && MR32(c->esp) == fbits(g_tree_half)) wrf(c->esp + 8, g_tree_ratio);
+}
+/* before 0045B3BE / 0045BD7E: call 0045AAF0(layer) of the active view (renderer 00628130 -> +10) */
+void pu_cam_sky_before(CPU *c){
+    (void)c;
+    const uint32_t rend = MR32(0x00628130u), view = rend ? MR32(rend + 0x10) : 0;
+    if (!view) return;
+    const float half = cam_view_half(view, NULL);
+    if (half > 0.0f) cam_view_swap(view, half);
+}
+void pu_cam_sky_after(CPU *c){ (void)c; cam_view_restore(); }

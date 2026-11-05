@@ -190,6 +190,10 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const stats: RendererStats = { frames: 0, segments: 0, draws: 0, lastDraws: 0, lastVerts: 0, textures: 0, shots: new Map(), shotNext: false, shotVideo: new URLSearchParams(location.search).has('shotvideo') };
   const shotSet = new Set(wantShots);
   let lw = 640, lh = 480;
+  // the element takes the shape of the game's mode; the canvas behind it keeps its size, so a 4:3 menu fills the wide canvas and
+  // shows undistorted, and the mouse and the focus outline keep mapping the element's box to the game's screen
+  const setShape = (w: number, h: number) => { canvas.style.aspectRatio = `${w} / ${h}`; };
+  setShape(lw, lh);
 
   // a segment: its uploads first, then its draws in one pass
   const runSegment = (s: number) => {
@@ -219,7 +223,11 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     for (let i = 0; i < words;) {
       const op = cmd[i++];
       switch (op) {
-        case C.VIDEO: if (stats.shotVideo && cmd[i] > lw) for (const k of [1, 2, 3, 6, 12]) shotSet.add(stats.frames + k); lw = cmd[i++]; lh = cmd[i++]; scDirty = true; break;
+        case C.VIDEO: {
+          if (stats.shotVideo && cmd[i] > lw) for (const k of [1, 2, 3, 6, 12]) shotSet.add(stats.frames + k);
+          const nw = cmd[i++], nh = cmd[i++];
+          if (nw !== lw || nh !== lh) setShape(nw, nh);
+          lw = nw; lh = nh; scDirty = true; break; }
         case C.TEX_CREATE: {
           const id = cmd[i], w = cmd[i + 1], h = cmd[i + 2], levels = cmd[i + 3]; i += 4;
           const old = textures.get(id);

@@ -756,7 +756,11 @@ void r_unlockwindow(uint32_t pixels, int w, int h, int pitch){
     DV v[6]; memset(v, 0, sizeof v);
     const float xs[6] = { 0, W, W, 0, W, 0 }, ys[6] = { 0, 0, H, 0, H, H }, us[6] = { 0, 1, 1, 0, 1, 0 }, vs[6] = { 0, 0, 1, 0, 1, 1 };
     /* a race mode's loading screen: the game lays its 640x480 picture out around the centre of the big frame; show that part */
-    const float cu = w > 640 ? 320.0f / (float)w : 0.5f, cv = h > 480 ? 240.0f / (float)h : 0.5f;
+    /* a wide race mode: the part of the frame with the window's shape, the 4:3 picture in its middle */
+    const float aspect = (float)g_lw / (float)g_lh, half_w = 240.0f * (aspect > 4.0f / 3.0f ? aspect : 4.0f / 3.0f);
+    float cu = w > 640 ? half_w / (float)w : 0.5f;
+    if (cu > 0.5f) cu = 0.5f;
+    const float cv = h > 480 ? 240.0f / (float)h : 0.5f;
     for (int i = 0; i < 6; i++){ v[i].x = xs[i]; v[i].y = ys[i]; v[i].w = 1.0f; v[i].u = 0.5f + (us[i] - 0.5f) * 2.0f * cu; v[i].v = 0.5f + (vs[i] - 0.5f) * 2.0f * cv; v[i].color = 0xFFFFFFFFu; }
     submit(v, 6, &d);
 }

@@ -40,6 +40,12 @@ async function main() {
   setStatus('Loading the game module...');
   const module = await WebAssembly.compileStreaming(fetch('/nfs5.wasm', { cache: 'no-cache' }));
   const env: Record<string, string> = { NFS5_SAVEDIR: '/save' };
+  // widescreen: the race runs 960 lines high and as wide as the window (4:3 .. 32:9); ?ws=0 keeps 4:3. The canvas holds the
+  // widest mode, the renderer gives the element the shape of the mode in use (the menus stay 4:3).
+  const aspect = q.get('ws') === '0' ? 4 / 3 : Math.min(32 / 9, Math.max(4 / 3, innerWidth / Math.max(1, innerHeight)));
+  const raceW = Math.round(960 * aspect / 8) * 8;
+  env.NFS5_RACE_W = String(raceW);
+  canvas.width = raceW; canvas.height = 960;
   for (const kv of (q.get('env') ?? '').split(',')) { const i = kv.indexOf('='); if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1); }
   // tests: seed=<name>,<name> puts save files of the native test folder into this browser's save folder
   for (const name of (q.get('seed') ?? '').split(',').filter(Boolean)) {
