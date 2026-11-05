@@ -578,6 +578,10 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
                    !strcasecmp(ext,".bik") || !strcasecmp(ext,".mpg")))
                   g_empty_next = 1;
           } }
+#ifdef __wasm__
+        /* a folder opens under WASI, CreateFile fails on one: the game opens ".\gamedata\dashhud\\" + an empty name */
+        if (fd >= 0 && fstat(fd, &_st) == 0 && S_ISDIR(_st.st_mode)){ close(fd); fd = -1; errno = EACCES; }
+#endif
         /* v1.2 NA (HOODLUM) disc check: if the game folder has an empty
          * "foobar" file, the Disc 2 prompt is skipped (0x57CAC0("foobar")).
          * To leave the data folder alone the file is virtual: /dev/null (empty, EOF). */

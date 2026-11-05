@@ -87,6 +87,8 @@ http.createServer((req, res) => {
   if (p === '/nfs5.wasm' || p === '/nfs5.json') { const f = path.join(ROOT, 'out/web', p.slice(1)); sendFile(res, f, TYPES[path.extname(f)], { 'Cache-Control': 'no-cache' }); return; }
   // POST /test-log: the autotest page's lines (tools/ drive headless Chrome)
   if (p === '/test-log' && req.method === 'POST') { let s = ''; req.on('data', d => s += d); req.on('end', () => { process.stdout.write(s); res.end(); }); return; }
+  // GET /test-seed/<name>: a save file of the native test folder (out/save/SaveData), for a test's first start
+  if (p.startsWith('/test-seed/')) { sendFile(res, path.join(ROOT, 'out/save/SaveData', path.basename(p)), 'application/octet-stream'); return; }
   // POST /test-shot/<frame>: a frame's raw RGBA, for the text comparisons (no screenshots to look at)
   if (p.startsWith('/test-shot/') && req.method === 'POST') { const f = fs.createWriteStream(path.join(ROOT, 'out/web', 'shot_' + (+p.slice(11)) + '.rgba')); req.pipe(f); req.on('end', () => res.end()); return; }
   const rel = p === '/' ? 'index.html' : p.slice(1);

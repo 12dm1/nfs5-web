@@ -41,6 +41,13 @@ async function main() {
   const module = await WebAssembly.compileStreaming(fetch('/nfs5.wasm', { cache: 'no-cache' }));
   const env: Record<string, string> = { NFS5_SAVEDIR: '/save' };
   for (const kv of (q.get('env') ?? '').split(',')) { const i = kv.indexOf('='); if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1); }
+  // tests: seed=<name>,<name> puts save files of the native test folder into this browser's save folder
+  for (const name of (q.get('seed') ?? '').split(',').filter(Boolean)) {
+    const dir = await (await (await navigator.storage.getDirectory()).getDirectoryHandle(q.get('save') ?? 'save', { create: true })).getDirectoryHandle('SaveData', { create: true });
+    const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
+    await w.write(await (await fetch('/test-seed/' + name)).arrayBuffer());
+    await w.close();
+  }
   setStatus('Starting the game...');
   const p = await startProcess({
     module,

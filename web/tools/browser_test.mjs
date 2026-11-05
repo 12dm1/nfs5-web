@@ -13,13 +13,16 @@ const eval_ = arg('eval', '');
 
 const srv = spawn(process.execPath, [path.join(HERE, '../server.mjs'), '--port', String(PORT)], { stdio: ['ignore', 'inherit', 'inherit'] });
 await new Promise(r => setTimeout(r, 800));
-const browser = await chromium.launch({
+const launch = {
   executablePath: arg('chrome', 'C:/Program Files/Google/Chrome/Application/chrome.exe'),
   headless: true,
   args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan,WebGPU', '--use-angle=d3d11', '--mute-audio', '--autoplay-policy=no-user-gesture-required'],
-});
-const ctx = await browser.newContext({ viewport: { width: 1280, height: 960 } });
-const page = await ctx.newPage();
+  viewport: { width: 1280, height: 960 },
+};
+// --profile <folder>: a browser profile that stays, and with it the game's save folder (OPFS)
+const prof = arg('profile', '');
+const browser = prof ? await chromium.launchPersistentContext(prof, launch) : await (await chromium.launch(launch)).newContext({ viewport: launch.viewport });
+const page = await browser.newPage();
 page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') console.log('[console ' + m.type() + '] ' + m.text()); });
 page.on('pageerror', e => console.log('[pageerror] ' + e.message));
 await page.goto(`http://127.0.0.1:${PORT}${URLPATH}`);
