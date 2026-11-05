@@ -49,6 +49,7 @@ void pu_loop_stat(CPU *c);
 void pu_interp_restore(void);
 void pu_cube_capture(CPU *c);
 void pu_fe_begin_view(CPU *c);
+void pu_text_tile(CPU *c);
 void pu_fe_capture(CPU *c);
 void r_capture_sun(int on) __attribute__((weak));
 int pu_hook(CPU *c, uint32_t ip){
@@ -58,6 +59,7 @@ int pu_hook(CPU *c, uint32_t ip){
 #ifdef __wasm__
     case 0x468AA6u: pu_cube_capture(c); return 1;
     case 0x4D2FEAu: pu_fe_begin_view(c); return 1;
+    case 0x5725A5u: pu_text_tile(c); return 1;
     case 0x4D3091u: pu_fe_capture(c); return 1;
     case 0x45D6F6u: case 0x45D25Cu: r_capture_sun(1); return 1;     /* the sun and the flares: their light goes into the cube's alpha */
     case 0x45D6FBu: case 0x45D261u: r_capture_sun(0); return 1;

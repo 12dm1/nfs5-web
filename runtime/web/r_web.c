@@ -425,8 +425,10 @@ void r_tfree(uint32_t t){
     tan_free((int)t - 1);
     tex_destroy((int)t - 1);
 }
+void pu_text_reset(int free_handles);
 void r_treset(void){
     close_draw();
+    pu_text_reset(0);
     for (int i = 0; i < LFB_SLOT; i++) tex_destroy(i);
     g_bound = 0;
     tan_reset();
@@ -724,6 +726,23 @@ void r_tupdate(uint32_t t, uint32_t data, int palette){
     }
     free(rg);
 }
+/* runtime/pu_text.c: a generated A8R8G8B8 image, its clear texels already coloured */
+void r_tupload_argb(uint32_t t, const uint32_t *argb){
+    if (!t || t > LFB_SLOT || !g_tex[t - 1].used) return;
+    const int slot = (int)t - 1, w = g_tex[slot].w, h = g_tex[slot].h;
+    uint32_t *rgba = malloc((size_t)w * h * 4);
+    if (!rgba) return;
+    to_rgba((const uint8_t *)argb, rgba, w, h, 6);
+    upload_chain(slot, rgba);
+    free(rgba);
+}
+/* the screen's pixels per pixel of the game's mode: the menus are 640x480 drawn at the window's size */
+float r_display_factor(void){
+    const int wh = __atomic_load_n(&g_ring.win_h, __ATOMIC_ACQUIRE);
+    if (wh <= 0 || g_lh <= 0) return 1.0f;
+    const float f = (float)wh / (float)g_lh;
+    return f < 1.0f ? 1.0f : f;
+}
 void r_tupdaterect(uint32_t t, int mip, int x, int y, int rw, int rh, int pitch, uint32_t data, int fmt){
     if (!t || t > LFB_SLOT || !data || !g_tex[t - 1].used) return;
     const int slot = (int)t - 1;
@@ -810,6 +829,7 @@ int r_init(int w, int h){
 }
 void r_restore(void){ close_draw(); seg_publish(0); }
 void r_setvideomode(int w, int h, int bpp){
+    pu_text_reset(1);
     g_race = bpp == 32 && w > 640;         /* the frontend is 640x480x32 too (patches), the race never (pu_hooks.c) */
     g_st[THRASH_STATE_SCREEN_WIDTH] = w; g_st[THRASH_STATE_SCREEN_HEIGHT] = h;
     if (w > 0 && h > 0 && (w != g_lw || h != g_lh)){ close_draw(); g_lw = w; g_lh = h; g_cube_faces = 0; g_s_video = 0; g_clipvalid = 0; }   /* the old clip is the old mode's: the loading screen comes before the next THRASH_clip */

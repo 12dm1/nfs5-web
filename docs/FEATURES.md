@@ -26,7 +26,8 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Car LOD: LOD1 in races (L1, L3 `car_lod.cpp`) | done | hooks 0043A3B0, 0043C431, override 0043E120, size reference patch; the look is not checked |
 | HUD scaling (NE1 `hud_scaling`) | done | 61 size reads patched to a virtual size in patches/exe_v35.txt, mode hooks, layout override 0041E170, font scale around the text loop; the digital-gauge option is left out |
 | Draw distance, distant wheels (NE1 `detail`) | done | x2 and at least 20000 as on the PC: override 0044F1A0, far plane, object limits and wheel table in patches/exe_v35.txt; aquatica 2000 draws a frame instead of 450, 70 fps instead of 80 in headless Chrome |
-| Text quality, texture detail (NE1 `text`, `detail`) | later | shader, hooks |
+| Text quality (NE1 `text`) | done | runtime/pu_text.c: glyph sheets enlarged 2x or 4x by the window's height with smooth edges, overrides 00571A10, 005722C0, 00572230 and hook 005725A5; `?env=TEXT=0` off |
+| Texture detail (NE1 `detail`) | done | detection 0044E370 returns tier 3, patches/exe_v35.txt |
 | Adaptive race resolution | done | when a race starts: the window's real pixels (720-2160 lines), shape 4:3-32:9; the render targets follow; `?rh=<lines>` caps, `?ws=0` 4:3; a resize takes effect at the next race. 144 fps at 1080p and 1440p in headless Chrome |
 | Frame interpolation (NE1 `framerate`) | done | runtime/pu_interp.c: the display's rate instead of 64 frames, blended cars and cameras, the simulation never sees them; 100-143 fps in headless Chrome, camera motion unevenness 1.5-3 % instead of 10 %; `?env=INTERP=0` off |
 | CPU speed (compat `fast_cpu_speed`) | done | both measuring functions return a constant, patches/exe_v35.txt |
