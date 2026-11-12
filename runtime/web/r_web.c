@@ -283,8 +283,18 @@ static void game_state(DrawState *d, int topo){
 }
 /* The frontend's loading screen comes after the race's video mode (pu_hooks.c) and is laid out in 640x480 around the screen's
  * centre: scaled to the screen until the race's first 3D draw. */
+/* the race HUD's passes (pu_ext.c sub_00425950): laid out on a screen g_hud_w0 wide, its pixels stay those of that screen after a
+ * live resize; each draw moves by the side it sits on, so no piece stays where the old edges were */
+static int g_hud_w0, g_hud_collect, g_hud_xform;
+static float g_hud_lo, g_hud_hi, g_hud_dx;
+void r_hud_draw(int w0){ g_hud_w0 = w0; }
 static void flush_verts(DV *v, int n, int topo){
     if (n <= 0) return;
+    if (g_hud_collect){
+        for (int i = 0; i < n; i++){ g_hud_lo = v[i].x < g_hud_lo ? v[i].x : g_hud_lo; g_hud_hi = v[i].x > g_hud_hi ? v[i].x : g_hud_hi; }
+        return;
+    }
+    if (g_hud_xform) for (int i = 0; i < n; i++) v[i].x += g_hud_dx;
     { const float dv = tan_voffset(g_bound); if (dv != 0.0f) for (int i = 0; i < n; i++) v[i].v += dv; }
     if (topo == 0){
         n = guard_filter(v, n);
@@ -332,7 +342,25 @@ static void sprite(const uint8_t *p0, const uint8_t *p1){
 }
 static uint32_t g_pv_vb, g_pv_ib; static int g_pv_count, g_pv_slot;
 static float g_pv_uv[MAX_VERTS * 2];
+static void draw_any(const char *n, const uint32_t *a);
 void r_draw(const char *n, const uint32_t *a){
+    if (g_hud_w0 > 0 && g_race && g_lw != g_hud_w0){
+        g_hud_collect = 1; g_hud_lo = 1e30f; g_hud_hi = -1e30f;
+        draw_any(n, a);
+        g_hud_collect = 0;
+        /* a piece across the screen (a fade, a flash) keeps its place */
+        if (g_hud_hi > g_hud_lo && g_hud_hi - g_hud_lo < 0.9f * (float)g_hud_w0){
+            const float c = (g_hud_lo + g_hud_hi) * 0.5f / (float)g_hud_w0;
+            const float side = c < 1.0f / 3.0f ? 0.0f : c > 2.0f / 3.0f ? 1.0f : 0.5f;
+            g_hud_dx = (float)(g_lw - g_hud_w0) * side; g_hud_xform = 1;
+        }
+        draw_any(n, a);
+        g_hud_xform = 0;
+        return;
+    }
+    draw_any(n, a);
+}
+static void draw_any(const char *n, const uint32_t *a){
     const int count = (int)a[0];
     if (!strcmp(n, "drawtri@12")){ DV v[3]; v[0] = conv(GP(a[0])); v[1] = conv(GP(a[1])); v[2] = conv(GP(a[2])); flush_verts(v, 3, 0); return; }
     if (!strcmp(n, "drawquad@16")){ quad(GP(a[0]), GP(a[1]), GP(a[2]), GP(a[3])); return; }
@@ -926,7 +954,7 @@ int r_readrect(int x, int y, int w, int h, uint32_t buf){
     return 1;
 }
 /* a window of another shape during a race: the game's screen takes the window's shape at the race's height (the page draws at the
- * window's pixels in any case). The width is asked for once it has held for 10 frames; pu_ext.c moves the game's views over. */
+ * window's pixels in any case). The width is asked for once it has held for 16 simulation steps; pu_ext.c moves the game's views over. */
 int r_reshape_wanted(int *pw){
     static int want, stable;
     if (!g_race) return 0;
@@ -935,7 +963,7 @@ int r_reshape_wanted(int *pw){
     const int nw = ((int)lroundf((float)g_lh * (float)ww / (float)wh) + 4) & ~7;
     if (abs(nw - g_lw) < 8){ stable = 0; return 0; }
     if (nw != want){ want = nw; stable = 0; return 0; }
-    if (++stable < 10) return 0;
+    if (++stable < 16) return 0;     /* about a quarter of a second: not every size a dragged edge passes */
     stable = 0;
     *pw = nw;
     return 1;

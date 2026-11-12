@@ -428,8 +428,10 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   };
   setShape(lw, lh);
   // for the game: the mode its next race starts with (r_web.c r_window_mode)
-  let refit = true, frameStart = true;
-  const putWindow = () => { const [w, h] = raceMode(); Atomics.store(ring, 30, w); Atomics.store(ring, 31, h); setShape(lw, lh); refit = true; };
+  // while the window's edge is dragged the targets stay: new ones once its size has held for REFIT_MS, the picture is scaled till then
+  const REFIT_MS = 200;
+  let refit = true, refitAt = 0, frameStart = true;
+  const putWindow = () => { const [w, h] = raceMode(); Atomics.store(ring, 30, w); Atomics.store(ring, 31, h); setShape(lw, lh); refit = true; refitAt = performance.now() + REFIT_MS; };
   putWindow();
   addEventListener('resize', putWindow);
 
@@ -463,7 +465,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     const toFree: GPUTexture[] = [];
     let curTex: T = whiteT, curSampler = 0, bindDirty = true, pipeKey = -1, curPaint: T | undefined;
     let sc = [0, 0, lw, lh], scDirty = true, uboOff = 0;
-    if (refit && frameStart) retarget(toFree);   // a resized window: between two frames
+    if (refit && frameStart && t0 >= refitAt) retarget(toFree);   // a resized window: between two frames
     const begin = () => {
       if (pass) return pass;
       const load: GPULoadOp = capFace >= 0 && capClear ? 'clear' : 'load';
