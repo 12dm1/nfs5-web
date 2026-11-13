@@ -1907,10 +1907,31 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
         uint32_t ms=A(c,0);
         ts_set(TS_SLEEP, ms);
         guest_yield_begin();
+        static int sst = -1; if (sst < 0){ const char *e = getenv("SLEEPSTAT"); sst = e && *e && *e != '0'; }
+        uint64_t t0 = sst ? gil_now_us() : 0;
+#ifdef __wasm__
+        volatile uint32_t *pu_audio_wake(void) __attribute__((weak));
+        volatile uint32_t *wk = c->eip == 0x0058F8B5u && pu_audio_wake ? pu_audio_wake() : 0;   /* the game's sound thread */
+        if (wk && ms) __builtin_wasm_memory_atomic_wait32((int32_t *)wk, (int32_t)*wk, (int64_t)ms * 1000000LL);
+        else
+#endif
         { struct timespec ts={ (time_t)(ms/1000u), (long)((ms%1000u)*1000000u) };
           if(!ms){ ts.tv_nsec = 200000L; }        /* Sleep(0): just yield */
           nanosleep(&ts,0); }
+        uint64_t t1 = sst ? gil_now_us() : 0;
         guest_yield_end();
+        if (sst && ms && ms <= 10){              /* SLEEPSTAT: short sleeps, how late they wake and how long the lock takes */
+            static uint64_t t_rep; static uint32_t n, late_max, gil_max, late10, gil10; static uint64_t gil_sum;
+            const uint64_t t2 = gil_now_us(), late = t1 - t0 > ms * 1000u ? t1 - t0 - ms * 1000u : 0, gil = t2 - t1;
+            n++; gil_sum += gil; if (late > late_max) late_max = (uint32_t)late; if (gil > gil_max) gil_max = (uint32_t)gil;
+            late10 += late > 10000; gil10 += gil > 10000;
+            if (!t_rep) t_rep = t2;
+            if (t2 - t_rep > 10000000u){
+                fprintf(stderr, "[sleepstat] %u short sleeps: latest wake %.1f ms late (%u over 10 ms), lock wait avg %.2f max %.1f ms (%u over 10 ms)\n",
+                        n, late_max / 1000.0, late10, gil_sum / 1000.0 / n, gil_max / 1000.0, gil10);
+                t_rep = t2; n = late_max = gil_max = late10 = gil10 = 0; gil_sum = 0;
+            }
+        }
         r=0; }
     else if (!strcmp(n,"SleepEx")){
         uint32_t ms=A(c,0);
