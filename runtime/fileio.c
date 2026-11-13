@@ -685,6 +685,8 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
                  if (mf && *mf && got > 0 && strstr(f->path, mf)
                      && (mmin ? ((long)len >= mmin) : (!msz || (long)len == msz)))
                      memset(g_mem+buf, 0, (size_t)got); }
+               { void pu_patch_read(const char *, uint32_t, long) __attribute__((weak));
+                 if (pu_patch_read && got > 0) pu_patch_read(f->path, buf, (long)got); }
                if(pnr) MR32(pnr)=(uint32_t)got;
                if (getenv("READLOG")){
                    const char *bn = strrchr(f->path,'/'); bn = bn?bn+1:f->path;

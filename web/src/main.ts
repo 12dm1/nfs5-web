@@ -6,6 +6,7 @@ import { HostKind } from './host/abi';
 import { MANIFEST_URL, DATA_BASE } from './host/datacache';
 import { attachRenderer, raceMode } from './gpu/renderer';
 import { attachInput } from './input';
+import { attachTouch } from './touch';
 
 const q = new URLSearchParams(location.search);
 const statusEl = document.getElementById('status')!;
@@ -74,7 +75,7 @@ async function main() {
   });
   const g = globalThis as unknown as Record<string, unknown>;
   g.game = p;
-  void p.registered(HostKind.Input).then(r => attachInput(p.memory, r.ptr, canvas));
+  void p.registered(HostKind.Input).then(r => { attachInput(p.memory, r.ptr, canvas); attachTouch(); });
   void p.registered(HostKind.Audio).then(r => attachAudio(p.memory, r.ptr, !!env.AUDIOSTAT && env.AUDIOSTAT !== '0'));
   const shots = (q.get('shots') ?? '').split(',').filter(Boolean).map(Number);
   const r = await p.registered(HostKind.Gpu);

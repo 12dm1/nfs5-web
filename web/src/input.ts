@@ -23,6 +23,11 @@ const K: Record<string, [number, number]> = {
   ArrowDown: [0xD0, 0x28], PageDown: [0xD1, 0x22], Insert: [0xD2, 0x2D], Delete: [0xD3, 0x2E], Pause: [0xC5, 0x13],
 };
 
+/** The on-screen controls of a touch screen (touch.ts) as a second pad, merged with a real one while driving. */
+export const touchPad = { active: false, buttons: 0, lx: 0, rt: 0, lt: 0 };
+/** What the page's other parts need to know: the game's screen (0 frontend, 1 race menu, 2 driving), when a real pad last moved. */
+export const padState = { mode: -1, padAt: -1e9, rumble: (_ms: number) => { } };
+
 export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLElement) {
   const sab = memory.buffer as unknown as SharedArrayBuffer;
   const i32 = new Int32Array(sab, ptr, 4096 / 4 + 2048), u32 = new Uint32Array(sab, ptr, 4096 / 4 + 2048);
@@ -84,6 +89,27 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   el.addEventListener('mousedown', e => { e.preventDefault(); el.focus(); msg(btn(e.button, true), wParam(e), pos(e)); });
   window.addEventListener('mouseup', e => msg(btn(e.button, false), wParam(e), pos(e)));
   el.addEventListener('contextmenu', e => e.preventDefault());
+  // A tap on a touch screen is a click the game sees: the button stays down at least TAP_HOLD ms (the game polls it once a frame
+  // and misses a press and release that come together). preventDefault keeps the browser's emulated mouse events away.
+  const TAP_HOLD = 150;
+  let touchId: number | null = null, touchAt = 0, touchPos = 0;
+  el.style.touchAction = 'none';
+  el.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch') return;
+    e.preventDefault();
+    if (touchId !== null) return;
+    touchId = e.pointerId; touchAt = performance.now(); touchPos = pos(e);
+    msg(WM.MOVE, 0, touchPos); msg(0x201, 1, touchPos);
+  });
+  el.addEventListener('pointermove', e => { if (e.pointerId === touchId) { touchPos = pos(e); msg(WM.MOVE, 1, touchPos); } });
+  const touchUp = (e: PointerEvent) => {
+    if (e.pointerId !== touchId) return;
+    touchId = null;
+    const at = touchPos;
+    setTimeout(() => msg(0x202, 0, at), Math.max(0, TAP_HOLD - (performance.now() - touchAt)));
+  };
+  window.addEventListener('pointerup', touchUp);
+  window.addEventListener('pointercancel', touchUp);
   el.addEventListener('wheel', e => { e.preventDefault(); msg(WM.WHEEL, ((e.deltaY > 0 ? -120 : 120) << 16) >>> 0, pos(e)); }, { passive: false });
 
   // ---- The pad (PC wrapper enhanced/subsystems/gamepad). Only pads with the standard mapping: wheels keep to their own. In menus the
@@ -127,27 +153,41 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     requestAnimationFrame(padTick);
     const seconds = Math.min(0.1, (now - lastTime) / 1000);
     lastTime = now;
+    // a pad with the standard layout first (the latest used); else any pad, read as if it had that layout (most generic pads
+    // put the face buttons and the left stick where the standard one has them)
     let pad: Gamepad | null = null;
     if (navigator.getGamepads && document.hasFocus())
-      for (const p of navigator.getGamepads()) if (p && p.connected && p.mapping === 'standard' && (!pad || p.timestamp > pad.timestamp)) pad = p;
-    if (!pad) {
+      for (const p of navigator.getGamepads()) {
+        if (!p || !p.connected) continue;
+        if (p.mapping === 'standard') { if (!pad || pad.mapping !== 'standard' || p.timestamp > pad.timestamp) pad = p; }
+        else if (!pad) pad = p;
+      }
+    const gameMode = Atomics.load(i32, PAD_MODE);
+    padState.mode = gameMode;
+    const touch = touchPad.active && gameMode === 2;
+    if (!pad && !touch) {
       if (wasOn) { Atomics.store(i32, PAD_ON, 0); releaseAll(now); wasOn = false; }
       return;
     }
     wasOn = true;
     let bits = 0;
-    pad.buttons.forEach((b, i) => { if (b.pressed && i < 32) bits |= 1 << i; });
-    const gameMode = Atomics.load(i32, PAD_MODE);
+    if (pad) {
+      pad.buttons.forEach((b, i) => { if (b.pressed && i < 32) bits |= 1 << i; });
+      if (bits || pad.axes.some(a => Math.abs(a) > 0.3)) padState.padAt = now;
+    }
+    if (touch) bits |= touchPad.buttons;
     if (gameMode !== mode) { latched = bits; releaseAll(now); mode = gameMode; }   // A that clicked Continue is not the hand brake
     latched &= bits;
     const held = bits & ~latched;
     const is = (b: number) => (held & 1 << b) !== 0;
     const menu = mode !== 2;
-    const [lx, ly] = deadStick(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
+    let [lx, ly] = pad ? deadStick(pad.axes[0] ?? 0, pad.axes[1] ?? 0) : [0, 0];
+    if (touch && Math.abs(touchPad.lx) > Math.abs(lx)) lx = touchPad.lx;
     u32[PAD_BUTTONS] = (held & ~(1 << B.START)) >>> 0;
     f32[PAD_LX] = lx;
-    f32[PAD_RT] = is(B.RT) || (pad.buttons[B.RT]?.value ?? 0) > 0 ? deadTrigger(pad.buttons[B.RT]?.value ?? 0) : 0;
-    f32[PAD_LT] = is(B.LT) || (pad.buttons[B.LT]?.value ?? 0) > 0 ? deadTrigger(pad.buttons[B.LT]?.value ?? 0) : 0;
+    const trigger = (b: number) => pad && (is(b) || (pad.buttons[b]?.value ?? 0) > 0) ? deadTrigger(pad.buttons[b]?.value ?? 0) : 0;
+    f32[PAD_RT] = Math.max(trigger(B.RT), touch ? touchPad.rt : 0);
+    f32[PAD_LT] = Math.max(trigger(B.LT), touch ? touchPad.lt : 0);
     Atomics.store(i32, PAD_ON, 1);
     setKey('Escape', is(B.START) || (menu && is(B.B)), now);
     setKey('ArrowUp', menu && is(B.UP), now);
@@ -164,7 +204,7 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
         msg(WM.MOVE, padMouse ? 1 : 0, cursorParam());
       }
       setMouse(is(B.A));
-      const [, ry] = deadStick(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
+      const [, ry] = pad ? deadStick(pad.axes[2] ?? 0, pad.axes[3] ?? 0) : [0, 0];
       wheelRest -= ry * WHEEL_NOTCHES * seconds;
       const notches = Math.trunc(wheelRest);
       if (notches) { wheelRest -= notches; msg(WM.WHEEL, ((notches * 120) << 16) >>> 0, cursorParam()); }
@@ -172,9 +212,28 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     const seq = Atomics.load(i32, RUMBLE_SEQ);
     if (seq !== rumbleSeen) {
       rumbleSeen = seq;
-      const a = (pad as unknown as { vibrationActuator?: { playEffect(t: string, p: object): Promise<unknown> } }).vibrationActuator;
+      if (touch && !pad) padState.rumble(i32[PAD_ON + 9]);
+      const a = (pad as unknown as { vibrationActuator?: { playEffect(t: string, p: object): Promise<unknown> } } | null)?.vibrationActuator;
       a?.playEffect('dual-rumble', { startDelay: 0, duration: i32[PAD_ON + 9], strongMagnitude: Math.min(1, f32[PAD_ON + 7]), weakMagnitude: Math.min(1, f32[PAD_ON + 8]) }).catch(() => { });
     }
   };
   requestAnimationFrame(padTick);
+  // the browser shows a pad to the page after its first button press: say so when it comes, and which layout it is read with
+  window.addEventListener('gamepadconnected', e => notice(`Gamepad: ${e.gamepad.id.replace(/\s*\(.*$/, '') || 'connected'}` +
+    (e.gamepad.mapping === 'standard' ? '' : ' (layout not standard: read as a standard pad)')));
+  window.addEventListener('gamepaddisconnected', () => notice('Gamepad disconnected'));
+}
+
+/** a line at the top of the page for a few seconds */
+function notice(text: string) {
+  let el = document.getElementById('notice');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'notice';
+    el.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:20;padding:6px 14px;border-radius:6px;' +
+      'background:rgba(0,0,0,.7);color:#fff;font:14px system-ui,sans-serif;pointer-events:none;transition:opacity .4s';
+    document.body.appendChild(el);
+  }
+  el.textContent = text; el.style.opacity = '1';
+  clearTimeout((el as unknown as { t?: number }).t);
+  (el as unknown as { t?: number }).t = window.setTimeout(() => { el!.style.opacity = '0'; }, 4000);
 }
