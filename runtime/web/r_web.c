@@ -287,14 +287,54 @@ static void game_state(DrawState *d, int topo){
  * live resize; each draw moves by the side it sits on, so no piece stays where the old edges were */
 static int g_hud_w0, g_hud_collect, g_hud_xform;
 static float g_hud_lo, g_hud_hi, g_hud_dx;
+/* one draw's primitives (triangles, lines, points) in the order they come: their x span, then the shift of the group each is in */
+#define HUD_PRIMS 8192
+static float g_hp_lo[HUD_PRIMS], g_hp_hi[HUD_PRIMS], g_hp_dx[HUD_PRIMS];
+static int g_hp_n, g_hp_at;
 void r_hud_draw(int w0){ g_hud_w0 = w0; }
+static float hud_side_dx(float lo, float hi){
+    const float c = (lo + hi) * 0.5f / (float)g_hud_w0;
+    const float side = c < 1.0f / 3.0f ? 0.0f : c > 2.0f / 3.0f ? 1.0f : 0.5f;
+    return (float)(g_lw - g_hud_w0) * side;
+}
+/* pieces close side by side (a word's letters, a dial and its marks) move together, each group by the side it sits on: one draw can
+ * hold pieces of several places (the racers' marks next to the names) */
+static void hud_groups(void){
+    static int order[HUD_PRIMS];
+    const int n = g_hp_n;
+    for (int i = 0; i < n; i++) order[i] = i;
+    for (int i = 1; i < n; i++){          /* insertion sort by the left edge: draws are short */
+        const int k = order[i]; int j = i - 1;
+        while (j >= 0 && g_hp_lo[order[j]] > g_hp_lo[k]){ order[j + 1] = order[j]; j--; }
+        order[j + 1] = k;
+    }
+    for (int a = 0; a < n;){
+        float lo = g_hp_lo[order[a]], hi = g_hp_hi[order[a]];
+        int b = a + 1;
+        while (b < n && g_hp_lo[order[b]] <= hi + 6.0f){ if (g_hp_hi[order[b]] > hi) hi = g_hp_hi[order[b]]; b++; }
+        /* a piece across the screen (a fade, a flash) keeps its place */
+        const float dx = hi - lo < 0.9f * (float)g_hud_w0 ? hud_side_dx(lo, hi) : 0.0f;
+        for (int i = a; i < b; i++) g_hp_dx[order[i]] = dx;
+        a = b;
+    }
+}
 static void flush_verts(DV *v, int n, int topo){
     if (n <= 0) return;
+    const int per = topo == 0 ? 3 : topo == 1 ? 2 : 1;
     if (g_hud_collect){
-        for (int i = 0; i < n; i++){ g_hud_lo = v[i].x < g_hud_lo ? v[i].x : g_hud_lo; g_hud_hi = v[i].x > g_hud_hi ? v[i].x : g_hud_hi; }
+        for (int t = 0; t + per <= n; t += per){
+            float lo = v[t].x, hi = v[t].x;
+            for (int i = 1; i < per; i++){ lo = v[t + i].x < lo ? v[t + i].x : lo; hi = v[t + i].x > hi ? v[t + i].x : hi; }
+            g_hud_lo = lo < g_hud_lo ? lo : g_hud_lo; g_hud_hi = hi > g_hud_hi ? hi : g_hud_hi;
+            if (g_hp_n < HUD_PRIMS){ g_hp_lo[g_hp_n] = lo; g_hp_hi[g_hp_n] = hi; g_hp_n++; }
+        }
         return;
     }
-    if (g_hud_xform) for (int i = 0; i < n; i++) v[i].x += g_hud_dx;
+    if (g_hud_xform)
+        for (int t = 0; t + per <= n; t += per, g_hp_at++){
+            const float dx = g_hp_at < g_hp_n ? g_hp_dx[g_hp_at] : g_hud_dx;
+            for (int i = 0; i < per; i++) v[t + i].x += dx;
+        }
     { const float dv = tan_voffset(g_bound); if (dv != 0.0f) for (int i = 0; i < n; i++) v[i].v += dv; }
     if (topo == 0){
         n = guard_filter(v, n);
@@ -345,17 +385,24 @@ static float g_pv_uv[MAX_VERTS * 2];
 static void draw_any(const char *n, const uint32_t *a);
 void r_draw(const char *n, const uint32_t *a){
     if (g_hud_w0 > 0 && g_race && g_lw != g_hud_w0){
-        g_hud_collect = 1; g_hud_lo = 1e30f; g_hud_hi = -1e30f;
+        g_hud_collect = 1; g_hud_lo = 1e30f; g_hud_hi = -1e30f; g_hp_n = 0;
         draw_any(n, a);
         g_hud_collect = 0;
-        /* a piece across the screen (a fade, a flash) keeps its place */
-        if (g_hud_hi > g_hud_lo && g_hud_hi - g_hud_lo < 0.9f * (float)g_hud_w0){
-            const float c = (g_hud_lo + g_hud_hi) * 0.5f / (float)g_hud_w0;
-            const float side = c < 1.0f / 3.0f ? 0.0f : c > 2.0f / 3.0f ? 1.0f : 0.5f;
-            g_hud_dx = (float)(g_lw - g_hud_w0) * side; g_hud_xform = 1;
+        if (g_hud_hi > g_hud_lo){
+            hud_groups();
+            g_hud_dx = g_hud_hi - g_hud_lo < 0.9f * (float)g_hud_w0 ? hud_side_dx(g_hud_lo, g_hud_hi) : 0.0f;
+            g_hud_xform = 1; g_hp_at = 0;
+        }
+        /* the HUD clips to the old screen, or to a piece of it (the map): the clip goes along with the piece, the screen's grows */
+        const int keep[4] = { g_clip[0], g_clip[1], g_clip[2], g_clip[3] }, keepvalid = g_clipvalid;
+        if (g_clipvalid){
+            if (g_clip[0] <= 0 && g_clip[2] >= g_hud_w0 - 1){ g_clip[0] = 0; g_clip[2] = g_lw; }
+            else if (g_hud_xform){ const int dx = (int)lroundf(hud_side_dx((float)g_clip[0], (float)g_clip[2])); g_clip[0] += dx; g_clip[2] += dx; }
+            g_s_scissor_ok = 0;
         }
         draw_any(n, a);
         g_hud_xform = 0;
+        if (keepvalid){ memcpy(g_clip, keep, sizeof keep); g_s_scissor_ok = 0; }
         return;
     }
     draw_any(n, a);
