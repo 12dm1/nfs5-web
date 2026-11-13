@@ -28,6 +28,7 @@ uint32_t gheap_alloc(int heap, uint32_t n, int zero);
 
 static int g_role = -1;              /* 0 off, 1 host, 2 join */
 static int g_online_req;            /* ON1: the Online button was pressed (online_auto) */
+static int g_humans = -1;           /* ON2: players in the game, from the server's "humans N" line (bots are members too) */
 static int g_online;                 /* ON1: through the menus of the Internet mode (NETTEST=online-host|online-join) */
 static int g_players = 2;
 static volatile int g_inrace;
@@ -209,9 +210,59 @@ static const char *online_account(void){
         else { struct timespec t; clock_gettime(CLOCK_REALTIME, &t); snprintf(a, sizeof a, "web%06ld", (long)((t.tv_sec * 7919L + t.tv_nsec / 1000) % 1000000L)); } }
     return a;
 }
+
+/* ---- ON2: career tournament races (web/online/tournament.mjs).  The server sends the game's creator a line
+ * "race k/N laps=L reverse=R track=NAME" over the control channel; on its create screen it sets the track and the laps.
+ * After each race it reports the finishing order of every car: "result slot:place:time ..." (005E77A0 + car index * 258h:
+ * place, +4 time; car index -> slot from the member list). ---- */
+int online_ctl_recv(char *out, int max);
+int online_ctl_send(const char *text);
+#define RESULTS 0x005E77A0u
+static char g_dir[256]; static int g_dir_new; static uint32_t g_reported_tick;
+static void career_tick(CPU *c, uint32_t fe, uint32_t vt){
+    char m[512];
+    while (online_ctl_recv(m, sizeof m)){
+        fprintf(stderr, "[online] server: %s\n", m);
+        if (!strncmp(m, "race ", 5)){ snprintf(g_dir, sizeof g_dir, "%s", m); g_dir_new = 1; }
+        else if (!strcmp(m, "over")) g_dir[0] = 0;
+        else if (!strncmp(m, "humans ", 7)) g_humans = atoi(m + 7);
+    }
+    if (vt != VT_CREATE || cint(0xDC) != 0 || !g_dir[0]) return;          /* the creator, on its create screen */
+    const uint32_t tick = MR32(SIMTICK);
+    if (tick > 64 && tick != g_reported_tick){                             /* back from a race */
+        char r[400]; int n = snprintf(r, sizeof r, "result");
+        const uint32_t head = comms() ? MR32(comms() + 0x260) : 0;
+        int k = 0;
+        for (uint32_t p = head ? MR32(head) : 0; p && p != head && k < 16; p = MR32(p), k++){
+            const uint32_t pl = MR32(p + 8);
+            if (!pl) continue;
+            const int slot = (int)MR32(pl + 0x40), idx = (int)MR32(pl + 0x4C);
+            if (idx < 0 || idx > 8 || slot < 0 || slot > 7) continue;
+            n += snprintf(r + n, sizeof r - (size_t)n, " %d:%d:%d", slot, (int)MR32(RESULTS + (uint32_t)idx * 0x258u), (int)MR32(RESULTS + (uint32_t)idx * 0x258u + 4));
+        }
+        fprintf(stderr, "[online] %s (sim tick %u)\n", r, tick);
+        online_ctl_send(r);
+        g_reported_tick = tick;
+        return;
+    }
+    if (g_dir_new){
+        g_dir_new = 0;
+        const char *tr = strstr(g_dir, "track="), *lp = strstr(g_dir, "laps=");
+        uint32_t t = accessor(c, "Track1.Track", 0x005DB2A0u);
+        int row = (t && tr) ? find_row(c, t, tr + 6, "tournament track") : -1;
+        if (row >= 0) set_index(c, t, row); else fprintf(stderr, "[online] track '%s' not in the list\n", tr ? tr + 6 : "?");
+        if (lp){
+            char want[8]; snprintf(want, sizeof want, "%d", atoi(lp + 5));
+            uint32_t l = accessor(c, "Track1.Laps", RTTI_LOCAL);
+            int lr = l ? find_row(c, l, want, "laps") : -1;
+            if (l) set_index(c, l, lr >= 0 ? lr : atoi(lp + 5) - 1);
+        }
+    }
+}
 static void online_auto(CPU *c){
     uint32_t fe = c->ecx, obj = fe ? MR32(fe + 0xE0) : 0, vt = obj ? MR32(obj) : 0;
     const double in = now_s() - g_auto_t;
+    career_tick(c, fe, vt);
     if (g_online_req){ g_online_req = 0; auto_go(1); return; }
     switch (g_auto){
     case 1:   /* on the protocol screen (the button navigated there): Internet */
@@ -273,10 +324,14 @@ static void fe_tick(CPU *c){
         if (phase == 0 && vt == VT_CREATE && slot >= 0){ phase = 1; since = t; LOG("create screen, slot %d", slot); if (g_online) host_mode(c); }
         if (phase == 1 && t - since > 2.0){
             int all = (int)call_guest(c, CANSTART, 0, NULL), m = members();
-            if (!(all && m >= g_players)) all_since = 0;
+            if (!(all && m >= g_players && (g_humans < 0 || g_humans >= g_players))) all_since = 0;
             else if (!all_since){ all_since = t; LOG("all %d ready", m); }
             if (all_since && t - all_since > 5.0){ phase = 2; command(c, fe, "PLAYGAME"); LOG("back from PLAYGAME"); }
         }
+        /* ON2: the next race of a tournament once the create screen is back */
+        static uint32_t raced;
+        if (phase == 2 && vt == VT_CREATE && MR32(SIMTICK) > 64 && MR32(SIMTICK) != raced && g_dir[0]){
+            raced = MR32(SIMTICK); phase = 1; since = t + 5.0; all_since = 0; LOG("back on the create screen: next race (%s)", g_dir); }
     } else {
         if (phase == 0 && vt == VT_JOIN && slot >= 0 && cbyte(0xBC)){ phase = 1; since = t; LOG("join screen, slot %d", slot); }
         if (phase == 1 && t - since > 3.0 && slot >= 0 && slot < 8 && cbyte(0xBC)){
@@ -286,6 +341,31 @@ static void fe_tick(CPU *c){
     g_busy = 0;
 }
 
+
+/* A network race never ends by itself (00417010 skips the "everyone finished" end for game type 3): every player
+ * leaves through the race menu.  With NETTEST_AI, 5 s after the local car finished, do what the menu's "quit" entry
+ * does (004152E0 case 5; PC mod net_autotest.cpp NetAutotest_RaceTick).  From the race's input hook 0x413800. */
+void nettest_race(CPU *c){
+    static uint32_t finished_at, last_tick; static int left;
+    if (g_role <= 0 || !getenv("NETTEST_AI")) return;
+    const uint32_t tick = MR32(SIMTICK);
+    if (tick < last_tick){ finished_at = 0; left = 0; }
+    last_tick = tick;
+    const int pi = (int)MR32(0x0065741Cu);
+    if (left || pi < 0 || pi > 15) return;
+    const uint32_t car = MR32(0x005E8E2Cu + 4u * (uint32_t)pi);
+    if (!car) return;
+    const int b50 = (int)MR32(car + 0xB50u);
+    if (!b50){ finished_at = 0; return; }
+    if (!finished_at){ finished_at = tick ? tick : 1; LOG("local car finished (state %d) at tick %u", b50, tick); return; }
+    if (tick - finished_at < 5 * 64) return;
+    left = 1;
+    LOG("leaving the race (tick %u)", tick);
+    call_guest(c, 0x004AB270u, 0, NULL);
+    call_guest(c, 0x004120F0u, 0, NULL);
+    MR32(0x00606A90u) = 0; MR32(0x00606A8Cu) = 1; MR32(0x00606A88u) = 0;
+    if ((int)MR32(0x005E99F4u) < 2){ uint32_t one = 1; MR32(0x00657424u) = 3; call_guest(c, 0x00416AC0u, 1, &one); }
+}
 void nettest_hook(CPU *c, uint32_t ip){
     if (g_role < 0) init_role();
     if (!g_role || (g_online && getenv("NETTEST_UI"))){ if (ip == 0x4D2B80u && !g_busy){ g_busy = 1; online_auto(c); g_busy = 0; } if (!g_role) return; }

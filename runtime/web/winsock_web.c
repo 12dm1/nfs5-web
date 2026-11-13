@@ -110,12 +110,35 @@ static void q_push_icmp(GS *s, uint32_t from, const uint8_t *p, uint32_t n){
 }
 
 /* take what the page received into the sockets' queues (guest lock held) */
+/* ON2: a text line channel between the runtime (nettest.c online_auto) and the server (web/online/vnet.mjs), UDP port
+ * 9443 on both sides; no game socket uses it */
+#define CTL_PORT 9443
+#define CTL_N 16
+#define CTL_LEN 512
+static char g_ctl[CTL_N][CTL_LEN];
+static uint32_t g_ctl_h, g_ctl_t;
+static void drain(void);
+int online_ctl_recv(char *out, int max){
+    drain();
+    if (g_ctl_t == g_ctl_h || max <= 0) return 0;
+    snprintf(out, (size_t)max, "%s", g_ctl[g_ctl_t % CTL_N]); g_ctl_t++;
+    return 1;
+}
+int online_ctl_send(const char *text){
+    mbox_init();
+    return tx_frame(NET_KIND_UDP, NET_SERVER_VIP, CTL_PORT, CTL_PORT, text, (uint32_t)strlen(text));
+}
 static void drain(void){
     if (!g_registered) return;
     uint32_t tail = g_mb->rx_tail, head = ld(&g_mb->rx_head);
     for (; tail != head; tail++){
         const net_slot *f = rx_slot(tail);
         uint32_t n = f->len; if (n > NET_MAX_PAYLOAD) n = 0;
+        if (f->kind == NET_KIND_UDP && f->dst_port == CTL_PORT){       /* ON2: the server's control line for the runtime */
+            if (g_ctl_h - g_ctl_t < CTL_N){ uint32_t k = n < CTL_LEN - 1 ? n : CTL_LEN - 1;
+                memcpy(g_ctl[g_ctl_h % CTL_N], f->data, k); g_ctl[g_ctl_h % CTL_N][k] = 0; g_ctl_h++; }
+            continue;
+        }
         if (f->kind == NET_KIND_UDP){
             for (int i = 0; i < NSOCK; i++) if (g_s[i].used && g_s[i].type == T_DGRAM && g_s[i].bound && g_s[i].port == f->dst_port){
                 q_push(&g_s[i], f->src_ip, f->src_port, f->data, n);

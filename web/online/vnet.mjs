@@ -19,6 +19,7 @@ import { createNetGather } from './netgather.mjs';
 export const SERVER_VIP = 0x0A4D0001;          // 10.77.0.1 (winsock_web.c NET_SERVER_VIP)
 const NETMASK = 0xFFFF0000;
 const ENTRY_PORT = 9442;
+const CTL_PORT = 9443;              // ON2: text lines between the server and the game's runtime (winsock_web.c online_ctl_*)
 const K_UDP = 1, K_ICMP = 5, K_HELLO = 0x40;
 const ipText = v => `${v >>> 24}.${(v >>> 16) & 255}.${(v >>> 8) & 255}.${v & 255}`;
 const ipNum = t => t.split('.').reduce((a, b) => ((a << 8) | (+b & 255)) >>> 0, 0);
@@ -47,6 +48,8 @@ export function createOnline({ dataDir, carsJson, udpPort = 0, logDir, verbose =
     log, verbose,
     carFile: dataDir ? path.join(dataDir, 'FEData', 'Data', 'nfs5.car') : '',
     carsJson: carsJson || '',
+    trnFile: dataDir ? path.join(dataDir, 'FEData', 'Data', 'nfs5.trn') : '',
+    ctlSend(rinfo, text) { if (rinfo && rinfo.tab && rinfo.tab.open) rinfo.tab.send(frame(K_UDP, SERVER_VIP, rinfo.tab.vip, CTL_PORT, CTL_PORT, Buffer.from(text, 'latin1'))); },
     transmit(rinfo, pkt) {
       if (rinfo.tab) { if (rinfo.tab.open) rinfo.tab.send(frame(K_UDP, rinfo.serverIp, rinfo.tab.vip, rinfo.serverPort, rinfo.port, pkt)); }
       else if (udp) udp.send(pkt, rinfo.port, rinfo.address);
@@ -59,6 +62,11 @@ export function createOnline({ dataDir, carsJson, udpPort = 0, logDir, verbose =
     const kind = b[0], dst = b.readUInt32BE(8), sport = b.readUInt16BE(12), dport = b.readUInt16BE(14);
     const payload = b.subarray(16);
     if (kind === K_UDP) {
+      if (dport === CTL_PORT) {
+        const c = [...ng.clients.values()].find(x => x.rinfo && x.rinfo.tab === tab);
+        if (c) ng.control(c, payload.toString('latin1'));
+        return;
+      }
       if (dport === ENTRY_PORT || dst === SERVER_VIP) {
         ng.datagram(`${ipText(tab.vip)}:${sport}`, { address: ipText(tab.vip), port: sport, tab, serverIp: dst, serverPort: dport }, payload);
         return;

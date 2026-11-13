@@ -77,7 +77,7 @@ int pu_hook(CPU *c, uint32_t ip){
     case 0x4CBBF9u: pu_hud_preview(c, 1); return 1;
     case 0x41A495u: pu_hud_text_begin(c); return 1;
     case 0x41A4AEu: pu_hud_text_end(c); return 1;
-    case 0x413800u: pu_pad_input(); return 1;
+    case 0x413800u: pu_pad_input(); { void nettest_race(CPU *c); nettest_race(c); } return 1;
     case 0x40F740u: pu_pad_impact(c); return 1;
     case 0x43A3B0u: pu_car_lod(c); return 1;
     case 0x43C431u: pu_car_lod_record(c); return 1;

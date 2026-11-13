@@ -7,8 +7,12 @@
 //   ng.datagram(key, rinfo, buf)   a datagram from a client; key identifies the client's socket
 //   ng.tick()                      once a second: keepalives, resends, timeouts
 import fs from 'node:fs';
+import { loadTournaments, onlineEvents, createTournament } from './tournament.mjs';
 
-export function createNetGather({ transmit, log = console.log, carFile = '', carsJson = '', verbose = false } = {}) {
+export function createNetGather({ transmit, ctlSend = () => {}, log = console.log, carFile = '', carsJson = '', trnFile = '', verbose = false } = {}) {
+// ON2 career tournaments (tournament.mjs): the events that can run online
+const EVENTS = onlineEvents(loadTournaments(trnFile));
+if (EVENTS.length) log(`career tournaments: ${EVENTS.length} events for online (${trnFile})`);
 function hexdump(buf, max = 512) {
   const lines = [];
   const n = Math.min(buf.length, max);
@@ -283,6 +287,11 @@ function carIndexOf(id) { const c = carLadder.find(x => x.id === id); return c ?
 // choice, one car per name, the players' own cars left out).
 function assignBotCars(g) {
   const bots = g.members.filter(isBot);
+  if (bots.length && g.tournament) {          // the event's own opponents, in slot order
+    const opp = g.tournament.def.opponents;
+    bots.sort((a, b) => a.gameSlot - b.gameSlot).forEach((b, i) => { const o = opp[i % opp.length]; if (o && b.carId !== o.car) setBotCar(g, b, o.car); });
+    return;
+  }
   if (!bots.length || !carLadder.length) return;
   const mine = humans(g).map(m => {
     const r = g.setup.get(`${SETUP_CAR}:${m.gameSlot}`);
@@ -450,7 +459,7 @@ function onAppMessage(c, data) {
     case 0xb6: {                      // join game: [B6][u24 game id]
       const g = games.get(data.readUIntBE(1, 3));
       if (!g) { log(`  join game: unknown id`); sendReliable(c, lobbyMsg(0xc6, 0x0a)); return; }
-      if (humans(g).length >= MAX_SLOTS) { sendReliable(c, lobbyMsg(0xc6, 0x0b)); return; }   // Game Full
+      if (humans(g).length >= MAX_SLOTS || g.racing) { sendReliable(c, lobbyMsg(0xc6, 0x0b)); return; }   // Game Full (or racing)
       joinGame(c, g);
       return;
     }
@@ -482,7 +491,9 @@ function onAppMessage(c, data) {
           if (c.game.raceMode !== v) {
             c.game.raceMode = v;
             log(`  game #${c.game.id}: race mode -> ${RACE_MODES[v] || v}`);
+            careerMode(c.game);
             syncBots(c.game);
+            broadcastGame(c.game);
           }
         }
       }
@@ -593,6 +604,7 @@ function startRace(g) {
     const t = Date.now() & 0xffffffff;
     for (const m of g.members) sendUnreliable(m, lobbyMsg(0xc4, 0, t));
   }, 1000);
+  if (g.tournament && !g.tournament.done) for (const m of g.members) g.tournament.enter(m.gameSlot, m.persona, isBot(m));
   log(`  game #${g.id}: race start`);
 }
 // Host tick 0048B6B0: the ring advances only after C5 and once every racer
@@ -658,7 +670,58 @@ function gameEntry(g) {             // 0048BAA0: [B4][u24 id][0x4C record], play
   // 004B9E36 refuses to join a game whose +48 is >= 8 ("Sorry, that game is
   // full"), and a joining player takes a bot's place, so only humans count.
   rec.writeUInt32LE(humans(g).length, 0x48);
+  // +0x35 (the name field's +21, Comms.Positional at creation) is the MODE column's row: the race mode as it is now
+  // (a stored old "positional" value was out of the 3-row table: "THIS IS A BUG")
+  rec[0x35] = g.raceMode >= 0 && g.raceMode <= 2 ? g.raceMode : 0;
   return Buffer.concat([Buffer.from([0xb4]), u24(g.id), rec]);
+}
+
+// ---- ON2: career tournaments. MODE "career" picks the event (the game's name may carry "#<id>", else the first
+// online event), its opponents drive the bots, the creator's runtime gets each race's track and laps over the control
+// line and reports the finishing order; points, money and the table come from tournament.mjs, the table goes to chat.
+function gameChat(g, text) {
+  const from = (g.members.find(isBot) || g.host || g.members[0]);
+  if (!from) return;
+  for (const m of g.members) sendReliable(m, lobbyMsg(0xbb, from.gameSlot, -1, text));
+}
+function careerMode(g) {
+  if (g.raceMode !== RACE_MODE_CAREER) { if (g.tournament && !g.tournament.race) g.tournament = null; return; }
+  if (g.tournament || !EVENTS.length) return;
+  const want = /#(\d+)/.exec(g.name || '');
+  const def = (want && EVENTS.find(t => t.id === +want[1])) || EVENTS[0];
+  g.tournament = createTournament(def, log);
+  log(`  game #${g.id}: tournament ${def.title}`);
+  gameChat(g, `Tournament ${def.groupName} #${def.id}: ${def.races.length} races`);
+  careerNext(g);
+}
+function careerNext(g) {
+  const T = g.tournament;
+  if (!T || !g.host) return;
+  const line = T.directive();
+  ctlSend(g.host.rinfo, line);
+  if (!T.done) gameChat(g, `Next: ${line.replace(/ laps=.*track=/, ': ')}, ${T.current().laps} lap(s)`);
+}
+function control(c, text) {
+  log(`  control <- ${c.account}: ${text}`);
+  const g = c.game;
+  if (!g || g.host !== c) return;
+  if (text === 'hello' && g.tournament) { careerNext(g); return; }
+  const T = g.tournament;
+  if (!text.startsWith('result ') || !T || T.done) return;
+  const places = new Map(), times = new Map();
+  for (const f of text.slice(7).trim().split(/\s+/)) {
+    const [slot, place, time] = f.split(':').map(Number);
+    if (place > 0 && place <= 8) places.set(slot, place);
+    times.set(slot, time || 0);
+  }
+  const row = T.finish(places, times);
+  if (!row) return;
+  const lines = [...row.entries()].sort((a, b) => (a[1].place || 99) - (b[1].place || 99))
+    .map(([slot, r]) => `${r.place || '-'}. ${T.entrants.get(slot).name} +${r.points}`);
+  gameChat(g, `Race ${T.race}/${T.def.races.length}: ${lines.join(', ')}`);
+  gameChat(g, `${T.done ? 'Final' : 'Standings'}: ${T.table().join(', ')}`);
+  log(`  game #${g.id}: ${T.done ? 'final' : 'standings'} ${T.table().join(' | ')}`);
+  careerNext(g);
 }
 function broadcastGame(g) { for (const m of lobbyMembers()) sendReliable(m, gameEntry(g)); }
 // Host side of a player entering a game (0048BB50): B2 slot + game info to
@@ -687,6 +750,7 @@ function joinGame(c, g) {
     for (const r of g.setup.values()) sendReliable(c, Buffer.concat([Buffer.from([0xbc, 0, 0, 0]), r.bytes]));
   }
   log(`  game #${g.id}: ${c.account} joined as slot ${slot} (${humans(g).length} players)`);
+  if (g.host) ctlSend(g.host.rinfo, `humans ${humans(g).length}`);
   broadcastGame(g);
   rebuildBots(g);
 }
@@ -827,5 +891,5 @@ function drop(key) {
   log(`client ${key} (${c.account}) disconnected`);
   leaveLobby(c); clients.delete(key);
 }
-return { datagram, tick, drop, clients, games };
+return { datagram, tick, drop, clients, games, control, events: EVENTS };
 }
