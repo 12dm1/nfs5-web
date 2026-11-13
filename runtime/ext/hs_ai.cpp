@@ -10,6 +10,7 @@
 #include <strings.h>
 #include "hs_walls_math.h"
 #include "hs_ai.h"
+#include "../pu_cars.h"
 #include "hs_walls.h"
 
 extern "C" int fileio_resolve_game(const char *win, char *out, size_t outsz);
@@ -23,8 +24,8 @@ const float kSlipCos2 = 0.95677f;       // cos^2(12 deg)
 const int kSlipThrottle = 64;
 const float kStuckSeconds = 5.0f, kStuckMetres = 5.0f;
 
-const uint32_t kCarTable = 0x005E8B34, kSimTick = 0x00606AC4, kTrackData = 0x00628BC0, kReverse = 0x00657430, kDerby = 0x00657400;
-const uint32_t kTrackName = 0x00657444, kRaceSetup = 0x0065808C;
+const uint32_t kCarTable = CARS_L_CARS, kSimTick = 0x00606AC4, kTrackData = 0x00628BC0, kReverse = 0x00657430, kDerby = 0x00657400;
+const uint32_t kTrackName = 0x00657444, kRaceSetup = CARS_INFO;   // CARS1: both tables moved (runtime/pu_cars.h)
 
 uint8_t *g_m;
 bool g_converted;
@@ -126,7 +127,7 @@ float carScaleOf(const uint8_t *car) {
     // By name first: the race setup (0065808C, stride 0x580) keeps the AI spec name at +0x2A8. Quick Race bots drive tuned
     // cars whose AI record matches no file byte for byte.
     const char *aisName = nullptr;
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < CARS_MAX; ++i)
         if (at<uint32_t>(kCarTable + 4u * i) == guest(car)) { aisName = (const char *)(g_m + kRaceSetup + i * 0x580 + 0x2A8); break; }
     if (aisName && aisName[0])
         for (int i = 0; i < g_aisCount; ++i)
@@ -284,7 +285,7 @@ struct StuckState {
     bool moved;
     float anchorPos[3];
 };
-StuckState g_stuck[8];
+StuckState g_stuck[CARS_MAX];
 } // namespace
 
 extern "C" void hs_ai_init(uint8_t *mem) { g_m = mem; }
@@ -367,7 +368,7 @@ extern "C" void hs_ai_throttle(uint8_t *car) {
 extern "C" int hs_ai_stuck(uint8_t *car) {
     const uint32_t gcar = guest(car);
     int idx = -1;
-    for (int i = 0; i < 8; ++i) if (at<uint32_t>(kCarTable + 4u * i) == gcar) { idx = i; break; }
+    for (int i = 0; i < CARS_MAX; ++i) if (at<uint32_t>(kCarTable + 4u * i) == gcar) { idx = i; break; }
     if (idx < 0) return 0;
     StuckState &st = g_stuck[idx];
     const uint32_t flags = *(const uint32_t *)(car + 0x52C);
@@ -422,7 +423,7 @@ extern "C" int hs_ai_stuck(uint8_t *car) {
 }
 extern "C" void hs_ai_stuck_done(uint8_t *car) {
     const uint32_t gcar = guest(car);
-    for (int i = 0; i < 8; ++i) if (at<uint32_t>(kCarTable + 4u * i) == gcar) {
+    for (int i = 0; i < CARS_MAX; ++i) if (at<uint32_t>(kCarTable + 4u * i) == gcar) {
         StuckState &st = g_stuck[i];
         st.lastSlice = *(const int16_t *)(car + 8);
         st.progress = st.anchorProgress;

@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "cpu.h"
+#include "pu_cars.h"
 
 #define RACE_SKIP_RENDER 0x00606AACu
 #define RACE_MENU_RETURN 0x00606AD8u
@@ -32,7 +33,7 @@
 #define SNAP_DISTANCE 25.0f
 #define HISTORY 6
 #define MAX_SPACING 4
-#define TRACKS 512                         /* hash table, at most 9 + 9 + 128 cars and 4 camera tracks */
+#define TRACKS 512                         /* hash table, at most 16 + 16 + 128 cars and 4 camera tracks */
 
 typedef struct { float pos[3], rot[9]; } Xf;
 typedef struct { Xf state; int32_t step; } Sample;
@@ -256,8 +257,8 @@ void pu_interp_step(void){
     const double now = now_us();
     const int32_t step = (int32_t)rd32(SIM_STEP_COUNT);
     clock_update(step, now);
-    capture_cars(0x005E8B34u, 0x005E8B58u, 9, step);    /* racers */
-    capture_cars(0x005E8AC4u, 0x005E8ABCu, 9, step);    /* police */
+    capture_cars(CARS_L_CARS, 0x005E8B58u, CARS_MAX, step);    /* racers (CARS1: moved table) */
+    capture_cars(CARS_L_COPS, 0x005E8ABCu, CARS_MAX, step);    /* police */
     capture_cars(0x005E8C24u, 0x005E8B5Cu, 128, step);  /* traffic */
     for (uint32_t i = 0; i < 2; i++){
         const uint32_t b = CAMERA_BLOCKS + i * CAMERA_STRIDE;

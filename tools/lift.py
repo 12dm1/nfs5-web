@@ -3,6 +3,7 @@
 import sys, struct, collections
 import pefile
 from split_reloc import operand as split_operand
+import split_reloc as _split_reloc
 from capstone import *
 from capstone.x86 import *
 
@@ -418,8 +419,13 @@ class Lifter:
             if m.index not in R32: raise Unsupported("index register")
             parts.append(f"c->{R32[m.index]}*{m.scale}" if m.scale!=1 else f"c->{R32[m.index]}")
         d = (m.disp + extra) & 0xffffffff
+        regs = bool(parts)
         if d or not parts: parts.append(split_operand(d, getattr(self, 'cur_ip', 0)) if getattr(self, 'IB', 0) == 0x400000 else f"0x{d:x}u")
-        return "(" + "+".join(parts) + ")"
+        e = "(" + "+".join(parts) + ")"
+        if regs and d and _split_reloc.CHECK and getattr(self, 'IB', 0) == 0x400000:
+            g = _split_reloc.check_gap(d, getattr(self, 'cur_ip', 0))
+            if g: e = f"(chk_ea({e}, 0x{g[0]:x}u, 0x{g[1]:x}u, 0x{self.cur_ip:x}u))"
+        return e
 
     def rd(self, op):
         if op.type==X86_OP_IMM:
@@ -577,6 +583,7 @@ class Lifter:
 
     def insn(self, i, targets):
         self.cur_ip = i.address
+        _split_reloc.CUR_SIZE = i.size     # CARS1: the fixup slots of this instruction (split_reloc.is_address)
         m=i.mnemonic; ops=i.operands; o=ops
         # PU: the CRT's locale guard (_stricmp at 0x5AE3C0 & co.) uses
         # "lock inc/dec [__unguarded_readlc_active]".  Lifted as the plain

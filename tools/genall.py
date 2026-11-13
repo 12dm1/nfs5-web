@@ -256,6 +256,7 @@ if __name__=='__main__':
         f.write("#ifndef DECLS_H\n#define DECLS_H\n#include \"cpu.h\"\n")
         f.write("void dispatch_indirect(CPU*,uint32_t);\nvoid unsupported_insn(CPU*,uint32_t,const char*);\n")
         f.write("void cpuid_shim(CPU*);\nuint64_t rdtsc_shim(void);\n")
+        f.write("uint32_t chk_ea(uint32_t, uint32_t, uint32_t, uint32_t);\n")   # CARCHK=1 lifts (runtime/pu_cars.c)
         for a in allf: f.write(f"void sub_{a:08x}(CPU*);\n")
         # only this module's overrides (gen.sh passes one list to every module)
         _Lm = Lifter(EXE)

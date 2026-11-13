@@ -5,6 +5,7 @@
  * Addresses: _mod/docs/findings/NET0-mp-frontend-automation.md.
  * Without NETTEST every hook returns at once. */
 #include "cpu.h"
+#include "pu_cars.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,11 +19,11 @@ uint32_t gheap_alloc(int heap, uint32_t n, int zero);
 #define COMMS    0x00628C70u
 #define DISPATCH 0x0050D6D0u
 #define CANSTART 0x005091B0u
-#define CARINFO  0x0065808Cu
+#define CARINFO  CARS_INFO     /* CARS1: moved */
 #define VT_CREATE 0x005B8DFCu
 #define VT_JOIN   0x005B90A0u
 #define SIMTICK  0x00606AC4u
-#define CARS     0x005E8B34u
+#define CARS     CARS_L_CARS
 #define CI_AIDRIVE 0x144u
 #define CI_READY   0x578u
 

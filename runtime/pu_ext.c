@@ -10,6 +10,7 @@
 #include <string.h>
 #include <strings.h>
 #include "cpu.h"
+#include "pu_cars.h"
 #include "decls.h"
 #include "ext/hs_walls.h"
 #include "ext/opp_similar.h"
@@ -289,7 +290,7 @@ int pu_pad_mode(void){
 }
 static uint32_t player_car(void){
     const int player = (int)MR32(0x0065741Cu);
-    return player >= 0 && player < 16 ? MR32(0x005E8E2Cu + 4u * (uint32_t)player) : 0;
+    return player >= 0 && player < 16 ? MR32(CARS_L_RACER + 4u * (uint32_t)player) : 0;
 }
 static int guest_readable(uint32_t a){
 #ifdef __wasm__
