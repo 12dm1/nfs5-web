@@ -99,7 +99,7 @@ function onLink(c, msg) {
   if (ack < SEQ_WRAP) {
     const before = l.unacked.length;
     l.unacked = l.unacked.filter(u => seqDiff(ack, u.seq) >= SEQ_WRAP / 2);
-    if (l.unacked.length !== before) log(`  link: ${c.account} acked up to ${ack}`);
+    if (l.unacked.length !== before) log(`    link: ${c.account} acked up to ${ack}`);
   }
   if (seq === SEQ_CLOSE && len === 0) { log(`  link: ${c.account} closed the link`); sendAck(c); return; }
   if (seq === SEQ_ACK) { sendAck(c); return; }

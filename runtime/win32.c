@@ -752,7 +752,10 @@ int win32_call(CPU *c, uint32_t idx){
         uint32_t txt=ARG(c,1), cap=ARG(c,2);
         fprintf(stderr,"\n*** GUEST MESSAGEBOX ***\n  title: %s\n  text : %s\n***\n",
                 cap?(char*)(g_mem+cap):"(none)", txt?(char*)(g_mem+txt):"(none)");
-        r = 1; }
+        r = 1;
+        /* the debug build's "Error: terminate execution?" (MB_YESNO): No goes on, as a player would choose (ON1: a network
+         * race's HUD asks for a font with no name, fontdtex.c line 300) */
+        if ((ARG(c,3) & 0xFu) == 4u && cap && strstr((char*)(g_mem+cap), "terminate execution")){ r = 7; fprintf(stderr, "  -> No\n"); } }
     else if (pu_call(c, e, &r)) { /* nfs5-web: THRASH driver, DirectX 5-7 creation, mrbupd (pu_imports.c) */ }
     else if (!strcmp(n,"SetConsoleCtrlHandler")) r = 1;
     else if (!strcmp(n,"RtlUnwind"))             r = 0;

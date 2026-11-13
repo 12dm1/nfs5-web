@@ -27,6 +27,7 @@ uint32_t gheap_alloc(int heap, uint32_t n, int zero);
 #define CI_READY   0x578u
 
 static int g_role = -1;              /* 0 off, 1 host, 2 join */
+static int g_online_req;            /* ON1: the Online button was pressed (online_auto) */
 static int g_online;                 /* ON1: through the menus of the Internet mode (NETTEST=online-host|online-join) */
 static int g_players = 2;
 static volatile int g_inrace;
@@ -152,7 +153,13 @@ static int online_tick(CPU *c, uint32_t fe, uint32_t vt){
         command(c, fe, "SETNAMETHENBACK"); on_go(2, "profile"); break;
     case 2:
         if (vt != VT_MAIN || in < 3) break;
-        command(c, fe, "SETTYPEMULTIPLAYER"); navigate(c, fe, "protocol", 1); on_go(3, "multiplayer"); break;
+        command(c, fe, "SETTYPEMULTIPLAYER"); navigate(c, fe, "protocol", 1);
+        if (getenv("NETTEST_UI")){ g_online_req = 1; on_go(7, "online button"); } else on_go(3, "multiplayer");
+        break;
+    case 7:   /* NETTEST_UI: online_auto takes it to the lobby */
+        if (vt == VT_GAMES && cbyte(0xBE)) on_go(5, "in the lobby");
+        else if (in > 60){ LOG("FAIL: the online button did not reach the lobby (status %d, vt %08x)", cint(0x24), vt); on_go(6, "fail"); }
+        break;
     case 3:
         if (g_on_step == 0 && in > 2){ g_on_step = 1; command(c, fe, "SETMODENET"); navigate(c, fe, "accountlogin", 0); }
         if (g_on_step == 1 && in > 5){ g_on_step = 2; set_string(c, "COMMS.ACCOUNTID", acct); set_string(c, "COMMS.PASSWORD", "x"); command(c, fe, "SIGNON"); }
@@ -186,7 +193,67 @@ static int online_tick(CPU *c, uint32_t fe, uint32_t vt){
     }
     return g_on < 6;
 }
+
+/* ---- ON1: the Online button.  The main menu's MULTIPLAYER (renamed "online" by the 004E06D0 override) sets
+ * g_online_req (00510B10 SETTYPEMULTIPLAYER override below); the frontend frame then goes the Internet route by itself:
+ * Internet -> sign on with the profile's account -> our one server -> its lobby (udpip).  Back from the lobby lands on
+ * the server list, which goes back to the main menu. ---- */
+static int g_auto, g_auto_n; static double g_auto_t;
+void sub_00510b10_orig(CPU *);
+void sub_00510b10(CPU *restrict c){ sub_00510b10_orig(c); if (g_role <= 0) g_online_req = 1; }
+static void auto_go(int s){ g_auto = s; g_auto_n = 0; g_auto_t = now_s(); fprintf(stderr, "[online] step %d, status %d\n", s, cint(0x24)); }
+static const char *online_account(void){
+    static char a[24];
+    if (!a[0]){ const char *e = getenv("NFS5_ACCOUNT");
+        if (e && *e) snprintf(a, sizeof a, "%s", e);
+        else { struct timespec t; clock_gettime(CLOCK_REALTIME, &t); snprintf(a, sizeof a, "web%06ld", (long)((t.tv_sec * 7919L + t.tv_nsec / 1000) % 1000000L)); } }
+    return a;
+}
+static void online_auto(CPU *c){
+    uint32_t fe = c->ecx, obj = fe ? MR32(fe + 0xE0) : 0, vt = obj ? MR32(obj) : 0;
+    const double in = now_s() - g_auto_t;
+    if (g_online_req){ g_online_req = 0; auto_go(1); return; }
+    switch (g_auto){
+    case 1:   /* on the protocol screen (the button navigated there): Internet */
+        if (in < 0.3) break;
+        command(c, fe, "SETMODENET"); navigate(c, fe, "accountlogin", 0); auto_go(2); break;
+    case 2:
+        if (in < 0.5) break;
+        if (!g_auto_n){ g_auto_n = 1; set_string(c, "COMMS.ACCOUNTID", online_account()); set_string(c, "COMMS.PASSWORD", "x"); command(c, fe, "SIGNON"); }
+        if (cint(0x24) == 0x0E && vt == VT_SERVERS) auto_go(3);
+        else if (in > 30){ fprintf(stderr, "[online] no answer from the server (status %d)\n", cint(0x24)); auto_go(0); }
+        break;
+    case 3: {
+        uint32_t sv = accessor(c, "Comms.ServerList", RTTI_SERV);
+        int r = sv ? find_row(c, sv, "", "server") : -1;                    /* the row shows once the ping answered */
+        if (r < 0){ if (in > 15){ fprintf(stderr, "[online] no server row\n"); auto_go(0); } break; }
+        set_index(c, sv, r); command(c, fe, "ENTER"); navigate(c, fe, "udpip", 0); auto_go(4); break; }
+    case 4:
+        if (vt == VT_GAMES) auto_go(5);
+        else if (in > 15) auto_go(0);
+        break;
+    case 5:   /* in the lobby or a game; back on the server list = leave online */
+        if (vt == VT_SERVERS){ command(c, fe, "GOBACK"); auto_go(6); }
+        break;
+    case 6:   /* accountlogin -> protocol -> main menu */
+        if (in < 0.4) break;
+        if (vt == VT_MAIN && g_auto_n >= 2){ auto_go(0); break; }
+        if (g_auto_n < 4){ command(c, fe, "GOBACK"); g_auto_n++; g_auto_t = now_s(); }
+        else auto_go(0);
+        break;
+    }
+}
 static void host_mode(CPU *c){
+    {   /* the track (PC net_autotest.cpp PickTrack): NETTEST_TRACK = part of its name, else the list's current row */
+        uint32_t t = accessor(c, "Track1.Track", 0x005DB2A0u);
+        if (!t) LOG("no Track1.Track accessor");
+        else {
+            int n = (int)thiscall(c, t, vfn(t, 0x24), 0, NULL);
+            LOG("tracks: %d", n);
+            int r = find_row(c, t, getenv("NETTEST_TRACK") ? getenv("NETTEST_TRACK") : "", "track");
+            if (r >= 0) set_index(c, t, r);
+        }
+    }
     const char *m = getenv("NETTEST_MODE");             /* the MODE combo: 0 PvP, 1 PvE, 2 career */
     if (!m) return;
     uint32_t pm = accessor(c, "Comms.Positional", RTTI_LOCAL);
@@ -221,7 +288,7 @@ static void fe_tick(CPU *c){
 
 void nettest_hook(CPU *c, uint32_t ip){
     if (g_role < 0) init_role();
-    if (!g_role) return;
+    if (!g_role || (g_online && getenv("NETTEST_UI"))){ if (ip == 0x4D2B80u && !g_busy){ g_busy = 1; online_auto(c); g_busy = 0; } if (!g_role) return; }
     if (ip == 0x4D2B80u) fe_tick(c);
     /* the joiner connects at game start and again when the frontend starts (the second
      * hung it): cmp ecx,ebx / je at 004D3D00 taken = no second join */
