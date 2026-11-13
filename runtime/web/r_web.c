@@ -1015,10 +1015,12 @@ int r_reshape_wanted(int *pw){
     *pw = nw;
     return 1;
 }
+void thrash_screen_width(int w);
 void r_reshape(int nw){
     fprintf(stderr, "[reshape] race screen %dx%d -> %dx%d\n", g_lw, g_lh, nw, g_lh);
     close_draw();
     g_st[THRASH_STATE_SCREEN_WIDTH] = nw;
+    thrash_screen_width(nw);
     g_lw = nw; g_s_video = 0; g_clipvalid = 0;
 }
 void r_pageflip(void){

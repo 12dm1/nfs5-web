@@ -259,6 +259,8 @@ static int thrash_call_locked(CPU *c, const char *name, uint32_t *r){
 }
 
 long metal_frames(void){ return g_frames; }
+/* r_web.c r_reshape: the race's screen took the window's width mid-race; the mouse and getstate follow */
+void thrash_screen_width(int w){ if (w > 0) g_state[ST_SCREEN_W] = (uint32_t)w; }
 void metal_game_size(unsigned *w, unsigned *h){ *w = g_state[ST_SCREEN_W] ? g_state[ST_SCREEN_W] : 640; *h = g_state[ST_SCREEN_H] ? g_state[ST_SCREEN_H] : 480; }
 void thrash_report(void){
     fprintf(stderr, "\n=== THRASH (headless): %llu calls, %ld frames, %llu draws, %u textures, %llu uploads ===\n",
