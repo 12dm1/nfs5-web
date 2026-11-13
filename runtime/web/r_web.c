@@ -380,6 +380,46 @@ static void sprite(const uint8_t *p0, const uint8_t *p1){
     tr.x = b.x; tr.u = b.u; bl.y = b.y; bl.v = b.v;
     quad((uint8_t *)&tl, (uint8_t *)&tr, (uint8_t *)&br, (uint8_t *)&bl);
 }
+/* CP1 (PC dx11_draw.cpp ResolveClipCodes, FillMissingCarNormals): the game's clipper appends the corners of the polygons it cuts to
+ * the EAGL vertex array after the model's own vertices (index >= E+4) with position, colour and UV, never the specular dword that
+ * carries the car normal (runtime/pu_paint.c): those slots keep the codes of an earlier, larger batch, the cut polygons near the
+ * camera shade wrong. A copy of a model corner takes that corner's code; a corner made on the cut, or any corner without a code,
+ * takes the nearest one's on screen. */
+static void car_clip_normals(uint32_t vba, const uint8_t *vb, const uint8_t *ib, DV *o, int nv){
+    const uint32_t eagl = MR32(0x0069E0D4u);
+    if (eagl && vba == eagl + 0x434u){
+        const int orig = (int)MR32(eagl + 4);
+        if (orig > 0 && orig <= 8192){
+            int cut = 0;
+            for (int i = 0; i < nv; i++){
+                const int idx = (int)idx_at(ib, i);
+                if (idx < orig) continue;
+                float p[3]; memcpy(p, vb + idx * g_vstride, 12);
+                o[i].specular = 0;
+                for (int j = 0; j < orig; j++){
+                    float q[3]; memcpy(q, vb + j * g_vstride, 12);
+                    if (q[0] == p[0] && q[1] == p[1] && q[2] == p[2]){ memcpy(&o[i].specular, vb + j * g_vstride + 20, 4); break; }
+                }
+                cut++;
+            }
+            static int logs = 3;
+            if (cut && logs > 0){ logs--; fprintf(stderr, "[paint] clipped car batch: %d of %d corners past the %d model vertices\n", cut, nv, orig); }
+        }
+    }
+    int valid = 0, missing = 0;
+    for (int i = 0; i < nv; i++){ if (o[i].specular & 0xFFu) valid++; else missing++; }
+    if (!missing || !valid) return;
+    for (int i = 0; i < nv; i++){
+        if (o[i].specular & 0xFFu) continue;
+        float best = 3.4e38f; int bi = -1;
+        for (int j = 0; j < nv; j++){
+            if (!(o[j].specular & 0xFFu) || j == i) continue;
+            const float dx = o[j].x - o[i].x, dy = o[j].y - o[i].y, d2 = dx * dx + dy * dy;
+            if (d2 < best){ best = d2; bi = j; }
+        }
+        if (bi >= 0) o[i].specular = o[bi].specular & 0x00FFFFFFu;
+    }
+}
 static uint32_t g_pv_vb, g_pv_ib; static int g_pv_count, g_pv_slot;
 static float g_pv_uv[MAX_VERTS * 2];
 static void draw_any(const char *n, const uint32_t *a);
@@ -437,6 +477,7 @@ static void draw_any(const char *n, const uint32_t *a){
         for (int i = 0; i < nv; i++) o[i] = conv(VI(vb, ib, i));
         const int bound = tan_substitute(g_bound);
         const int paintable = (g_race || MR32(0x0065B928u)) && !g_cap;
+        if (paintable && bound && (g_tex[bound - 1].paint || (g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_slot))) car_clip_normals(a[1], vb, ib, o, nv);
         if (paintable && bound && g_tex[bound - 1].paint){
             g_pv_vb = a[1]; g_pv_ib = a[2]; g_pv_count = count; g_pv_slot = bound;
             for (int i = 0; i < nv; i++){ g_pv_uv[i * 2] = o[i].u; g_pv_uv[i * 2 + 1] = o[i].v; }
