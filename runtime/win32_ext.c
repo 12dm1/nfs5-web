@@ -1497,6 +1497,13 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
               if (g_reg[ri].is_str) sval = g_reg[ri].sv;
               else { dval = g_reg[ri].dw; have_d = 1; }
           } }
+#ifdef __wasm__
+        /* nfs5-web ON1: the Internet mode's entry server.  The login (00509953 -> 0048E1A0 -> 0048AC90) resolves only
+         * the numeric "a.b.c.d.port" form here; with the default name porsche-entry.earacing.com the join went to a
+         * stack-garbage address.  The browser's server is 10.77.0.1 on the virtual network (runtime/web/winsock_web.c),
+         * whatever the game stored before. */
+        if (!strcasecmp(vn, "Primary Address")){ sval = getenv("NFS5_ENTRY") ? getenv("NFS5_ENTRY") : "10.77.0.1.9442"; have_d = 0; }
+#endif
         if (sval || have_d) { /* the stored value will be used */ }
         /* v12na: the registry is now persistent (reg_save), and the game
          * writes NotFirstTime itself on its first start.  A fake

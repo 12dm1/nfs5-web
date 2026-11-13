@@ -104,3 +104,6 @@
 005CDB78  06000000    01000000
 005CDB90  05000000    01000000
 005CDB94  06000000    01000000
+# ON1 online: the Internet mode's update check (UGameUpdater 004A56E0) never starts, whatever fe.txt's castanet says
+# (the clean fe.txt has castanet=1: "Checking for updates..." would wait for EA's dead updater; PC mod N1 set castanet=0)
+004A56EA  750C          9090              # jne past "status = 0; return" -> fall into it

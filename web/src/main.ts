@@ -6,6 +6,7 @@ import { HostKind } from './host/abi';
 import { MANIFEST_URL, DATA_BASE } from './host/datacache';
 import { attachRenderer, raceMode } from './gpu/renderer';
 import { attachInput } from './input';
+import { attachLan } from './net/lan';
 
 const q = new URLSearchParams(location.search);
 const statusEl = document.getElementById('status')!;
@@ -19,7 +20,13 @@ if (toServer) setInterval(() => {
   const body = pendingLog.join('\n') + '\n'; pendingLog = [];
   void fetch('/test-log', { method: 'POST', body });
 }, 500);
-const log = (s: string) => { if (toServer) pendingLog.push(s); else console.log(s); };
+// tag=<name>: every line starts with [name] (several games on one test server: web/tools/online_test.mjs)
+const tag = q.get('tag') ? `[${q.get('tag')}] ` : '';
+const NL = String.fromCharCode(10);
+const log = (s: string) => {
+  if (!toServer) { console.log(s); return; }
+  pendingLog.push(tag ? s.split(NL).filter(l => l.length).map(l => tag + l).join(NL) : s);
+};
 
 function attachAudio(memory: WebAssembly.Memory, ptr: number) {
   const ac = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
@@ -69,6 +76,8 @@ async function main() {
   g.game = p;
   void p.registered(HostKind.Input).then(r => attachInput(p.memory, r.ptr, canvas));
   void p.registered(HostKind.Audio).then(r => attachAudio(p.memory, r.ptr));
+  // the game's Winsock (runtime/web/winsock_web.c) registers its mailbox at WSAStartup
+  void p.registered(HostKind.Lan).then(r => { g.lan = attachLan(p.memory, r.ptr, log); });
   const shots = (q.get('shots') ?? '').split(',').filter(Boolean).map(Number);
   const r = await p.registered(HostKind.Gpu);
   const stats = await attachRenderer(p.memory, r.ptr, canvas, log, shots);
