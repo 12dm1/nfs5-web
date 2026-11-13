@@ -479,7 +479,8 @@ static uint32_t dsbuf_call(CPU *c, uint32_t b, int m, const uint32_t *a){
             if (g_audio_stat_w && sz >= 16384u){          /* AUDIOSTAT: the gaps between the game's writes to a streamed buffer */
                 static uint64_t t_last, t_rep; static uint32_t gmax, g15, g25, g40, nw;
                 const uint64_t t = now_us();
-                if (t_last){ const uint32_t g = (uint32_t)(t - t_last); if (g > gmax) gmax = g; g15 += g > 15000; g25 += g > 25000; g40 += g > 40000; nw++; }
+                if (t_last){ const uint32_t g = (uint32_t)(t - t_last); if (g > gmax) gmax = g; g15 += g > 15000; g25 += g > 25000; g40 += g > 40000; nw++;
+                    static int shown; if (g > 30000 && shown < 300){ shown++; fprintf(stderr, "[audiostat] write gap %.1f ms, ended at t=%.3f\n", g / 1000.0, (double)(t % 1000000000u) / 1e6); } }
                 t_last = t;
                 if (!t_rep) t_rep = t;
                 if (t - t_rep >= 10000000u){

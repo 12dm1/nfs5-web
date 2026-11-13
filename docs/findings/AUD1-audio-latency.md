@@ -57,10 +57,42 @@ On top of that the C mixer thread kept 50 ms in a ring for the worklet, and the 
 Chrome renders 4 quanta (10.7 ms) at once, so the margin cannot go much below one burst plus the writer's response.
 Left over: the output buffer of the browser and device, and the first seconds of a race (loads stall the writer).
 
+## AUD1b: breaks while a race or a menu car loads (2026-11-13)
+
+The user heard the sound drop out at loads. With the margin a few ms, every stall of the game's sound thread longer
+than it is heard. `GILLOG=20` + `IOSLOW=4` (below) showed who held the guest lock meanwhile, and on what it waited:
+
+| holder | what | per stall | fix |
+|---|---|---|---|
+| loader thread (tid 102) | `CreateFileMappingA` of a file: the whole file read under the lock (`fileio_read_at`) | 40-100 ms | read with the lock released |
+| loader / main thread | `CreateFileA`: the path's case-insensitive lookup (stat, readdir: 4-8 round trips of ~5 ms to the I/O worker while it serves the loader) and the open (30-40 ms: the file's cache on this device is opened) | 20-60 ms | lookup and open with the lock released (the overlay cache got its own mutex); `CloseHandle`'s close too |
+| main thread | THRASH texture uploads one after another (host code: no guest back-edge, no 1024th Win32 call to yield at) | 23-39 ms | `guest_yield_if_long(4 ms)` at each THRASH call: the lock is handed over when someone queues |
+| music thread | `zzzymus.viv` reads of 40-90 ms on a first game (blocks from the server) | - | already outside the lock (ReadFile); the game's music lead covers them |
+
+And in the worklet: after an underrun the margin grows by the silence that followed (a load stalls again and again;
+the next stall is then heard as nothing), up to 60 ms; after 3 s without one it goes back at 3 ms a second (the rate
+trim follows at 5). The least margin is 4 ms (2 gave a short underrun every few seconds). An underrun fades out
+what is left and the stream fades back in (no click). `AUDIOSTAT=1` logs every silence of 15 ms or more
+(`[audiostat] worklet: silent ...`) and every write gap of the game over 30 ms, on the same clock.
+
+A race start (fe=0, coastal, the data on this device), audible silences of 15 ms or more:
+
+| | silences | longest | game write gaps over 40 ms |
+|---|---|---|---|
+| before | 2-3 per load (and more on a first game) | 38-53 ms | 2-12 |
+| after | 0-1, at the game's own start (the intro, before any sound) | 19 ms | 0 |
+
+In a race after it: margin 25 ms on average, 0 underruns in most 10 s windows, 144 fps as before. The menus: the
+first open of each FE control file for writing (copied into the save folder once) and the folder listings at the
+menu's start still hold the lock for 25-45 ms, once per game; the menus' car loads go through the paths above.
+Not driven through the menus' car list by a script (the test's clicks did not reach the menu buttons there).
+
 ## Diagnostics
 
 - `?env=AUDIOSTAT=1`: every 10 s the game's write gaps (`[audiostat] game writes`) and the worklet's margins,
   underruns, wake-ups, rms and the context's latencies (`[audiostat] worklet`).
+- `?env=GILLOG=20,IOSLOW=4`: every hold of the guest lock over 20 ms (holder, the host waits in it) and every host
+  call over 4 ms (I/O round trip or sleep, per thread): what keeps the sound thread from writing.
 - `?env=SLEEPSTAT=1`: short sleeps of the guest, how late they wake and how long they wait for the lock.
 - `?env=NFS5_AUDIOMIX=ring`: the previous ring path (AUDIOSTAT then prints the ring's fill and the game's lead).
 

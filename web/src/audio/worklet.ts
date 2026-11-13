@@ -16,9 +16,11 @@ const AUD1 = 0x41554431, AUD2 = 0x41554432;
 const B_SIZE = 4, B_DATA = 8, B_FLAGS = 12, B_BPS = 16, B_ALIGN = 20, B_STATE = 24, B_POS = 28, B_T0LO = 32, B_T0HI = 36,
   B_FMT = 44, B_VOL = 68, B_PAN = 72, B_WHEAD = 80, B_WCNT = 84;
 const SBUF_MAX = 256;
-const SAFE_MS = 2;          // the least margin to keep before the game's next write
+const SAFE_MS = 4;          // the least margin to keep before the game's next write (2 ms gave a short underrun every few seconds in races)
 const START_MS = 10;        // margin to start with, and after running into the writer
-const WAKE_MS = 14;         // below this margin over the least one (more than a burst: Chrome renders ~4 quanta at once), the game's sound thread is woken to write more
+const WAKE_MS = 14;
+const EXTRA_MAX_MS = 60;    // the most margin a run of stalls (a loading screen, the menus loading a car) can add
+const CALM_S = 3;           // no underrun for this long: the added margin goes back, 3 ms a second (the rate trim follows at 5)         // below this margin over the least one (more than a burst: Chrome renders ~4 quanta at once), the game's sound thread is woken to write more
 
 const dbGain = (v: number) => v >= 0 ? 1 : v <= -10000 ? 0 : Math.pow(10, v / 2000);
 
@@ -30,6 +32,10 @@ interface Stream {
   adj: number;                              // rate trim, +-0.5 %
   extra: number;                            // margin added after underruns, source frames
   minFill: number; win: number;
+  quiet: number;                            // host us where the current silence began (-1: playing)
+  why: string;
+  lastUnder: number;                        // context time of the last underrun
+  fadeIn: boolean;                          // the first quantum after a silence ramps up (no click)
 }
 interface Fmt { data: number; al: number; ch: number; bits: number; nfr: number }
 
@@ -167,7 +173,7 @@ class Mixer extends AudioWorkletProcessor {
     const wrap = (x: number) => ((x % nfr) + nfr) % nfr;
     let v = this.streams.get(b);
     if (!v || v.data !== f.data || v.size !== nfr * f.al || v.ms !== ms) {
-      v = { data: f.data, size: nfr * f.al, ms, rd: wrap(headF - START_MS * ms), holding: true, adj: 0, extra: 0, minFill: Infinity, win: 0 };
+      v = { data: f.data, size: nfr * f.al, ms, rd: wrap(headF - START_MS * ms), holding: true, adj: 0, extra: 0, minFill: Infinity, win: 0, quiet: this.st, why: 'start', lastUnder: -1e9, fadeIn: true };
       this.streams.set(b, v);
     }
     const target = SAFE_MS * ms + v.extra;
@@ -178,11 +184,29 @@ class Mixer extends AudioWorkletProcessor {
     if (v.holding) {
       if (fill < target + START_MS * ms) return;           // wait for a margin again
       v.holding = false;
+      // the game's writer stalled for about as long as this silence: keep that much more in hand, so the next stall
+      // of a run (a load reads and decodes for seconds) is heard as nothing
+      if (v.why !== 'start' && v.quiet >= 0) v.extra = Math.min(v.extra + (this.st - v.quiet) / 1000 * ms, EXTRA_MAX_MS * ms);
+      this.heard(v, fill / ms);
+      v.fadeIn = true;
     }
     if (fill - need < 1) {                                 // this quantum would read what the game has not written yet
       this.s.underruns++;
-      v.extra = Math.min(v.extra + 3 * ms, 40 * ms);
+      // what there is, faded out: a cut to silence clicks
+      let rd = v.rd;
+      const k = fill > 1 ? Math.min(frames, Math.floor((fill - 1) / step)) : 0;
+      if (gl > 0 || gr > 0) for (let i = 0; i < k; i++) {
+        const i0 = Math.floor(rd), i1 = i0 + 1 >= nfr ? 0 : i0 + 1, x = rd - i0, g = 1 - i / k;
+        const l0 = this.sample(f, i0, 0), l1 = this.sample(f, i1, 0), r0 = this.sample(f, i0, 1), r1 = this.sample(f, i1, 1);
+        l[i] += g * gl * (l0 + (l1 - l0) * x);
+        r[i] += g * gr * (r0 + (r1 - r0) * x);
+        rd += step; if (rd >= nfr) rd -= nfr;
+      }
+      if (k > 0) v.rd = gl > 0 || gr > 0 ? rd : wrap(v.rd + k * step);
+      v.extra = Math.min(v.extra + 3 * ms, EXTRA_MAX_MS * ms);
+      v.lastUnder = currentTime;
       v.holding = true;
+      v.quiet = this.st; v.why = fill < 0 ? `past the writer by ${(-fill / ms).toFixed(1)} ms` : 'ran into the writer';
       return;
     }
     if (fill > target + 60 * ms) {                         // far behind (the game wrote a long stretch at once): catch up
@@ -191,12 +215,13 @@ class Mixer extends AudioWorkletProcessor {
       fill = target + START_MS * ms;
     }
     let rd = v.rd;
+    const fade = v.fadeIn; v.fadeIn = false;
     if (gl > 0 || gr > 0) {
       for (let i = 0; i < frames; i++) {
-        const i0 = Math.floor(rd), i1 = i0 + 1 >= nfr ? 0 : i0 + 1, x = rd - i0;
+        const i0 = Math.floor(rd), i1 = i0 + 1 >= nfr ? 0 : i0 + 1, x = rd - i0, g = fade ? i / frames : 1;
         const l0 = this.sample(f, i0, 0), l1 = this.sample(f, i1, 0), r0 = this.sample(f, i0, 1), r1 = this.sample(f, i1, 1);
-        l[i] += gl * (l0 + (l1 - l0) * x);
-        r[i] += gr * (r0 + (r1 - r0) * x);
+        l[i] += g * gl * (l0 + (l1 - l0) * x);
+        r[i] += g * gr * (r0 + (r1 - r0) * x);
         rd += step; if (rd >= nfr) rd -= nfr;
       }
     } else { rd += need; if (rd >= nfr) rd -= nfr; }
@@ -211,9 +236,16 @@ class Mixer extends AudioWorkletProcessor {
       const err = v.minFill - target;
       v.adj = Math.max(-0.005, Math.min(0.005, err / (fps / 2)));
       if (Math.abs(v.adj) > this.s.maxAdj) this.s.maxAdj = Math.abs(v.adj);
-      v.extra = Math.max(0, v.extra - 0.1 * ms);           // 1 ms back every 5 s
+      v.extra = Math.max(0, v.extra - (currentTime - v.lastUnder > CALM_S ? 1.5 : 0.1) * ms);   // calm: 3 ms a second, else 1 ms every 5 s
       v.minFill = Infinity; v.win = 0;
     }
+  }
+
+  /** the stream plays again after a silence: AUDIOSTAT logs the long ones (host time, as the game's [audiostat] lines) */
+  heard(v: Stream, fill: number) {
+    const d = (this.st - v.quiet) / 1000;
+    if (this.stat && v.quiet >= 0 && d >= 15) this.port.postMessage({ stat: `silent ${d.toFixed(1)} ms (${v.why}), back at t=${((this.st % 1e9) / 1e6).toFixed(3)} with ${fill.toFixed(1)} ms` });
+    v.quiet = -1;
   }
 
   /** wakes the game's sound thread (its Sleep waits on this word: runtime/win32_ext.c, pu_audio_wake) */

@@ -783,6 +783,21 @@ static int mutex_take_now(Obj *o, uint32_t me){
     return got;
 }
 
+/* nfs5-web: a long run of host calls on one thread (THRASH texture uploads while a race or a menu car loads)
+ * never reaches a guest back-edge or the 1024th Win32 call: hand the lock over at a call boundary when someone
+ * queues and this thread has held it for `ms`.  The DirectSound feeder waited up to 40 ms behind the game
+ * thread there, and the sound broke up at every load. */
+void guest_yield_if_long(double ms){
+#ifdef __wasm__
+    if (tl_noyield || !tl_holding || g_gil_use_mx > 0 || !ticket_queued(&g_gil)) return;
+    if (nfsu2_now_ms() - tl_acq_ms < ms) return;
+    g_gil_fair_yields++;
+    guest_yield_begin();
+    guest_yield_end();
+#else
+    (void)ms;
+#endif
+}
 void guest_fair_yield(void){
     /* nfs5-web: also inside a critical section.  The sections are real host
      * mutexes now (a thread that wants one waits for it without the guest

@@ -20,6 +20,13 @@ let tid = 0;
 // in ms: the runtime subtracts it from the time it held the guest lock to get
 // the guest thread's busy time (runtime/win32_ext.c, [status] gcpu)
 let blockedMs = 0;
+// IOSLOW=<ms> (diagnostics): every host call (I/O round trip, sleep) of this thread that took longer goes into the log,
+// to find what holds the guest lock with GILLOG (runtime/win32_ext.c): the sound broke up behind file opens
+let slowShown = 0, slowMs = -1;
+const slow = (took: number, what: () => string) => {
+  if (slowMs < 0) slowMs = Number(cfg.env.IOSLOW) || 0;
+  if (slowMs > 0 && took > slowMs && slowShown < 2000) { slowShown++; post({ t: 'log', fd: 2, tid, s: `[ioslow] thread ${tid}: ${what()} ${took.toFixed(1)} ms` }); }
+};
 const post = (m: ToPage) => (self as unknown as Worker).postMessage(m);
 
 const u8 = () => new Uint8Array(memory.buffer);
@@ -58,7 +65,9 @@ function io(op: Op, ...args: (number | bigint)[]): number {
     post({ t: 'log', fd: 2, tid, s: `[io] thread ${tid}: ${opName(op)} (fd ${args[0] ?? '-'}) unanswered for ${(w / 1000).toFixed(0)} s; ` +
       (runs ? 'the I/O worker runs (this request is stuck in it)' : 'the I/O worker has stopped (its loop has not run since)') });
   }
-  blockedMs += performance.now() - t0;
+  const took = performance.now() - t0;
+  blockedMs += took;
+  slow(took, () => `${opName(op)} (${args.slice(0, 3).join(',')})`);
   const r = rpcI32[b + 2];
   Atomics.store(rpcI32, b, RPC_IDLE);
   return r;
@@ -107,7 +116,7 @@ function sleepNs(ns: bigint) {
   let ms = Number(ns) / 1e6;
   if (timerGrid < 0) timerGrid = Number(cfg.env.NFSU2_TEST_TIMER_MS) || 0;
   if (ms > 0 && timerGrid > 0) { const now = T0MS + performance.now(); ms = Math.ceil((now + ms) / timerGrid) * timerGrid - now; }
-  if (ms > 0) { const t0 = performance.now(); Atomics.wait(ctl, CTL_SLEEP, 0, ms); blockedMs += performance.now() - t0; }
+  if (ms > 0) { const t0 = performance.now(); Atomics.wait(ctl, CTL_SLEEP, 0, ms); const took = performance.now() - t0; blockedMs += took; slow(took, () => 'sleep'); }
 }
 
 function strings(list: string[]) { return list.map(s => te.encode(s + '\0')); }
