@@ -422,6 +422,7 @@ function onAppMessage(c, data) {
       // Client display (004C24F0): to == -1 -> "<from>: text", to == own id ->
       // whisper, else "<from> whispers to <to>"; names resolved by member id.
       const all = to === 0xffffff;
+      if (c.game && all && text.startsWith('/') && chatCommand(c, text.trim())) return;
       if (c.game) {
         const line = lobbyMsg(0xbb, c.gameSlot, all ? -1 : to, text);
         for (const m of c.game.members) if (all || m.gameSlot === to || m === c) sendReliable(m, line);
@@ -686,6 +687,47 @@ function gameChat(g, text) {
   if (!from) return;
   for (const m of g.members) sendReliable(m, lobbyMsg(0xbb, from.gameSlot, -1, text));
 }
+// Chat commands in a game's chat (the line itself is not shown to the others): the tournament without a menu of its own.
+function chatTo(g, m, text) {
+  const from = (g.members.find(isBot) || g.host || m);
+  sendReliable(m, lobbyMsg(0xbb, from.gameSlot, -1, text));
+}
+function chatCommand(c, text) {
+  const g = c.game, [cmd, arg] = text.split(/\s+/);
+  const T = g.tournament;
+  switch (cmd.toLowerCase()) {
+    case '/help':
+      chatTo(g, c, 'Commands: /events [page], /event <id> (creator, MODE = career, before race 1), /table');
+      return true;
+    case '/events': {
+      const page = Math.max(1, +arg || 1), per = 6, n = Math.ceil(EVENTS.length / per);
+      chatTo(g, c, `Tournaments (page ${Math.min(page, n)}/${n}):`);
+      for (const t of EVENTS.slice((page - 1) * per, page * per))
+        chatTo(g, c, `#${t.id} ${t.title.replace(/^.*?: /, `${t.groupName}: `)}${t.fee ? `, fee ${t.fee} DM` : ''}`);
+      return true;
+    }
+    case '/event': {
+      const def = EVENTS.find(t => t.id === +arg);
+      if (g.host !== c) chatTo(g, c, 'Only the creator of the game picks the tournament');
+      else if (g.raceMode !== RACE_MODE_CAREER) chatTo(g, c, 'Set MODE to "Career tournament" first');
+      else if (T && T.entrants.size && !T.done) chatTo(g, c, `Tournament #${T.def.id} has started (race ${T.race + 1}/${T.def.races.length})`);
+      else if (!def) chatTo(g, c, `No tournament #${arg} (see /events)`);
+      else {
+        g.tournament = createTournament(def, log);
+        log(`  game #${g.id}: tournament ${def.title} (chosen by ${c.account})`);
+        gameChat(g, `Tournament ${def.groupName} #${def.id}: ${def.races.length} races`);
+        syncBots(g); assignBotCars(g); broadcastGame(g);
+        careerNext(g);
+      }
+      return true;
+    }
+    case '/table':
+      if (!T || !T.entrants.size) chatTo(g, c, T ? `Tournament #${T.def.id}: not started` : 'No tournament in this game');
+      else chatTo(g, c, `#${T.def.id} after race ${T.race}/${T.def.races.length}: ${T.table().join(', ')}`);
+      return true;
+  }
+  return false;
+}
 function careerMode(g) {
   // the frontend sends the MODE record again when it comes back from a race, briefly with another value: a tournament
   // that has started (entrants fixed at its first race) stays
@@ -721,6 +763,7 @@ function careerResults(g, T, row, times) {
 function control(c, text) {
   log(`  control <- ${c.account}: ${text}`);
   const g = c.game;
+  if (g && text.startsWith('chat ')) { chatCommand(c, text.slice(5).trim()); return; }   // tests: a chat command
   if (!g || g.host !== c) return;
   if (text === 'hello' && g.tournament) { careerNext(g); return; }
   const T = g.tournament;

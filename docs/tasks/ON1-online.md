@@ -76,6 +76,12 @@ the lobby (server list again) it goes `GOBACK` to the main menu. The persona sho
 
 A player who leaves keeps the points so far and gets nothing more; a bot takes the free slot.
 
+Chat commands in the game's chat (the server answers only the sender; the line is not shown to the others):
+`/help`, `/events [page]` (27 events, 6 per page: id, era / club, tracks, fee), `/event <id>` (the creator, MODE =
+career, before race 1: other event, its opponents' cars for the bots, the new first track), `/table` (standings).
+Tested through the control line (`NETTEST_CHAT=/event 9`: the host switched to #9 and set Pyrenees; in Git Bash set
+`MSYS_NO_PATHCONV=1` or "/event" becomes a Windows path).
+
 ## Stage 2: the career of each player
 
 After each race the server sends every human `career id=<event> race=<r> of=<n> fee=<fee> results p:t p:t ...` in that

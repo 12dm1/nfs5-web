@@ -282,7 +282,11 @@ static void career_tick(CPU *c, uint32_t fe, uint32_t vt){
     char m[512];
     while (online_ctl_recv(m, sizeof m)){
         fprintf(stderr, "[online] server: %s\n", m);
-        if (!strncmp(m, "race ", 5)){ snprintf(g_dir, sizeof g_dir, "%s", m); g_dir_new = 1; }
+        if (!strncmp(m, "race ", 5)){
+            snprintf(g_dir, sizeof g_dir, "%s", m); g_dir_new = 1;
+            static int chat_sent;                     /* tests: NETTEST_CHAT = a chat command once the tournament is on */
+            if (!chat_sent && getenv("NETTEST_CHAT")){ char t[200]; snprintf(t, sizeof t, "chat %s", getenv("NETTEST_CHAT")); online_ctl_send(t); chat_sent = 1; }
+        }
         else if (!strcmp(m, "over")) g_dir[0] = 0;
         else if (!strncmp(m, "humans ", 7)) g_humans = atoi(m + 7);
         else if (!strncmp(m, "career ", 7)) career_apply(c, m);
