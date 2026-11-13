@@ -34,7 +34,10 @@ Acceptance per feature in the browser (the PC mod's acceptance list as the check
 
 ## Step 4 — online
 
-Decided 2026-11-05: the nfsu2-web way (github.com/th0mk/nfsu2-web, revision in `_mod/web/upstream/REVISION`), not started yet.
+Decided 2026-11-05: the nfsu2-web way (github.com/th0mk/nfsu2-web, revision in `_mod/web/upstream/REVISION`).
+**Started 2026-11-13 on branch `online` (ON1, `docs/tasks/ON1-online.md`)**: the virtual network, the Internet mode
+against our NetGather server (`web/online`), the Online button, PvP / PvE races between browsers and the first stage of
+career tournaments (server-owned standings) work; the per-player career effects and the deployment are next.
 
 - A virtual LAN: the runtime's Winsock answers the game's sockets with a virtual stack (their `runtime/web/net_lan.c`):
   every browser gets a 10.77.x.x address, UDP / TCP / ICMP go through a mailbox ring in wasm memory (their

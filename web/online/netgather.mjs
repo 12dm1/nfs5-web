@@ -566,6 +566,7 @@ function onAppMessage(c, data) {
         log(`  game #${g.id}: ${c.account} leaving the race`);
       } else {
         log(`  game #${g.id}: ${c.account} finished in ${fmtTime(a)} (best lap ${fmtTime(b)})`);
+        c.finishTime = a;               // ON2: a player's own finish time is the one that counts (tournaments)
       }
       return;
     }
@@ -605,6 +606,7 @@ function startRace(g) {
     for (const m of g.members) sendUnreliable(m, lobbyMsg(0xc4, 0, t));
   }, 1000);
   if (g.tournament && !g.tournament.done) for (const m of g.members) g.tournament.enter(m.gameSlot, m.persona, isBot(m));
+  for (const m of g.members) m.finishTime = undefined;
   log(`  game #${g.id}: race start`);
 }
 // Host tick 0048B6B0: the ring advances only after C5 and once every racer
@@ -685,7 +687,9 @@ function gameChat(g, text) {
   for (const m of g.members) sendReliable(m, lobbyMsg(0xbb, from.gameSlot, -1, text));
 }
 function careerMode(g) {
-  if (g.raceMode !== RACE_MODE_CAREER) { if (g.tournament && !g.tournament.race) g.tournament = null; return; }
+  // the frontend sends the MODE record again when it comes back from a race, briefly with another value: a tournament
+  // that has started (entrants fixed at its first race) stays
+  if (g.raceMode !== RACE_MODE_CAREER) { if (g.tournament && !g.tournament.entrants.size) g.tournament = null; return; }
   if (g.tournament || !EVENTS.length) return;
   const want = /#(\d+)/.exec(g.name || '');
   const def = (want && EVENTS.find(t => t.id === +want[1])) || EVENTS[0];
@@ -708,12 +712,16 @@ function control(c, text) {
   if (text === 'hello' && g.tournament) { careerNext(g); return; }
   const T = g.tournament;
   if (!text.startsWith('result ') || !T || T.done) return;
-  const places = new Map(), times = new Map();
+  // The creator's array has the bots' (and its own) result; a remote player's finish may come after the creator left
+  // the race, so a player's own B7 time counts, and a player without one did not finish. Places by time.
+  const places = new Map(), times = new Map(), done = [];
   for (const f of text.slice(7).trim().split(/\s+/)) {
     const [slot, place, time] = f.split(':').map(Number);
-    if (place > 0 && place <= 8) places.set(slot, place);
-    times.set(slot, time || 0);
+    const m = g.members.find(x => x.gameSlot === slot);
+    if (m && !isBot(m)) { if (m.finishTime >= 0) done.push([slot, m.finishTime]); continue; }
+    if (place > 0 && place <= 8 && time > 0) done.push([slot, time]);
   }
+  done.sort((a, b) => a[1] - b[1]).forEach(([slot, time], i) => { places.set(slot, i + 1); times.set(slot, time); });
   const row = T.finish(places, times);
   if (!row) return;
   const lines = [...row.entries()].sort((a, b) => (a[1].place || 99) - (b[1].place || 99))
@@ -721,6 +729,12 @@ function control(c, text) {
   gameChat(g, `Race ${T.race}/${T.def.races.length}: ${lines.join(', ')}`);
   gameChat(g, `${T.done ? 'Final' : 'Standings'}: ${T.table().join(', ')}`);
   log(`  game #${g.id}: ${T.done ? 'final' : 'standings'} ${T.table().join(' | ')}`);
+  if (T.done) {                       // the next event of the list for the next start
+    const i = EVENTS.indexOf(T.def);
+    g.tournament = createTournament(EVENTS[(i + 1) % EVENTS.length], log);
+    log(`  game #${g.id}: tournament ${g.tournament.def.title}`);
+    gameChat(g, `Next tournament ${g.tournament.def.groupName} #${g.tournament.def.id}: ${g.tournament.def.races.length} races`);
+  }
   careerNext(g);
 }
 function broadcastGame(g) { for (const m of lobbyMembers()) sendReliable(m, gameEntry(g)); }

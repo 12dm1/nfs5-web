@@ -52,7 +52,7 @@ while (Date.now() - t0 < SECONDS * 1000 && !verdict) {
       return sl.length >= games.length && sl.every(v => v > 20);
     });
     // career (--mode 2): the whole tournament, up to the server's final table
-    if (ok && (MODE !== '2' || /\] {2}game #\d+: final/.test(all))) verdict = 'PASS';
+    if (ok && (MODE !== '2' || /\]\s+game #\d+: final/.test(all))) verdict = 'PASS';
   }
 }
 console.log(verdict || 'FAIL (timeout)');
