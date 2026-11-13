@@ -18,10 +18,11 @@ Research: `docs/research/ON1-nfsu2-web-network.md` (how nfsu2-web does it), `doc
 | The game's Internet mode against our own NetGather server, in the browser | works: login, server ping, lobby, chat, games |
 | **Online** button (main menu) -> lobby | works: about 7 s, the login / server screens flash by |
 | PvP race between two browsers | **PASS** (`online_test.mjs --mode 0 --env NETTEST_UI=1`, 288cf63) |
-| Race modes in the create screen: Quick race / Quick race + bots / Career tournament | in the MODE combo; PvE bots drive (7 bots + host seen racing), two-player PvE test to redo |
-| Career tournament, server side | event from `nfs5.trn`, its opponents as bots, track + laps sent to the host, points / money / standings in the game's chat; first test running |
-| Career tournament, local career effects (cash, year, era, prize cars) | not started (stage 2, below) |
-| Deployment to nfs5-reforged.duckdns.org | not started |
+| Race modes in the create screen: Quick race / Quick race + bots / Career tournament | in the MODE combo; PvE with 2 browsers + 6 bots **PASS** |
+| Career tournament, server side | event from `nfs5.trn`, its opponents as bots, track + laps sent to the host, points / money / standings in the game's chat; the whole 2-race event **PASS** (709a94a) |
+| Career tournament, local career effects | stage 2: points, race prize, bonus, final prize, event progress / year / era by the stock code, profile saved; **PASS** in the 2-race test (cash seen growing) |
+| Online server without the game files (`web/online/standalone.mjs`), page `?lan=wss://host/lan` | works locally (smoke + browser race through it) |
+| Deployment to nfs5-reforged.duckdns.org | `deploy/` (service + nginx `/lan`), see below |
 
 ## How it fits together
 
@@ -75,13 +76,27 @@ the lobby (server list again) it goes `GOBACK` to the main menu. The persona sho
 
 A player who leaves keeps the points so far and gets nothing more; a bot takes the free slot.
 
-## Stage 2: the career of each player (not started)
+## Stage 2: the career of each player
 
-ON2 section 4 recommends a hybrid: a separate online profile (a normal `.sav`, master copy on the server), the stock
-code applies the server's results. Per client: `DAT_00691E6C` = the event, 004EDE20 hook so the race counts as type 4,
-the results array reordered so the local car is entry 0, `005DB768/76C` set (`00503940`); then 004EDF00 / 00503AD0 pay
-the prizes, count the podium, move the year and era. Open points from ON2: remote use of 0x14B parts, 0x247 starting
-grid for other slots, the tournament result screen in a type-3 race.
+After each race the server sends every human `career id=<event> race=<r> of=<n> fee=<fee> results p:t p:t ...` in that
+player's own numbering (entry 0 = the player, the others by slot; a car that did not finish gets the places after the
+finishers). `runtime/nettest.c career_apply` runs the stock pieces of 004EDF00 type 4 (ON2 4.1 route B) on the profile's
+tournament table (`00691E58`):
+
+- race 1: `00503E40(id)` clears the event's old results, the entry fee is paid (`005012E0(-fee)`; not enough cash = not
+  applied);
+- `005DB768/76C` = race / event, `00503960(entry, time, place, 1)` for every entry (points 9 - place, prize, bonus),
+  cash += `00505740()` + `005057A0()`; after the last race (`005056D0() == 0`) also the final prize
+  `00505770(00505710())`;
+- `00503A50`, `00503AD0(id)`: next race, or the event done: club +1, era event on the podium: year step, all era events
+  done = the next era;
+- the offline career's current event / race (`00691E6C/7C`) is put back unless the era moved; the profile is saved
+  (`004DEDA0(00501270())`, "Saving for ...").
+
+Rules of the prototype: only events of a club or of an era the profile has reached (`+004 <= 00691E50`); only when the
+client had the event from its first race. Not done yet: a separate online profile (ON2 recommends one, so single-player
+careers are never mixed with online results), the owned-car check (any car may start), damage / mileage of the owned
+car, the prize-car race after an era, server-side checks.
 
 ## Known problems / workarounds
 
@@ -90,8 +105,25 @@ grid for other slots, the tournament result screen in a type-3 race.
   Which HUD element it is: not found yet (the name is not in the EXE; the HUD files `hud.psh` / `font.pfn`).
 - The driver picture: the loading screen of a network race draws every player's `pic16.fsh` (file sharing); without
   it the loop at 004A51C0 ran on garbage. `gimme.dll!ConvertFile` is now ported from the PC CF1 (`pu_imports.c`).
-- The game name shows as "THIS IS A BUG" in the games list (a string id the list asks for); cosmetic, open.
+- The games list's MODE column read "THIS IS A BUG" (record +0x35 = the old positional value): now the race mode.
+- A network race never ends by itself (00417010): every player leaves through the race menu (the tests do it 5 s
+  after the finish, `nettest_race`). A real player needs to know that: open point for the design.
 - Old test hosts: `nettest.c` counted bots as players; it waits for the server's `humans N` line now.
+
+## Deployment
+
+The online server needs no game files from the player, only `nfs5.car` (bot cars) and `nfs5.trn` (tournaments), copied
+to the host by the deploy (never into git). On the VPS of nfs5-reforged.duckdns.org (SSH alias `louditude`):
+
+- `deploy/nfs5-web-online.service`: `node /opt/nfs5-web-online/online/standalone.mjs --port 9450` on the loopback, logs
+  in `/var/lib/nfs5-web-online`; the PC game server (`nfs5-netserver`, UDP / TCP 9443) is a separate service, untouched;
+- `deploy/nginx-lan.conf`: `location = /lan` (WebSocket proxy) and `/lan-status` (JSON: players, games, tournaments),
+  inserted by `deploy/install-online.sh` into the live `nfs5-reforged.conf`. **The nfs5-reforged repo's own copy of that
+  file does not have it**: re-running its `setup-web.sh` drops `/lan` until `install-online.sh` runs again;
+- upload: `web/online/*.mjs`, the two data files, the service and the snippet to `/tmp/nfs5-web-online`, then
+  `bash install-online.sh` there.
+
+A player: `run_web.bat`, page `http://127.0.0.1:8077/?lan=wss://nfs5-reforged.duckdns.org/lan`, main menu -> Online.
 
 ## Tests
 
@@ -99,6 +131,8 @@ grid for other slots, the tournament result screen in a type-3 race.
 node web/tools/online_smoke.mjs ws://127.0.0.1:8078/lan     # switch + NetGather without a game
 node web/tools/online_test.mjs --mode 0 --env NETTEST_UI=1  # 2 browsers, Online button, PvP race -> PASS
 node web/tools/online_test.mjs --mode 1 --env NETTEST_UI=1  # PvE: 2 players + 6 bots
-node web/tools/online_test.mjs --mode 2 --env NETTEST_UI=1 --seconds 960   # career: the whole event (2 races)
+node web/tools/online_test.mjs --mode 2 --env NETTEST_UI=1 --seconds 1200  # career: the whole event (2 races) + career_apply
+node web/online/standalone.mjs --port 9450 --data M:/Games/nfs5_clean      # the online server alone
+node web/tools/online_test.mjs ... --lan ws://127.0.0.1:9450/lan             # the games against it
 ```
 Every game's log lines carry its tag (`[H]`, `[J1]`); the server's log: `out/online/online-*.log`.

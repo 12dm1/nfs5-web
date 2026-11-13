@@ -31,7 +31,8 @@ export function attachLan(memory: WebAssembly.Memory, ptr: number, log: (s: stri
   const ipText = (v: number) => `${v >>> 24}.${(v >>> 16) & 255}.${(v >>> 8) & 255}.${v & 255}`;
   function connect() {
     set(H.pageState, PAGE_CONNECTING);
-    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/lan`;
+    // ?lan=wss://host/lan: a remote online server (web/online/standalone.mjs), else the page's own server
+    const url = new URLSearchParams(location.search).get('lan') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/lan`;
     const s = ws = new WebSocket(url);
     s.binaryType = 'arraybuffer';
     s.onopen = () => { backoff = 500; };

@@ -219,6 +219,65 @@ int online_ctl_recv(char *out, int max);
 int online_ctl_send(const char *text);
 #define RESULTS 0x005E77A0u
 static char g_dir[256]; static int g_dir_new; static uint32_t g_reported_tick;
+
+/* ---- ON2 stage 2: an online tournament race counts in the local career (ON2 section 4.1 route B: the stock pieces of
+ * 004EDF00 type 4).  The server sends "career id=<event> race=<r> of=<n> fee=<fee> results p:t p:t ..." with this
+ * player as entry 0.  Applied only to an event of a club or of an era the profile has reached, and only when this
+ * client had the event from its first race (else the table would never be complete). ---- */
+#define TRN_TABLE  0x00691E58u     /* the profile's tournament table, 0xD40 per event */
+#define TRN_COUNT  0x00691E64u
+#define TRN_CUR    0x00691E6Cu     /* current tournament (index) */
+#define TRN_NEXT   0x00691E7Cu     /* next race in it */
+#define TRN_ERA    0x00691E50u
+#define TRN_RACE   0x005DB768u     /* race / tournament being played */
+#define TRN_PLAYED 0x005DB76Cu
+#define CASH       0x00691D90u
+static int g_car_id = -1, g_car_next = -1;
+static uint32_t cg0(CPU *c, uint32_t fn){ return call_guest(c, fn, 0, NULL); }
+static uint32_t cg1(CPU *c, uint32_t fn, uint32_t a){ return call_guest(c, fn, 1, &a); }
+static void career_apply(CPU *c, const char *m){
+    int id = -1, race = -1, of = 0, fee = 0, place[8], tm[8], n = 0;
+    if (sscanf(m, "career id=%d race=%d of=%d fee=%d", &id, &race, &of, &fee) != 4) return;
+    const char *r = strstr(m, "results ");
+    for (char *e; r && n < 8; n++){
+        r = n ? r : r + 8;
+        place[n] = (int)strtol(r, &e, 10); if (e == r || *e != ':') break;
+        tm[n] = (int)strtol(e + 1, &e, 10); r = e;
+    }
+    const uint32_t table = MR32(TRN_TABLE); const int count = (int)MR32(TRN_COUNT);
+    int idx = -1;
+    for (int i = 0; table && i < count && i < 64; i++) if ((int)(int16_t)MR16(table + (uint32_t)i * 0xD40u) == id){ idx = i; break; }
+    if (idx < 0 || n < 1){ LOG("career: event %d not in this profile (%d events), not applied", id, count); return; }
+    const uint32_t ev = table + (uint32_t)idx * 0xD40u;
+    const int group = (int)MR32(ev + 4), era = (int)MR32(TRN_ERA);
+    if (group >= 0x209 && group <= 0x20B && group > era){ LOG("career: event %d is of era %X, the profile is in %X: not applied", id, group, era); return; }
+    if (race == 0){
+        if ((int)MR32(CASH) < fee){ LOG("career: entry fee %d DM > cash %d: not applied", fee, (int)MR32(CASH)); g_car_id = -1; return; }
+        cg1(c, 0x00503E40u, (uint32_t)id);                         /* this event's old results */
+        cg1(c, 0x005012E0u, (uint32_t)-fee);
+        g_car_id = id; g_car_next = 0;
+    }
+    if (g_car_id != id || g_car_next != race){ LOG("career: race %d of event %d without the earlier ones: not applied", race + 1, id); return; }
+    const uint32_t cur = MR32(TRN_CUR), next = MR32(TRN_NEXT), cash0 = MR32(CASH);
+    MR32(TRN_CUR) = (uint32_t)idx; MR32(TRN_NEXT) = (uint32_t)race;
+    MR32(TRN_RACE) = (uint32_t)race; MR32(TRN_PLAYED) = (uint32_t)idx;
+    for (int k = 0; k < n; k++){ const uint32_t a[4] = { (uint32_t)k, (uint32_t)tm[k], (uint32_t)place[k], 1 }; call_guest(c, 0x00503960u, 4, a); }
+    cg1(c, 0x005012E0u, cg0(c, 0x00505740u));                     /* race prize */
+    cg1(c, 0x005012E0u, cg0(c, 0x005057A0u));                     /* bonus */
+    const int last = cg0(c, 0x005056D0u) == 0;
+    int overall = 0;
+    if (last){ overall = (int)cg0(c, 0x00505710u); cg1(c, 0x005012E0u, cg0(c, 0x00505770u) ); }
+    cg0(c, 0x00503A50u);
+    cg1(c, 0x00503AD0u, (uint32_t)id);                            /* progress: next race, or the event done, year, era */
+    const int era_moved = (int)MR32(TRN_ERA) != era || MR8(0x00691E81u);
+    if (!era_moved){ MR32(TRN_CUR) = cur; MR32(TRN_NEXT) = next; } /* the offline career stays where it was */
+    g_car_next = race + 1;
+    LOG("career: event %d race %d/%d place %d -> cash %d -> %d%s%s", id, race + 1, of, place[0], (int)cash0, (int)MR32(CASH),
+        last ? ", event done" : "", era_moved ? ", NEW ERA" : "");
+    (void)overall;
+    const uint32_t name = cg0(c, 0x00501270u);                     /* save the profile (004DEDA0, "Saving for %s") */
+    if (name && MR8(name)) cg1(c, 0x004DEDA0u, name);
+}
 static void career_tick(CPU *c, uint32_t fe, uint32_t vt){
     char m[512];
     while (online_ctl_recv(m, sizeof m)){
@@ -226,6 +285,7 @@ static void career_tick(CPU *c, uint32_t fe, uint32_t vt){
         if (!strncmp(m, "race ", 5)){ snprintf(g_dir, sizeof g_dir, "%s", m); g_dir_new = 1; }
         else if (!strcmp(m, "over")) g_dir[0] = 0;
         else if (!strncmp(m, "humans ", 7)) g_humans = atoi(m + 7);
+        else if (!strncmp(m, "career ", 7)) career_apply(c, m);
     }
     if (vt != VT_CREATE || cint(0xDC) != 0 || !g_dir[0]) return;          /* the creator, on its create screen */
     const uint32_t tick = MR32(SIMTICK);
@@ -343,11 +403,13 @@ static void fe_tick(CPU *c){
 
 
 /* A network race never ends by itself (00417010 skips the "everyone finished" end for game type 3): every player
- * leaves through the race menu.  With NETTEST_AI, 5 s after the local car finished, do what the menu's "quit" entry
- * does (004152E0 case 5; PC mod net_autotest.cpp NetAutotest_RaceTick).  From the race's input hook 0x413800. */
+ * leaves through the race menu, and the creator's results (tournaments) hold only the cars that finished before it
+ * left.  So in a network race (006573E8 == 3) the runtime leaves for the player once every car has finished, or 30 s
+ * after its own finish (5 s at least), as the menu's "quit" entry does (004152E0 case 5; PC mod NetAutotest_RaceTick).
+ * From the race's input hook 0x413800. */
 void nettest_race(CPU *c){
     static uint32_t finished_at, last_tick; static int left;
-    if (g_role <= 0 || !getenv("NETTEST_AI")) return;
+    if (MR32(0x006573E8u) != 3u || !comms()) return;
     const uint32_t tick = MR32(SIMTICK);
     if (tick < last_tick){ finished_at = 0; left = 0; }
     last_tick = tick;
@@ -359,13 +421,17 @@ void nettest_race(CPU *c){
     if (!b50){ finished_at = 0; return; }
     if (!finished_at){ finished_at = tick ? tick : 1; LOG("local car finished (state %d) at tick %u", b50, tick); return; }
     if (tick - finished_at < 5 * 64) return;
+    int all = 1; const int n = (int)MR32(0x005E8AE8u);
+    for (int i = 0; i < n && i < 9; i++){ const uint32_t k = MR32(0x005E8E2Cu + 4u * (uint32_t)i); if (k && !MR32(k + 0xB50u)) all = 0; }
+    if (!all && tick - finished_at < 30 * 64) return;
     left = 1;
-    LOG("leaving the race (tick %u)", tick);
+    LOG("leaving the race (tick %u, %s)", tick, all ? "every car finished" : "30 s after the finish");
     call_guest(c, 0x004AB270u, 0, NULL);
     call_guest(c, 0x004120F0u, 0, NULL);
     MR32(0x00606A90u) = 0; MR32(0x00606A8Cu) = 1; MR32(0x00606A88u) = 0;
     if ((int)MR32(0x005E99F4u) < 2){ uint32_t one = 1; MR32(0x00657424u) = 3; call_guest(c, 0x00416AC0u, 1, &one); }
 }
+
 void nettest_hook(CPU *c, uint32_t ip){
     if (g_role < 0) init_role();
     if (!g_role || (g_online && getenv("NETTEST_UI"))){ if (ip == 0x4D2B80u && !g_busy){ g_busy = 1; online_auto(c); g_busy = 0; } if (!g_role) return; }

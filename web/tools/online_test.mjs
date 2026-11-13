@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 ? process.argv[i + 1] : d; };
 const SECONDS = +arg('seconds', 240), PORT = +arg('port', 8079), PLAYERS = +arg('players', 2);
-const MODE = arg('mode', ''), EXTRA = arg('env', '');
+const MODE = arg('mode', ''), EXTRA = arg('env', ''), LAN = arg('lan', '');   // --lan ws://host/lan: another online server
 const SEED = arg('seed', ['player.lst', '5îïðïðî.sav', 'îïðïðî1.hud', 'îïðïðî2.hud'].join(','));
 
 const lines = [];
@@ -32,7 +32,7 @@ for (let i = 0; i < PLAYERS; i++) {
   const page = await ctx.newPage();
   page.on('pageerror', e => console.log(`[${tag} pageerror] ${e.message}`));
   page.on('console', m => { if (m.type() === 'error') console.log(`[${tag} console] ${m.text()}`); });
-  const url = `http://127.0.0.1:${PORT}/?log=1&tag=${tag}&env=${encodeURIComponent(env)}&seed=${encodeURIComponent(SEED)}`;
+  const url = `http://127.0.0.1:${PORT}/?log=1&tag=${tag}&env=${encodeURIComponent(env)}&seed=${encodeURIComponent(SEED)}${LAN ? '&lan=' + encodeURIComponent(LAN) : ''}`;
   await page.goto(url);
   games.push({ tag, page });
   await new Promise(r => setTimeout(r, 3000));         // launches apart (the user's rule for parallel games)
@@ -52,7 +52,10 @@ while (Date.now() - t0 < SECONDS * 1000 && !verdict) {
       return sl.length >= games.length && sl.every(v => v > 20);
     });
     // career (--mode 2): the whole tournament, up to the server's final table
-    if (ok && (MODE !== '2' || /\]\s+game #\d+: final/.test(all))) verdict = 'PASS';
+    // + every game counted the last race in its own career (nettest.c career_apply)
+    const careerDone = () =>
+      games.every(g => new RegExp(`^\\[${g.tag}\\].*career: event \\d+ race (\\d+)/\\1 `, 'm').test(all));
+    if (ok && (MODE !== '2' || careerDone())) verdict = 'PASS';
   }
 }
 console.log(verdict || 'FAIL (timeout)');

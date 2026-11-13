@@ -149,6 +149,6 @@ export function createOnline({ dataDir, carsJson, udpPort = 0, logDir, verbose =
     udp.bind(udpPort, '0.0.0.0', () => log(`PC players: UDP on 0.0.0.0:${udpPort}`));
   }
   log(`online service up, log ${logFile}`);
-  return { upgrade, netgather: ng, tabs, close() { clearInterval(timer); if (udp) udp.close(); }, log };
+  return { upgrade, netgather: ng, status: () => ({ tabs: tabs.size, ...ng.status() }), tabs, close() { clearInterval(timer); if (udp) udp.close(); }, log };
 }
 export { ipText, ipNum };

@@ -705,6 +705,19 @@ function careerNext(g) {
   ctlSend(g.host.rinfo, line);
   if (!T.done) gameChat(g, `Next: ${line.replace(/ laps=.*track=/, ': ')}, ${T.current().laps} lap(s)`);
 }
+// Stage 2: every human gets the race in its own numbering (me = entry 0, the others by slot), so its runtime can run
+// the stock career code on it (runtime/nettest.c career_apply, ON2 section 4.1 route B): points, prize, bonus, final
+// prize, the event's progress. A car that did not finish gets the places after the finishers.
+function careerResults(g, T, row, times) {
+  const order = [...row.entries()].sort((a, b) => (a[1].place || 99) - (b[1].place || 99) || a[0] - b[0]);
+  const place = new Map(order.map(([slot], i) => [slot, i + 1]));
+  for (const m of g.members) {
+    if (isBot(m) || !T.entrants.has(m.gameSlot) || !m.rinfo) continue;
+    const slots = [m.gameSlot, ...[...T.entrants.keys()].filter(s => s !== m.gameSlot).sort((a, b) => a - b)];
+    const res = slots.map(s => `${place.get(s)}:${times.get(s) || 0}`).join(' ');
+    ctlSend(m.rinfo, `career id=${T.def.id} race=${T.race - 1} of=${T.def.races.length} fee=${T.def.fee} results ${res}`);
+  }
+}
 function control(c, text) {
   log(`  control <- ${c.account}: ${text}`);
   const g = c.game;
@@ -724,6 +737,7 @@ function control(c, text) {
   done.sort((a, b) => a[1] - b[1]).forEach(([slot, time], i) => { places.set(slot, i + 1); times.set(slot, time); });
   const row = T.finish(places, times);
   if (!row) return;
+  careerResults(g, T, row, times);
   const lines = [...row.entries()].sort((a, b) => (a[1].place || 99) - (b[1].place || 99))
     .map(([slot, r]) => `${r.place || '-'}. ${T.entrants.get(slot).name} +${r.points}`);
   gameChat(g, `Race ${T.race}/${T.def.races.length}: ${lines.join(', ')}`);
@@ -905,5 +919,16 @@ function drop(key) {
   log(`client ${key} (${c.account}) disconnected`);
   leaveLobby(c); clients.delete(key);
 }
-return { datagram, tick, drop, clients, games, control, events: EVENTS };
+// what a status page shows: who is online, the games and their tournaments
+function status() {
+  const players = [...clients.values()].filter(c => c.account).map(c => ({ name: c.persona || c.account, game: c.game ? c.game.id : null }));
+  const list = [...games.values()].map(g => ({
+    id: g.id, mode: ['quick', 'quick+bots', 'career'][g.raceMode] || 'quick', racing: !!g.racing,
+    players: humans(g).map(m => m.persona || m.account), bots: g.members.filter(isBot).length,
+    tournament: g.tournament ? { title: g.tournament.def.title, race: g.tournament.race, of: g.tournament.def.races.length,
+                                 table: g.tournament.race ? g.tournament.table() : [] } : null,
+  }));
+  return { players, games: list, events: EVENTS.length };
+}
+return { datagram, tick, drop, clients, games, control, events: EVENTS, status };
 }
