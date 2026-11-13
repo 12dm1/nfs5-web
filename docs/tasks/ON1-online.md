@@ -21,8 +21,8 @@ Research: `docs/research/ON1-nfsu2-web-network.md` (how nfsu2-web does it), `doc
 | Race modes in the create screen: Quick race / Quick race + bots / Career tournament | in the MODE combo; PvE with 2 browsers + 6 bots **PASS** |
 | Career tournament, server side | event from `nfs5.trn`, its opponents as bots, track + laps sent to the host, points / money / standings in the game's chat; the whole 2-race event **PASS** (709a94a) |
 | Career tournament, local career effects | stage 2: points, race prize, bonus, final prize, event progress / year / era by the stock code, profile saved; **PASS** in the 2-race test (cash seen growing) |
-| Online server without the game files (`web/online/standalone.mjs`), page `?lan=wss://host/lan` | works locally (smoke + browser race through it) |
-| Deployment to nfs5-reforged.duckdns.org | `deploy/` (service + nginx `/lan`), see below |
+| Online server without the game files (`web/online/standalone.mjs`), page `?lan=wss://host/lan` | smoke PASS locally and public |
+| Deployment to nfs5-reforged.duckdns.org | **live** since 2026-11-13: `deploy/` (service + nginx `/lan`); PvE race of 2 headless browsers through `wss://nfs5-reforged.duckdns.org/lan` **PASS** (seen in the server's log) |
 
 ## How it fits together
 
@@ -123,7 +123,9 @@ to the host by the deploy (never into git). On the VPS of nfs5-reforged.duckdns.
 - upload: `web/online/*.mjs`, the two data files, the service and the snippet to `/tmp/nfs5-web-online`, then
   `bash install-online.sh` there.
 
-A player: `run_web.bat`, page `http://127.0.0.1:8077/?lan=wss://nfs5-reforged.duckdns.org/lan`, main menu -> Online.
+A player: `run_web_online.bat` (= `run_web.bat` with `?lan=wss://nfs5-reforged.duckdns.org/lan`), main menu -> Online.
+The page code (`web/src`) is bundled by `node web/build.mjs` (run_web*.bat do it; `web/build.sh` builds only the wasm):
+a test run after a page change without it runs the old bundle (the first `--lan` runs went to the local server).
 
 ## Tests
 
