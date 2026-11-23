@@ -79,6 +79,19 @@ void pu_cars_chk_dump(void){
 /* ---- the race setup block: reset and replay copies (pu_hooks.c) ---- */
 _Static_assert(CARS_INFO_OLD + CARS_INFO_OLDN * CARS_INFO_STRIDE == CARS_SETUP + CARS_SETUP_LEN, "carInfo ends the setup block");
 _Static_assert(CARS_INFO_X + (CARS_MAX - CARS_INFO_OLDN) * CARS_INFO_STRIDE <= CARS_REGION_END, "shadow fits");
+/* CARS2: cars and smackables (signs, cones: NUMSMACKABLES 65807C) share the engine's object list of 128 (descriptions
+ * 628FC0[128], pointers 5E8C24[128]; 004A1280 reads (id & 0x7F) - numcars).  The converter keeps at most 119 on a track
+ * (128 - 9 cars); with 16 racers Empire City and Snowy Ridge overran it and the race crashed as it started.  Hook
+ * 00414E1C, right after 004A17F0 counted them and before 004110A0 builds the race's objects: with more than 9 cars
+ * the last ones are not created (the count of 9 or fewer cars keeps the stock behaviour). */
+void pu_cars_smack_cap(void){
+    const int32_t cars = (int32_t)MR32(CARS_NUMCARS), smack = (int32_t)MR32(CARS_NUMSMACK);
+    const int32_t cap = (int32_t)CARS_OBJECTS - (cars > 9 ? cars : 9);
+    if (smack <= cap) return;
+    MR32(CARS_NUMSMACK) = (uint32_t)(cap > 0 ? cap : 0);
+    fprintf(stderr, "[cars] roadside objects %d -> %d: %d cars share the object list of %u\n", smack, cap, cars, CARS_OBJECTS);
+}
+
 void pu_cars_setup_hook(uint32_t ip){
     const uint32_t lo = CARS_INFO_OLDN * CARS_INFO_STRIDE, all = CARS_MAX * CARS_INFO_STRIDE;
     uint8_t *info = g_mem + CARS_INFO, *rep = g_mem + CARS_REPLAY + (CARS_INFO_OLD - CARS_SETUP), *x = g_mem + CARS_INFO_X;

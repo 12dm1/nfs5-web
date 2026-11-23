@@ -157,8 +157,16 @@ heard), the browser build in a browser (the wasm module was only compiled), long
 - The AI drivers: 004E3160 picks `n` distinct drivers of the difficulty; the pool is 7 easy, 7 medium, 21 hard, and
   a count over the pool looped/divided by zero. Now the difficulty's drivers first (shuffled), then the nearest
   difficulty's (`[cars2] 15 drivers for difficulty 0 (7 of it)`).
+- **Roadside objects (2026-11-23).** Cars and smackables (NUMSMACKABLES `65807C`) share the engine's object list of
+  128 (`004A1280` reads `table[(id & 0x7F) - numcars]`; descriptions `628FC0[128]`, pointers `5E8C24[128]`). The
+  track converter keeps 119 at most (128 - 9 cars), so 16 racers on Empire City or Snowy Ridge overran it: "memory
+  access out of bounds" in `004A1280` (from `00410730` / `004110A0`) as the race started (found on the live site:
+  Snowy Ridge, 911 GT2, 15 similar opponents). Hook `00414E1C` (`pu_cars_smack_cap`, right after `004A17F0` counts
+  them): with more than 9 cars the count drops to 128 - cars and the last objects are not created; 9 cars or fewer
+  are untouched. Log: `[cars] roadside objects 119 -> 112: 16 cars ...`.
 - Tests: `NETTEST=quickrace` (runtime/nettest.c; NETTEST_OPP, NETTEST_DIFF, NETTEST_LAPS, NETTEST_AI) goes through
-  the menus as the player would and sets the combos through their accessors; `web/tools/menu_walk.mjs` clicks
+  the menus as the player would and sets the combos through their accessors; `NETTEST_PICK="zMergedList.Car=gt2;OpponentCar.Car=similar;Track1.Track=snowy"`
+  picks list rows by part of their text (any case, list names as in QuickRace.lay); `web/tools/menu_walk.mjs` clicks
   buttons by command. Checked: 15 opponents on easy and medium, 16 racers drive, 144 fps headless.
 - Not changed: Knockout / Quick Knockout / career / Factory Driver keep their own counts; online stays at 8; the
   results list shows 8 places; replays with more than 9 cars do not save.

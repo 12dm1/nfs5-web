@@ -48,6 +48,7 @@ void pu_cam_sky_after(CPU *c);
 void pu_loop_stat(CPU *c);
 void pu_cars_monitor(void);
 void pu_cars_setup_hook(uint32_t ip);
+void pu_cars_smack_cap(void);
 void pu_interp_restore(void);
 void pu_cube_capture(CPU *c);
 void pu_fe_begin_view(CPU *c);
@@ -59,6 +60,7 @@ int pu_hook(CPU *c, uint32_t ip){
     case 0x415C6Eu: pu_loop_stat(c); pu_cars_monitor(); return 1;
     case 0x4B4DBBu: case 0x4B6AC3u: case 0x413E8Bu: case 0x414002u: case 0x414699u: case 0x413DD1u:
         pu_cars_setup_hook(ip); return 1;             /* CARS1: the moved carInfo follows the setup block */
+    case 0x414E1Cu: pu_cars_smack_cap(); return 1;   /* CARS2: roadside objects + cars <= 128 */
     case 0x415C7Fu: pu_interp_restore(); return 1;
 #ifdef __wasm__
     case 0x468AA6u: pu_cube_capture(c); return 1;
