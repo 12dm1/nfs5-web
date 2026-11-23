@@ -156,12 +156,13 @@ export function createOnline({ dataDir, carsJson, udpPort = 0, logDir, verbose =
     return host === req.headers.host || origins.some(x => { try { return new URL(x).host === host; } catch { return false; } });
   }
   function upgrade(req, socket) {
-    if (!req.headers['sec-websocket-key'] || !originOk(req)) { socket.destroy(); return; }
+    // a refusal is an answer, not a dropped connection (behind nginx a drop is a 502 and a line in its error log)
+    const refuse = status => socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    if (!req.headers['sec-websocket-key']) { refuse('400 Bad Request'); return; }
+    if (!originOk(req)) { refuse('403 Forbidden'); return; }
     const addr = peerAddress(req);
-    if (tabs.size >= MAX_TABS || (addr && (perIp.get(addr) || 0) >= MAX_TABS_PER_IP)) {
-      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
-      return;
-    }
+    if (tabs.size >= MAX_TABS) { refuse('503 Service Unavailable'); return; }
+    if (addr && (perIp.get(addr) || 0) >= MAX_TABS_PER_IP) { refuse('429 Too Many Requests'); return; }
     if (addr) perIp.set(addr, (perIp.get(addr) || 0) + 1);
     let released = false;
     const release = () => {

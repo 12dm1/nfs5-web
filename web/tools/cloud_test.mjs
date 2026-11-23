@@ -302,7 +302,7 @@ try {
   const join = typed => { const j = Buffer.alloc(1 + 0x88); j[0] = 0x6a; j.write('cuser~', 1 + 0x3c, 'latin1'); j.write(`${typed}~3.5~3.5`, 1 + 0x70, 'latin1');
     const f = Buffer.alloc(16 + j.length); f[0] = 1; f.writeUInt32BE(0x0A4D0001, 8); f.writeUInt16BE(5000, 12); f.writeUInt16BE(9442, 14); j.copy(f, 16); return f; };
   let w = await ws(null, 'https://evil.example');
-  check('online: a WebSocket from another site is refused', !w.ok); w.s.destroy();
+  check('online: a WebSocket from another site is refused (403)', !w.ok && String(w.head || '').startsWith('HTTP/1.1 403')); w.s.destroy();
   const other1 = cookieOf(await post('/cloud/login', { user: 'Other1', password: 'other password 1' }, null, { 'X-Real-IP': '10.8.0.2' }));
   w = await ws(other1, `http://127.0.0.1:${PORT}`);
   check('online: the site\'s own page connects', w.ok);
