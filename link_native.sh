@@ -1,25 +1,27 @@
 #!/bin/bash
 # WEB1: the native Windows x64 program (out/nfs5_native.exe) from gen/all + runtime/.
 #   ./link_native.sh            OPT=-O2 by default; OPT=-O0 for debugging
+#   GEN=gen/chk NATIVE=out/native_chk EXE=out/nfs5_chk.exe ./link_native.sh   another lift side by side (CARS1 CARCHK)
 # Toolchain: llvm-mingw in deps/ (x86_64-w64-mingw32-clang, UCRT, winpthreads).
 set -e -o pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"; cd "$ROOT"
 CC="${CC:-$(ls -d deps/llvm-mingw-*-ucrt-x86_64 2>/dev/null | tail -1)/bin/x86_64-w64-mingw32-clang}"
 [ -x "$CC" ] || { echo "llvm-mingw not found in deps/ (CC=...)"; exit 1; }
-[ -f gen/all/fntab.c ] && [ -f gen/all/impargs.c ] || { echo "run ./gen.sh first"; exit 1; }
+GEN="${GEN:-gen/all}"; EXE="${EXE:-out/nfs5_native.exe}"
+[ -f $GEN/fntab.c ] && [ -f $GEN/impargs.c ] || { echo "run ./gen.sh first"; exit 1; }
 OPT="${OPT:--O2}"
-OUT=out/native; mkdir -p "$OUT/gen" "$OUT/rt"
-export CC OPT OUT
+OUT="${NATIVE:-out/native}"; mkdir -p "$OUT/gen" "$OUT/rt"
+export CC OPT OUT GEN
 # lifted code: rebuilt only when the C is newer than its object
-ls gen/all/*.c | xargs -P "${JOBS:-16}" -I{} sh -c 'o="$OUT/gen/$(basename {} .c).o"; [ "$o" -nt "{}" ] || "$CC" $OPT -g1 -c -w -Iruntime -Igen/all "{}" -o "$o" || echo "FAILED: {}"'
-RT="win32 win32_ext fileio mem heap dispatch module genexec lifecycle debug watchdog sha256 res modheap pu_stubs pu_hooks nettest pu_com pu_imports thrash_hle pu_ext pu_interp pu_cube pu_paint pu_text pu_net"
+ls $GEN/*.c | xargs -P "${JOBS:-16}" -I{} sh -c 'o="$OUT/gen/$(basename {} .c).o"; [ "$o" -nt "{}" ] || "$CC" $OPT -g1 -c -w -Iruntime -I$GEN "{}" -o "$o" || echo "FAILED: {}"'
+RT="win32 win32_ext fileio mem heap dispatch module genexec lifecycle debug watchdog sha256 res modheap pu_stubs pu_hooks nettest pu_com pu_imports thrash_hle pu_ext pu_interp pu_cube pu_paint pu_text pu_cars pu_net"
 pids=""
 for f in $RT; do
-  "$CC" $OPT -g -c -w -include win/posix_compat.h -Iruntime -Igen/all "runtime/$f.c" -o "$OUT/rt/$f.o" & pids="$pids $!"
+  "$CC" $OPT -g -c -w -include win/posix_compat.h -Iruntime -I$GEN "runtime/$f.c" -o "$OUT/rt/$f.o" & pids="$pids $!"
 done
 for f in runtime/ext/*.cpp; do "${CC%clang}clang++" -std=c++17 $OPT -g -fno-exceptions -fno-rtti -w -c "$f" -o "$OUT/rt/ext_$(basename "$f" .cpp).o" & pids="$pids $!"; done
 for f in runtime/win/*.c; do
-  "$CC" $OPT -g -c -w -include win/posix_compat.h -Iruntime -Igen/all "$f" -o "$OUT/rt/win_$(basename "$f" .c).o" & pids="$pids $!"
+  "$CC" $OPT -g -c -w -include win/posix_compat.h -Iruntime -I$GEN "$f" -o "$OUT/rt/win_$(basename "$f" .c).o" & pids="$pids $!"
 done
 for p in $pids; do wait "$p" || { echo "runtime compile error"; exit 1; }; done
 # WEB2: the THRASH renderer (dx11z core, C++); RENDER=0 builds the headless program
@@ -39,5 +41,5 @@ if [ "${RENDER:-1}" != 0 ]; then
   LIBS="$LIBS -ld3d11 -ldxgi -ld3dcompiler -luser32 -lgdi32 -static"   # libc++/libunwind inside the exe
   CC="$CXX"
 fi
-"$CC" $OPT -g -o out/nfs5_native.exe "$OUT"/gen/*.o "$OUT"/rt/*.o $LIBS -Wl,--stack,16777216 -Wl,--error-limit=0 2>&1 | tee out/link.log
-echo "link OK -> out/nfs5_native.exe"
+"$CC" $OPT -g -o "$EXE" "$OUT"/gen/*.o "$OUT"/rt/*.o $LIBS -Wl,--stack,16777216 -Wl,--error-limit=0 2>&1 | tee out/link.log
+echo "link OK -> $EXE"

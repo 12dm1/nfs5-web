@@ -399,6 +399,9 @@ int mem_load_pe(const char *path){
         uint32_t vsize=*(uint32_t*)(s+8), va=*(uint32_t*)(s+12);
         uint32_t rsize=*(uint32_t*)(s+16), roff=*(uint32_t*)(s+20);
         uint32_t n = rsize < vsize ? rsize : vsize;
+        /* CARS1: the game never reads its own relocations; the section stays zero and holds the moved per-car tables
+         * (runtime/pu_cars.h) */
+        if (!strcmp(nm, ".reloc")) n = 0;
         memcpy(g_mem + base + va, buf + roff, n);
         fprintf(stderr,"  loaded %-9s -> 0x%08x  %u bytes\n", nm[0]?nm:"<unnamed>", base+va, n);
     }

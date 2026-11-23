@@ -136,3 +136,16 @@
 0050C003  74965B00    401F6C00    # the MODE row table 005B9674 -> 006C1F40
 004BA276  74965B00    401F6C00    # the MODE row table 005B9674 -> 006C1F40
 0048F665  8B1485008C5E00  8B1485348B5E00  # ON1 PvE bots: a received car state finds its car in the full array 005E8B34 (005E8C00 holds only the members' cars)
+
+# CARS1: more cars per race (runtime/pu_cars.h moves the per-car tables at lift time; docs/findings/CARS1-car-limit.md)
+004B5873  09            10                # setup parser: car[N].key accepted for N < 16 (was 9)
+00424704  6858020000    68E8030000        # HUD opponent list widget (FUN_0042A790, vtable 5B2DBC): 600 -> 1000 bytes; its racer names (8 x 0x19 at +0x183) move to its new end
+0042ACFD  8DAB83010000  8DAB58020000      #   names at +0x258 (16 x 0x19), constructor
+0042B1B1  8D9383010000  8D9358020000      #   names at +0x258, update
+004A876F  08            20                # sound init clears the moved engine-load table for 32 car ids (was 8)
+00424C04  68BC010000    6800020000        # race results widget (FUN_0042BCD0, vtable 5B2E60): 0x1BC -> 0x200 bytes; "listed" flags per racer move to its end
+0042C09A  8DBB28010000  8DBBBC010000      #   flags at +0x1BC (16 dwords), network update
+0042C115  8DBD28010000  8DBDBC010000      #   flags at +0x1BC, update
+0042C11B  B908000000    B910000000        #   clear 16 flags (was 8)
+0042C2E6  C784832801000001000000  C78483BC01000001000000  #   set a racer's flag at +0x1BC
+0042C17C  3B35E88A5E00  81FE08000000      #   list places 1..8 only: the table has 8 rows and 8 place names (was: places < racers)
