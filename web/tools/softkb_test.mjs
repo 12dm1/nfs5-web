@@ -35,6 +35,10 @@ console.log('text fields: ' + JSON.stringify(fields));
 const box = await page.locator('canvas').boundingBox(), f = fields[0];
 const tap = (gx, gy) => page.touchscreen.tap(box.x + gx / 640 * box.width, box.y + gy / 480 * box.height);
 await tap(f.x + f.w / 2, f.y + f.h / 2);
+// iOS Safari: emulated mouse events follow the tap even though pointerdown was cancelled; they must not take the focus
+await page.evaluate(([x, y]) => { const cv = document.querySelector('canvas');
+  for (const t of ['mousemove', 'mousedown', 'mouseup', 'click']) cv.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 })); },
+  [box.x + (f.x + f.w / 2) / 640 * box.width, box.y + (f.y + f.h / 2) / 480 * box.height]);
 await page.waitForTimeout(500);
 const focused = await page.evaluate(() => document.activeElement?.tagName + ':' + (document.activeElement?.getAttribute('aria-hidden') ?? ''));
 console.log('focused after tap: ' + focused);

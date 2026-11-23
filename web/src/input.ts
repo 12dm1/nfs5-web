@@ -101,9 +101,16 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   const wParam = (e: MouseEvent) => ((e.buttons & 1) ? 1 : 0) | ((e.buttons & 2) ? 2 : 0) | ((e.buttons & 4) ? 0x10 : 0);
   // Window messages for the button: left 0x201/2, right 0x204/5, middle 0x207/8
   const btn = (b: number, down: boolean) => (b === 0 ? 0x201 : b === 2 ? 0x204 : 0x207) + (down ? 0 : 1);
-  window.addEventListener('mousemove', e => msg(WM.MOVE, wParam(e), pos(e)));
-  el.addEventListener('mousedown', e => { e.preventDefault(); el.focus(); msg(btn(e.button, true), wParam(e), pos(e)); });
-  window.addEventListener('mouseup', e => msg(btn(e.button, false), wParam(e), pos(e)));
+  // iOS Safari sends emulated mouse events after a tap even when pointerdown was cancelled; the tap already reached the
+  // game (below), and the emulated mousedown's focus() would take the focus from the phone keyboard's field (softkb.ts),
+  // which closes the keyboard as soon as it opened. So mouse events shortly after a touch are dropped.
+  let lastTouch = -1e9;
+  window.addEventListener('pointerdown', e => { if (e.pointerType === 'touch') lastTouch = performance.now(); }, { capture: true });
+  window.addEventListener('pointerup', e => { if (e.pointerType === 'touch') lastTouch = performance.now(); }, { capture: true });
+  const emulated = () => performance.now() - lastTouch < 1000;
+  window.addEventListener('mousemove', e => { if (!emulated()) msg(WM.MOVE, wParam(e), pos(e)); });
+  el.addEventListener('mousedown', e => { e.preventDefault(); if (emulated()) return; el.focus(); msg(btn(e.button, true), wParam(e), pos(e)); });
+  window.addEventListener('mouseup', e => { if (!emulated()) msg(btn(e.button, false), wParam(e), pos(e)); });
   el.addEventListener('contextmenu', e => e.preventDefault());
   // A tap on a touch screen is a click the game sees: the button stays down at least TAP_HOLD ms (the game polls it once a frame
   // and misses a press and release that come together). preventDefault keeps the browser's emulated mouse events away.
