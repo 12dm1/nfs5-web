@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <time.h>
+#include <pthread.h>
 static uint64_t now_ns_io(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
     return (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
@@ -148,7 +149,16 @@ static unsigned g_ov_gen = 1;
 static struct { char name[64]; unsigned gen; signed char game_dir, in_ov; } g_ovc[OVC_N];
 static int g_ovc_n;
 static uint64_t g_ovc_skips;
+/* CreateFileA resolves a path without the guest lock (HOST_UNLOCKED below): this cache has its own lock */
+static pthread_mutex_t g_ovc_mx = PTHREAD_MUTEX_INITIALIZER;
+static int overlay_cannot_have_locked(const char *win);
 static int overlay_cannot_have(const char *win){
+    pthread_mutex_lock(&g_ovc_mx);
+    int r = overlay_cannot_have_locked(win);
+    pthread_mutex_unlock(&g_ovc_mx);
+    return r;
+}
+static int overlay_cannot_have_locked(const char *win){
     char rel[1024]; rel_of(win, rel, sizeof rel);
     char *sl = strchr(rel, '/');
     if (!sl) return 0;                                   /* a file at the top: always looked up */
@@ -412,7 +422,18 @@ int64_t fileio_handle_size(uint32_t h){
 int64_t fileio_read_at(uint32_t h, uint32_t dst, uint32_t len, int64_t off){
     FH *f = fh_get(h); if (!f || f->fd < 0) return -1;
     mem_commit(dst, len);
-    ssize_t got = pread(f->fd, g_mem + dst, len, (off_t)off);
+    int fd = f->fd;
+#ifdef __wasm__
+    /* a whole file at once (CreateFileMappingA): in the browser a cache miss waits for the network, so the other
+     * threads run meanwhile, as in ReadFile below.  The track loader mapped files under the lock, 45-100 ms each,
+     * and the game's sound thread could not write: gaps in the sound at every race load. */
+    void guest_wait_begin(void); void guest_wait_end(void);
+    guest_wait_begin();
+    ssize_t got = pread(fd, g_mem + dst, len, (off_t)off);
+    guest_wait_end();
+#else
+    ssize_t got = pread(fd, g_mem + dst, len, (off_t)off);
+#endif
     return got < 0 ? -1 : (int64_t)got;
 }
 int fileio_open_handles(void){ int n = 0; for (int k = 1; k < FH_MAX; k++) n += g_fh[k].used; return n; }
@@ -489,6 +510,17 @@ static void find_fill(uint32_t fd_, const char *nm, const char *full){
 /* texrep.m: the file the guest read last (texture categories for the dump) */
 static char g_last_read[512];
 const char *fileio_last_read(void){ return g_last_read[0] ? g_last_read : 0; }
+/* nfs5-web: in the browser opening and closing a file are round trips to the page's I/O worker (it opens the
+ * file's cache on this device: 30-40 ms, while it serves the loader's reads), and the game loads with a file
+ * open per resource.  The guest lock is released for the call itself (a path is resolved under it: the overlay
+ * cache below is shared), so the DirectSound feeder keeps writing: the sound stopped for 40-60 ms at each
+ * opened file while a race or a menu car loaded.  open() and close() touch only libc's descriptor table. */
+#ifdef __wasm__
+void guest_wait_begin(void); void guest_wait_end(void);
+#define HOST_UNLOCKED(stmt) do { guest_wait_begin(); stmt; guest_wait_end(); } while (0)
+#else
+#define HOST_UNLOCKED(stmt) do { stmt; } while (0)
+#endif
 int fileio_call(CPU *c, const char *n, uint32_t *out){
     uint32_t r = 0;
     if (!strcmp(n,"CreateFileA")){
@@ -504,7 +536,7 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
             if (i >= 0){
                 int fd = gf_fd_take(i);
                 if (fd >= 0) g_gf_fds++;
-                else fd = open(g_gf[i].real, O_RDONLY);
+                else HOST_UNLOCKED(fd = open(g_gf[i].real, O_RDONLY));
                 uint32_t h = fd >= 0 ? fh_new() : 0;
                 if (h){
                     FH *f = fh_get(h);
@@ -526,7 +558,7 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
             snprintf(op, sizeof op, "CreateFileA(%s, 0x%08x)", disp < 6 ? dn[disp] : "?", access);
             wblock = !write_allowed(op, GS(pn), real);
             if (!wblock && !(flags & O_TRUNC)) copy_up(GS(pn), real);
-        } else ok = resolve(GS(pn), real, sizeof real);
+        } else HOST_UNLOCKED(ok = resolve(GS(pn), real, sizeof real));   /* a stat per folder, ~5 ms each while the I/O worker loads */
         if ((flags & O_CREAT) && !wblock) mkparents(real);
         /* Language suffix fallback: this version has the "_fr.vp6" suffix
          * built into the movie path, but the folder holds "_en" files.  If
@@ -571,7 +603,7 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
               fd = -1;
           else if (movie_mode == 3 && !strncasecmp(bn2, "blank", 5)) { }
           else {
-              fd = open(real, flags, 0644);
+              HOST_UNLOCKED(fd = open(real, flags, 0644));
               /* mode 2: open it but make it look empty -> the player reports "done" */
               if (fd >= 0 && movie_mode == 2 && ext &&
                   (!strcasecmp(ext,".vp6") || !strcasecmp(ext,".vp8") ||
@@ -685,6 +717,8 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
                  if (mf && *mf && got > 0 && strstr(f->path, mf)
                      && (mmin ? ((long)len >= mmin) : (!msz || (long)len == msz)))
                      memset(g_mem+buf, 0, (size_t)got); }
+               { void pu_patch_read(const char *, uint32_t, long) __attribute__((weak));
+                 if (pu_patch_read && got > 0) pu_patch_read(f->path, buf, (long)got); }
                if(pnr) MR32(pnr)=(uint32_t)got;
                if (getenv("READLOG")){
                    const char *bn = strrchr(f->path,'/'); bn = bn?bn+1:f->path;
@@ -772,7 +806,7 @@ int fileio_call(CPU *c, const char *n, uint32_t *out){
         if(f->fd>=0 && f->gf && f->gf_gen == g_gf_gen && !g_open_wr) gf_fd_keep(f->gf - 1, f->fd);
         else
 #endif
-        if(f->fd>=0) close(f->fd);
+        if(f->fd>=0){ int fd = f->fd; HOST_UNLOCKED(close(fd)); }
         if(f->dir) closedir(f->dir);
         if(f->wr){ if (f->fd >= 0 && is_profile(f->path)){ garage_profile_written(f->path); savegame_profile_written(); } g_open_wr--; }
         f->used=0; r=1;

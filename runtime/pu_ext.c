@@ -366,6 +366,9 @@ void pu_pad_input(void){
     if (pad_steers) pad_direct_steer(MR32(0x005E99F4u) != 2);
     else if (key_steer) pad_direct_steer(0);
     if (!logged && (pad_steers || th || br)){ logged = 1; fprintf(stderr, "[pad] the pad drives: packet %02X %02X %02X %02X\n", packet[0], packet[1], packet[2], packet[3]); }
+    { static int pl = -1; static time_t last; if (pl < 0) pl = getenv("PADLOG") != 0;     /* PADLOG=1: the packet once a second */
+      if (pl && time(0) != last){ last = time(0);
+          fprintf(stderr, "[pad] packet %02X %02X %02X %02X (pad buttons %08X lx %.2f rt %.2f lt %.2f)\n", packet[0], packet[1], packet[2], packet[3], b, lx, rt, lt); } }
 }
 /* 0040F740 (entry), the car's tick: it turns car+430 (magnitude) and car+438 (high word: 3 ground, 4 wall, 5 car) into a sound over 1.5
  * and clears them. Magnitudes of full strength from the impacts of 129 traced races. */
@@ -926,5 +929,35 @@ static void race_wait_tick(void){
     __builtin_wasm_memory_atomic_wait32((int32_t *)&g_tick_seq, __atomic_load_n(&g_tick_seq, __ATOMIC_SEQ_CST), 4000000LL);
 #else
     usleep(1000);
+#endif
+}
+
+/* ---- In the browser the page owns the controls (web/src/input.ts: keyboard, the Gamepad API, touch.ts on a touch screen) and
+ * puts the pad straight into the race's input packet (pu_pad_input), so the game's own controller setup has nothing to set up
+ * there: the Options screen loses its Controllers tab. A read of FEData/Layouts/optiontabs.lay gets "state=hidden" (same length)
+ * in the section of the tab whose panel is ID_controllers_panel; the game knows that state (carsetup.lay uses it).
+ * ?env=CONTROLS_TAB=1 keeps the tab. Called by ReadFile (fileio.c) after every read. ---- */
+void pu_patch_read(const char *path, uint32_t buf, long got){
+#ifdef __wasm__
+    static int keep = -1; if (keep < 0){ const char *e = getenv("CONTROLS_TAB"); keep = e && *e && *e != '0'; }
+    if (keep || got <= 0) return;
+    const size_t n = strlen(path);
+    if (n < 14 || strcasecmp(path + n - 14, "optiontabs.lay")) return;
+    char *p = (char *)g_mem + buf; const long len = got;
+    static const char panel[] = "panel=ID_controllers_panel", state[] = "state=normal", sect[] = "[section.";
+    for (long i = 0; i + (long)sizeof panel - 1 <= len; i++){
+        if (strncasecmp(p + i, panel, sizeof panel - 1)) continue;
+        for (long k = i; k >= 0; k--){
+            if (!strncmp(p + k, sect, sizeof sect - 1)) break;                  /* the tab's section has no plain state */
+            if (k + (long)sizeof state - 1 <= len && !strncmp(p + k, state, sizeof state - 1)){
+                memcpy(p + k, "state=hidden", sizeof state - 1);
+                fprintf(stderr, "[controls] the Options screen's Controllers tab is hidden (the page has the controls)\n");
+                return;
+            }
+        }
+        return;
+    }
+#else
+    (void)path; (void)buf; (void)got;
 #endif
 }

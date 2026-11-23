@@ -186,6 +186,7 @@ static pthread_mutex_t g_rmx = PTHREAD_MUTEX_INITIALIZER;
 void guest_wait_begin(void); void guest_wait_end(void);
 int thrash_call(CPU *c, const char *name, uint32_t *r){
     if (strncmp(name, "_THRASH_", 8)) return 0;
+    { void guest_yield_if_long(double); guest_yield_if_long(4.0); }
     if (pthread_mutex_trylock(&g_rmx) != 0){ guest_wait_begin(); pthread_mutex_lock(&g_rmx); guest_wait_end(); }
     int k = thrash_call_locked(c, name, r);
     pthread_mutex_unlock(&g_rmx);

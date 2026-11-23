@@ -119,7 +119,9 @@ static int g_trace = -1;
 #define BUF_FREQ(o)     MR32((o) + 64u)
 #define BUF_VOL(o)      MR32((o) + 68u)
 #define BUF_PAN(o)      MR32((o) + 72u)
-#define BUF_EXTRA       80u
+#define BUF_WHEAD(o)    MR32((o) + 80u)     /* byte offset where the game's last partial write (Unlock) ended */
+#define BUF_WCNT(o)     MR32((o) + 84u)     /* partial writes so far: the page's mixer reads a streamed buffer behind them */
+#define BUF_EXTRA       96u
 
 static uint64_t now_us(void){
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
@@ -146,11 +148,34 @@ void audio_lead_report(void){
         g_lead_min[i] = 0x7fffffff; g_lead_over[i] = 0; g_lead_n[i] = 0;
     }
 }
-static void sbuf_add(uint32_t b){ pthread_mutex_lock(&g_amx); if (g_nsbuf < SBUF_MAX) g_sbuf[g_nsbuf++] = b; pthread_mutex_unlock(&g_amx); }
+/* The browser's mixer (web/src/audio/worklet.ts) runs in the page's AudioWorklet and reads the buffers straight from
+ * guest memory: this table tells it which buffers exist. seq is odd while the list changes (it copies the list again
+ * then). Layout shared with worklet.ts (AUD2). */
+typedef struct {
+    uint32_t magic, version;
+    volatile uint32_t seq, n, muted, ds_level;
+    uint32_t bufs[SBUF_MAX];
+    volatile uint32_t wake;     /* the worklet adds 1 and notifies when a streamed buffer runs low (pu_audio_wake) */
+} AudioShare;
+static AudioShare g_ashare = { 0x41554432u, 1u, 0, 0, 0, 0, { 0 }, 0 };
+static int g_ashare_on;
+void *pu_audio_share(uint32_t *size){ if (size) *size = sizeof g_ashare; g_ashare_on = 1; return &g_ashare; }
+/* The game's sound thread (its loop at 0058F880: write the stream, Sleep) sleeps on this word: the page's mixer wakes it
+ * when the stream runs low, from the audio device's real-time thread. A timed wait alone wakes up to a Windows timer tick
+ * (15.6 ms) late in Chrome, 20-30 times in 10 s of a race; each such gap needs that much more sound queued. */
+volatile uint32_t *pu_audio_wake(void){ return g_ashare_on ? &g_ashare.wake : 0; }
+static void ashare_sync(void){                  /* under g_amx */
+    __atomic_store_n(&g_ashare.seq, g_ashare.seq + 1u, __ATOMIC_RELEASE);
+    for (int i = 0; i < g_nsbuf; i++) g_ashare.bufs[i] = g_sbuf[i];
+    g_ashare.n = (uint32_t)g_nsbuf;
+    __atomic_store_n(&g_ashare.seq, g_ashare.seq + 1u, __ATOMIC_RELEASE);
+}
+static void sbuf_add(uint32_t b){ pthread_mutex_lock(&g_amx); if (g_nsbuf < SBUF_MAX) g_sbuf[g_nsbuf++] = b; ashare_sync(); pthread_mutex_unlock(&g_amx); }
 static void sbuf_del(uint32_t b){ pthread_mutex_lock(&g_amx);
     for (int i = 0; i < g_nsbuf; i++) if (g_sbuf[i] == b){ g_sbuf[i] = g_sbuf[--g_nsbuf]; break; }
-    pthread_mutex_unlock(&g_amx); }
+    ashare_sync(); pthread_mutex_unlock(&g_amx); }
 static uint32_t g_ds_level;      /* SetCooperativeLevel: 3 = DSSCL_WRITEPRIMARY */
+static int g_audio_stat_w = -1;
 
 static uint32_t com_new(uint32_t iface, uint32_t extra){
     if (!g_vtab[iface]){
@@ -367,12 +392,12 @@ static uint32_t ds_call(CPU *c, uint32_t self, int m, const uint32_t *a){
         if (!com_is(src, IF_DSBUF)){ if (pp) MR32(pp) = 0; return E_FAIL; }
         uint32_t b = com_new(IF_DSBUF, BUF_EXTRA);
         memcpy(g_mem + b + 4, g_mem + src + 4, BUF_EXTRA - 4);
-        BUF_STATE(b) = 0; BUF_POS(b) = 0;
+        BUF_STATE(b) = 0; BUF_POS(b) = 0; BUF_WCNT(b) = 0;
         uint32_t root = BUF_OWNER(src) ? BUF_OWNER(src) : src;
         BUF_OWNER(b) = root; CH_REF(root)++; sbuf_add(b);
         if (pp) MR32(pp) = b;
         return S_OK; }
-    case 6: g_ds_level = a[2]; return S_OK;  /* SetCooperativeLevel(this, hwnd, level) */
+    case 6: g_ds_level = a[2]; g_ashare.ds_level = a[2]; return S_OK;  /* SetCooperativeLevel(this, hwnd, level) */
     case 8: { uint32_t p = a[1]; if (p) MR32(p) = 4u; return S_OK; }   /* GetSpeakerConfig: stereo */
     }
     (void)c; (void)self;
@@ -392,6 +417,12 @@ static uint32_t dsbuf_call(CPU *c, uint32_t b, int m, const uint32_t *a){
         uint32_t ahead = BUF_BPS(b) / 100u;     /* the write cursor ~10 ms ahead */
         if (a[1]) MR32(a[1]) = pos;
         if (a[2]) MR32(a[2]) = sz ? (pos + ahead) % sz : 0;
+        /* The game's stream writer (0058F8F0, which asks from 0058F945) keeps its write-ahead at 006AD790 and, after 3000
+         * passes (counter 006AD7A4), lowers it 16 frames every 10 passes while its margin allows. With the page's mixer
+         * reading behind the writes, that lead no longer adds latency, but lowering it slows the writes below real time
+         * (2 % with the worklet waking the writer every few ms) and drains the mixer's margin: hold the counter at 0.
+         * Raising the lead after a stall (same function, 0058FCD0) stays. */
+        if (g_ashare_on && c->eip == 0x0058F945u) MR32(0x006AD7A4u) = 0;
         return S_OK; }
     case 5: {                                   /* GetFormat(this, wfx, size, pwritten) */
         uint32_t p = a[1], n = a[2];
@@ -438,8 +469,30 @@ static uint32_t dsbuf_call(CPU *c, uint32_t b, int m, const uint32_t *a){
         BUF_POS(b) = pos; BUF_T0LO(b) = (uint32_t)t; BUF_T0HI(b) = (uint32_t)(t >> 32);
         return S_OK; }
     case 18: BUF_POS(b) = ds_play_pos(b); BUF_STATE(b) = 0; return S_OK;   /* Stop */
+    case 19: {                                  /* Unlock(this, p1, n1, p2, n2): where a partial write ends, for the page's mixer */
+        const uint32_t p1 = a[1], n1 = a[2], p2 = a[3], n2 = a[4], data = BUF_DATA(b);
+        if (sz && data && !(BUF_FLAGS(b) & 1u) && n1 + n2 < sz){
+            const uint32_t end = n2 && p2 >= data ? p2 - data + n2 : p1 >= data ? p1 - data + n1 : 0u;
+            __atomic_store_n(&MR32(b + 80u), end % sz, __ATOMIC_RELEASE);
+            __atomic_store_n(&MR32(b + 84u), BUF_WCNT(b) + 1u, __ATOMIC_RELEASE);
+            if (g_audio_stat_w < 0){ const char *e = getenv("AUDIOSTAT"); g_audio_stat_w = e && *e && *e != '0'; }
+            if (g_audio_stat_w && sz >= 16384u){          /* AUDIOSTAT: the gaps between the game's writes to a streamed buffer */
+                static uint64_t t_last, t_rep; static uint32_t gmax, g15, g25, g40, nw;
+                const uint64_t t = now_us();
+                if (t_last){ const uint32_t g = (uint32_t)(t - t_last); if (g > gmax) gmax = g; g15 += g > 15000; g25 += g > 25000; g40 += g > 40000; nw++;
+                    static int shown; if (g > 30000 && shown < 300){ shown++; fprintf(stderr, "[audiostat] write gap %.1f ms, ended at t=%.3f\n", g / 1000.0, (double)(t % 1000000000u) / 1e6); } }
+                t_last = t;
+                if (!t_rep) t_rep = t;
+                if (t - t_rep >= 10000000u){
+                    fprintf(stderr, "[audiostat] game writes to 0x%08x: %u, longest gap %.1f ms, gaps over 15 ms %u, over 25 ms %u, over 40 ms %u, sleep %u ms\n",
+                            b, nw, gmax / 1000.0, g15, g25, g40, (unsigned)MR8(0x6B48E1u));
+                    t_rep = t; gmax = g15 = g25 = g40 = nw = 0;
+                }
+            }
+        }
+        return S_OK; }
     }
-    return S_OK;                                /* Initialize, Unlock, Restore */
+    return S_OK;                                /* Initialize, Restore */
 }
 
 /* IIDs the game may ask a sound buffer / the device for (Data1 is enough) */
@@ -546,7 +599,7 @@ void com_report(void){
  * pan, SetFrequency, 8/16-bit, mono/stereo; 3D parameters not yet. */
 static volatile int g_audio_muted;
 volatile uint32_t g_audio_resyncs;
-void audio_set_muted(int on){ g_audio_muted = on; }
+void audio_set_muted(int on){ g_audio_muted = on; g_ashare.muted = (uint32_t)on; }
 static double db_gain(int32_t v){ if (v >= 0) return 1.0; if (v <= -10000) return 0.0; return pow(10.0, v / 2000.0); }
 void pu_audio_render(float *out, int frames, int rate, int64_t t_ahead_us){
     static double s_t = -1;                  /* mixer time of the next frame, us */

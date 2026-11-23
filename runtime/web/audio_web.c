@@ -1,10 +1,12 @@
-/* nfs5-web WEB3: sound in the browser. A thread keeps a ring of stereo floats filled from the mixer (pu_audio_render,
- * runtime/pu_com.c); the page's AudioWorklet (web/src/audio/worklet.ts) plays from it. */
+/* nfs5-web WEB3: sound in the browser. By default the page's AudioWorklet (web/src/audio/worklet.ts) mixes the game's
+ * sound buffers itself from the table runtime/pu_com.c publishes (AUD2). NFS5_AUDIOMIX=ring: the first way, a thread here
+ * keeps a ring of stereo floats filled from the C mixer (pu_audio_render) and the worklet plays that ring. */
 #include "host_abi.h"
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 void pu_audio_render(float *out, int frames, int rate, int64_t t_ahead_us);
@@ -63,6 +65,17 @@ void audio_host_start(void){
     started = 1;
     const char *na = getenv("NFS5_NOAUDIO");
     if (na && *na && *na != '0'){ fprintf(stderr, "[audio] off (NFS5_NOAUDIO)\n"); return; }
+    /* By default the page's AudioWorklet mixes the guest's buffers itself (web/src/audio/worklet.ts): no ring between, and a
+     * streamed buffer is read just behind the game's last write, so what is heard lags what the game wrote by ~10 ms
+     * instead of the game's own lead (50-300 ms) plus this ring's 50 ms. NFS5_AUDIOMIX=ring: the old ring from this thread. */
+    const char *mx = getenv("NFS5_AUDIOMIX");
+    if (!(mx && !strcmp(mx, "ring"))){
+        void *pu_audio_share(uint32_t *size);
+        uint32_t n = 0; void *s = pu_audio_share(&n);
+        nfsu2_register(HOST_KIND_AUDIO, s, n);
+        fprintf(stderr, "[audio] mixer in the page's AudioWorklet\n");
+        return;
+    }
     nfsu2_register(HOST_KIND_AUDIO, &g_ring, sizeof g_ring);
     pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 256 * 1024);
     if (pthread_create(&t, &a, audio_thread, 0)) fprintf(stderr, "[audio] no thread\n");

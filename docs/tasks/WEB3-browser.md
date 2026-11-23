@@ -15,7 +15,9 @@ scripts, except what is listed under "Not checked".
   segment. Offscreen rgba8 + depth24plus at 1280x960, blitted on present; one present per display frame, a timer drains
   upload-only segments (and everything in a hidden tab).
 - `runtime/web/input_web.c` + `web/src/input.ts`: keyboard and mouse mailbox (DIK table, window messages).
-- `runtime/web/audio_web.c` + `web/src/audio/worklet.ts`: 48 kHz float ring, target 50 ms; starts on the first click or key.
+- `runtime/web/audio_web.c` + `web/src/audio/worklet.ts`: the AudioWorklet mixes the game's sound buffers itself from guest
+  memory, the stream just behind the game's last write (AUD1, `docs/findings/AUD1-audio-latency.md`); the first way, a
+  48 kHz float ring with 50 ms queued, stays as `?env=NFS5_AUDIOMIX=ring`. Starts on the first click, key or touch.
 
 ## Findings
 

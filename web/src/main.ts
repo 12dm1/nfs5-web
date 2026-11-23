@@ -7,6 +7,7 @@ import { MANIFEST_URL, DATA_BASE } from './host/datacache';
 import { attachRenderer, raceMode } from './gpu/renderer';
 import { attachInput } from './input';
 import { attachLan } from './net/lan';
+import { attachTouch } from './touch';
 
 const q = new URLSearchParams(location.search);
 const statusEl = document.getElementById('status')!;
@@ -28,17 +29,24 @@ const log = (s: string) => {
   pendingLog.push(tag ? s.split(NL).filter(l => l.length).map(l => tag + l).join(NL) : s);
 };
 
-function attachAudio(memory: WebAssembly.Memory, ptr: number) {
-  const ac = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+function attachAudio(memory: WebAssembly.Memory, ptr: number, stat: boolean) {
+  // latencyHint 0: the smallest output buffer the device allows ('interactive' may pick a larger one)
+  const ac = new AudioContext({ sampleRate: 48000, latencyHint: 0 });
   void ac.audioWorklet.addModule('/audio/worklet.js').then(() => {
     const node = new AudioWorkletNode(ac, 'nfs5-ring', { numberOfInputs: 0, outputChannelCount: [2] });
-    node.port.postMessage({ sab: memory.buffer, ptr });
+    node.port.postMessage({ sab: memory.buffer, ptr, stat });
+    // the worklet reads play cursors on the game's clock (each worker's time origin + now, game-worker.ts): the
+    // context time of now, sent again every second
+    const clock = () => node.port.postMessage({ hostUs: (performance.timeOrigin + performance.now()) * 1000, ctx: ac.currentTime });
+    clock(); setInterval(clock, 1000);
+    node.port.onmessage = (e: MessageEvent<{ stat?: string }>) => {
+      if (e.data.stat) log(`[audiostat] worklet: ${e.data.stat}; output: base ${(ac.baseLatency * 1000).toFixed(1)} ms, device ${((ac.outputLatency ?? 0) * 1000).toFixed(1)} ms, ${ac.state}`);
+    };
     node.connect(ac.destination);
   });
-  // browsers start sound on the first click or key
+  // browsers start sound on the first click, key or touch
   const resume = () => { if (ac.state !== 'running') void ac.resume(); };
-  window.addEventListener('mousedown', resume);
-  window.addEventListener('keydown', resume);
+  for (const ev of ['mousedown', 'keydown', 'pointerdown', 'touchend']) window.addEventListener(ev, resume);
 }
 
 async function main() {
@@ -74,8 +82,8 @@ async function main() {
   });
   const g = globalThis as unknown as Record<string, unknown>;
   g.game = p;
-  void p.registered(HostKind.Input).then(r => attachInput(p.memory, r.ptr, canvas));
-  void p.registered(HostKind.Audio).then(r => attachAudio(p.memory, r.ptr));
+  void p.registered(HostKind.Input).then(r => { attachInput(p.memory, r.ptr, canvas); attachTouch(); });
+  void p.registered(HostKind.Audio).then(r => attachAudio(p.memory, r.ptr, !!env.AUDIOSTAT && env.AUDIOSTAT !== '0'));
   // the game's Winsock (runtime/web/winsock_web.c) registers its mailbox at WSAStartup
   void p.registered(HostKind.Lan).then(r => { g.lan = attachLan(p.memory, r.ptr, log); });
   const shots = (q.get('shots') ?? '').split(',').filter(Boolean).map(Number);
