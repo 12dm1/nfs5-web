@@ -14,7 +14,7 @@ const eval_ = arg('eval', '');
 // --origin-port <n>: the page thinks it is on that port, so a profile's saves from there show up while the server is on --port
 const ORIGIN = +arg('origin-port', PORT);
 
-const srv = spawn(process.execPath, [path.join(HERE, '../server.mjs'), '--port', String(PORT)], { stdio: ['ignore', 'inherit', 'inherit'] });
+const srv = spawn(process.execPath, [path.join(HERE, '../server.mjs'), '--port', String(PORT), ...(process.env.SERVER_ARGS ?? '').split(' ').filter(Boolean)], { stdio: ['ignore', 'inherit', 'inherit'] });
 await new Promise(r => setTimeout(r, 800));
 const launch = {
   executablePath: arg('chrome', 'C:/Program Files/Google/Chrome/Application/chrome.exe'),

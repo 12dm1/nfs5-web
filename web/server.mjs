@@ -20,7 +20,7 @@ const PUBLIC = process.argv.includes('--public');
 // ON1 online: the virtual network's switch at /lan + the NetGather lobby (web/online); --udp <port> also lets PC
 // players in over real UDP (dx11z net_entry_host/net_entry_port), --cars the OS1 car ladder for the bots' cars
 const online = createOnline({ dataDir: DATA, carsJson: arg('cars', 'M:/Games/nfspu_nglide/_mod/netserver/cars.json'),
-  udpPort: +arg('udp', 0), logDir: path.join(ROOT, 'out/online'), verbose: process.argv.includes('--net-verbose') });
+  udpPort: +arg('udp', 0), logDir: arg('logs', path.join(ROOT, 'out/online')), verbose: process.argv.includes('--net-verbose') });
 // A copy of the game without the menu music (GameData/Music is optional at install time): this folder takes its place.
 const MUSIC = arg('music', path.join(ROOT, 'out/save/gamedata/music'));
 const MOD = arg('mod', path.join(ROOT, 'out/mod'));
