@@ -11,8 +11,10 @@ lifter this repository started from (`licenses/`).
 > Not affiliated with or endorsed by Electronic Arts. This repository contains none of the game's code or data:
 > no EXE, no DLL, no game files, no lifted C, no compiled module. All of that is made locally from your copy.
 
-**Status:** step 1 (see [docs/PLAN.md](docs/PLAN.md)). The game runs in Chrome on your own PC: menus, sound, a race.
-The NFS5 Reforged features, the High Stakes tracks and online play come next.
+**Play it:** https://nfs5-reforged.duckdns.org/ — in a current browser on a PC, Mac, Android phone, iPhone or iPad.
+
+**Status:** the game runs in the browser on PCs and phones: menus, career, Quick Race with up to 15 opponents,
+the High Stakes tracks, the EA add-on cars, gamepad and touch controls, and online races (see [docs/PLAN.md](docs/PLAN.md)).
 
 ## What you need
 
