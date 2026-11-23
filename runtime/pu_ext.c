@@ -49,9 +49,31 @@ static void names_load(void){
     fprintf(stderr, "[hs] %d track names\n", g_nnames);
 }
 /* 004E06D0, GetString(id), cdecl */
+/* ON1 race modes: the create-game screen's MODE combo (patches/exe_v35.txt points its row table here); the value is
+ * setup record 0x14, web/online/netgather.mjs RACE_MODES */
+#define RACE_MODE_TABLE 0x006C1F40u
+#define RACE_MODE_ID    900001u
+static const char *const k_race_modes[3] = { "Quick race", "Quick race + bots", "Career tournament" };
+static uint32_t g_race_mode_text[3];
 void sub_004e06d0(CPU *restrict c){
     if (g_nnames < 0) names_load();
+    if (!g_race_mode_text[0]){
+        for (uint32_t i = 0; i < 3; i++){
+            MR32(RACE_MODE_TABLE + 4u * i) = RACE_MODE_ID + i;
+            g_race_mode_text[i] = gheap_alloc(1, (uint32_t)strlen(k_race_modes[i]) + 1, 1);
+            strcpy((char *)(g_mem + g_race_mode_text[i]), k_race_modes[i]);
+        }
+        MR32(RACE_MODE_TABLE + 12u) = 0;
+    }
     const uint32_t id = MR32(c->esp + 4);
+    if (id >= RACE_MODE_ID && id < RACE_MODE_ID + 3){ c->eax = g_race_mode_text[id - RACE_MODE_ID]; POP32(c->eip); return; }
+    /* ON1: MULTIPLAYER is the Online button now (nettest.c online_auto); its title on the lobby and the help line */
+    { static uint32_t t_online, t_help;
+      if (!t_online){ static const char a[] = "online", b[] = "Race other players online: quick races, with or without bots, and career tournaments";
+          t_online = gheap_alloc(1, sizeof a, 1); memcpy(g_mem + t_online, a, sizeof a);
+          t_help = gheap_alloc(1, sizeof b, 1); memcpy(g_mem + t_help, b, sizeof b); }
+      if (id == 12403u || id == 16305u || id == 15404u){ c->eax = t_online; POP32(c->eip); return; }
+      if (id == 1006u){ c->eax = t_help; POP32(c->eip); return; } }
     static const uint32_t off[4] = { 0, 0x14, 0x28, 0x3C };
     for (int v = 0; v < 4; v++){
         if (id >= NAME_BASE + off[v] && id - (NAME_BASE + off[v]) < (uint32_t)g_nnames){

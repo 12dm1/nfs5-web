@@ -104,3 +104,35 @@
 005CDB78  06000000    01000000
 005CDB90  05000000    01000000
 005CDB94  06000000    01000000
+# ON1 online: the Internet mode's update check (UGameUpdater 004A56E0) never starts, whatever fe.txt's castanet says
+# (the clean fe.txt has castanet=1: "Checking for updates..." would wait for EA's dead updater; PC mod N1 set castanet=0)
+004A56EA  750C          9090              # jne past "status = 0; return" -> fall into it
+# ON1 online race modes (PC mod N1 race_modes.cpp): the MODE combo of the create-game screen carries PvP / PvE / career
+# instead of the netcode mode (COMMSPOSITIONAL 00657408, setup record 0x14). 20 reads that only ask "network race?" read
+# COMM_MODE 00657404 instead; the car-state send gate asks COMM_MODE != 0; the combo's row table moves to 006C1F40
+# (runtime/pu_ext.c writes {900001, 900002, 900003, 0} there, texts from the 004E06D0 override)
+00413985  08746500    04746500
+00414929  08746500    04746500
+00414A17  08746500    04746500
+00415457  08746500    04746500
+00416247  08746500    04746500
+0041637E  08746500    04746500
+004168B0  08746500    04746500
+00427C7F  08746500    04746500
+00461F71  08746500    04746500
+004639C8  08746500    04746500
+0048D7CD  08746500    04746500
+0048EB36  08746500    04746500
+004901A1  08746500    04746500
+00494849  08746500    04746500
+00496A3C  08746500    04746500
+00499036  08746500    04746500
+00499233  08746500    04746500
+00499D24  08746500    04746500
+0049B9AC  08746500    04746500
+0049F0DB  08746500    04746500
+0048EE11  833D087465000175  833D047465000074  # cmp [COMMSPOSITIONAL],1 / jne -> cmp [COMM_MODE],0 / je: own car state in any network race
+0050BAFD  74965B00    401F6C00    # the MODE row table 005B9674 -> 006C1F40
+0050C003  74965B00    401F6C00    # the MODE row table 005B9674 -> 006C1F40
+004BA276  74965B00    401F6C00    # the MODE row table 005B9674 -> 006C1F40
+0048F665  8B1485008C5E00  8B1485348B5E00  # ON1 PvE bots: a received car state finds its car in the full array 005E8B34 (005E8C00 holds only the members' cars)

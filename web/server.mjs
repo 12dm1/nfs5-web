@@ -7,11 +7,17 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createOnline } from './online/vnet.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.dirname(HERE);
 const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 ? process.argv[i + 1] : d; };
 const PORT = +arg('port', 8077), DATA = arg('data', 'M:/Games/nfs5_clean'), EXE = arg('exe', path.join(ROOT, 'out/PORSCHE.EXE'));
 const PASSWORD = arg('password', '');
+const HOST = arg('host', '127.0.0.1');
+// ON1 online: the virtual network's switch at /lan + the NetGather lobby (web/online); --udp <port> also lets PC
+// players in over real UDP (dx11z net_entry_host/net_entry_port), --cars the OS1 car ladder for the bots' cars
+const online = createOnline({ dataDir: DATA, carsJson: arg('cars', 'M:/Games/nfspu_nglide/_mod/netserver/cars.json'),
+  udpPort: +arg('udp', 0), logDir: path.join(ROOT, 'out/online'), verbose: process.argv.includes('--net-verbose') });
 // A copy of the game without the menu music (GameData/Music is optional at install time): this folder takes its place.
 const MUSIC = arg('music', path.join(ROOT, 'out/save/gamedata/music'));
 const MOD = arg('mod', path.join(ROOT, 'out/mod'));
@@ -101,4 +107,7 @@ http.createServer((req, res) => {
   const full = path.resolve(HERE, 'dist', rel);
   if (!full.startsWith(path.resolve(HERE, 'dist'))) { res.writeHead(403); res.end(); return; }
   sendFile(res, full, TYPES[path.extname(full)] || 'application/octet-stream', { 'Cache-Control': 'no-cache' });
-}).listen(PORT, '127.0.0.1', () => console.log(`nfs5-web on http://127.0.0.1:${PORT}/ (data: ${DATA})`));
+}).on('upgrade', (req, socket) => {
+  if (new URL(req.url, 'http://x').pathname !== '/lan' || !authorized(req)) { socket.destroy(); return; }
+  online.upgrade(req, socket);
+}).listen(PORT, HOST, () => console.log(`nfs5-web on http://${HOST}:${PORT}/ (data: ${DATA})`));

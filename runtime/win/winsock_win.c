@@ -179,3 +179,7 @@ void winsock_report(void){
         fprintf(stderr, "    socket 0x%x: %llu packets sent (%llu B), %llu received (%llu B)\n", SOCK_BASE + (uint32_t)i,
                 (unsigned long long)g_s[i].txn, (unsigned long long)g_s[i].tx, (unsigned long long)g_s[i].rxn, (unsigned long long)g_s[i].rx);
 }
+
+/* ON2: the browser build's control line to the server (runtime/web/winsock_web.c); none in the native build */
+int online_ctl_recv(char *out, int max){ (void)out; (void)max; return 0; }
+int online_ctl_send(const char *text){ (void)text; return 0; }

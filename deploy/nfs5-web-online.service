@@ -1,0 +1,29 @@
+# nfs5-web online server (web/online/standalone.mjs): the browsers' virtual network at /lan behind nginx
+# (wss://nfs5-reforged.duckdns.org/lan -> 127.0.0.1:9450), the lobby, PvE bots and career tournaments.
+# Installed by deploy/install-online.sh. The game data it reads (nfs5.car, nfs5.trn) is copied to
+# /opt/nfs5-web-online/data/FEData/Data by the same script and is never part of the repository.
+[Unit]
+Description=nfs5-web online server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/nfs5-web-online
+StateDirectory=nfs5-web-online
+ExecStart=/usr/bin/node /opt/nfs5-web-online/online/standalone.mjs --port 9450 --host 127.0.0.1 --data /opt/nfs5-web-online/data --cars /opt/nfs5-reforged/netserver/cars.json --logs /var/lib/nfs5-web-online
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

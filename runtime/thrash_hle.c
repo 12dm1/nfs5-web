@@ -38,6 +38,9 @@ const ImpEnt g_pu_imp[] = {
      * unchecked after GetProcAddress (0x4DBE36); the PC mod has its own
      * (wrapper driver_picture.cpp), here: pu_imports.c */
     {0u, "gimme.dll", "ConvertFile", 0},
+    /* ICMP.DLL (LoadLibrary + GetProcAddress, the server list's ping 0055DA10): runtime/web/winsock_web.c,
+     * runtime/win/winsock_win.c */
+    {0u, "ICMP.DLL", "IcmpCreateFile", 0}, {0u, "ICMP.DLL", "IcmpCloseHandle", 1}, {0u, "ICMP.DLL", "IcmpSendEcho", 8},
 };
 const uint32_t g_pu_imp_count = sizeof g_pu_imp / sizeof *g_pu_imp;
 
