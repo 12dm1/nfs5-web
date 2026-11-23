@@ -8,6 +8,7 @@ import { attachRenderer, raceMode } from './gpu/renderer';
 import { attachInput } from './input';
 import { attachLan } from './net/lan';
 import { attachTouch } from './touch';
+import { attachSoftKeyboard } from './softkb';
 
 const q = new URLSearchParams(location.search);
 const statusEl = document.getElementById('status')!;
@@ -82,7 +83,7 @@ async function main() {
   });
   const g = globalThis as unknown as Record<string, unknown>;
   g.game = p;
-  void p.registered(HostKind.Input).then(r => { attachInput(p.memory, r.ptr, canvas); attachTouch(); });
+  void p.registered(HostKind.Input).then(r => { attachInput(p.memory, r.ptr, canvas); attachTouch(); attachSoftKeyboard(p.memory, canvas); });
   void p.registered(HostKind.Audio).then(r => attachAudio(p.memory, r.ptr, !!env.AUDIOSTAT && env.AUDIOSTAT !== '0'));
   // the game's Winsock (runtime/web/winsock_web.c) registers its mailbox at WSAStartup
   void p.registered(HostKind.Lan).then(r => { g.lan = attachLan(p.memory, r.ptr, log); });

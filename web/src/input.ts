@@ -27,6 +27,8 @@ const K: Record<string, [number, number]> = {
 export const touchPad = { active: false, buttons: 0, lx: 0, rt: 0, lt: 0 };
 /** What the page's other parts need to know: the game's screen (0 frontend, 1 race menu, 2 driving), when a real pad last moved. */
 export const padState = { mode: -1, padAt: -1e9, rumble: (_ms: number) => { } };
+/** Text from outside the keyboard events (softkb.ts: a phone's on-screen keyboard): one character or a key by its code. */
+export const textInput = { char: (_c: string) => { }, key: (_code: string) => { } };
 
 export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLElement) {
   const sab = memory.buffer as unknown as SharedArrayBuffer;
@@ -67,6 +69,20 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     else if (down && e.code === 'Backspace') msg(WM.CHAR, 8, l);
     else if (down && e.code === 'Escape') msg(WM.CHAR, 27, l);
     else if (down && e.code === 'Tab') msg(WM.CHAR, 9, l);
+  };
+  const tap = (code: string, ch: string) => {
+    const ev = (down: boolean) => key({ code, key: ch, altKey: false, ctrlKey: false, repeat: false, preventDefault() { } } as unknown as KeyboardEvent, down);
+    ev(true); ev(false);
+  };
+  textInput.key = code => tap(code, '');
+  // a letter, digit or space as its key (down + up, the character with it); anything else only as WM_CHAR (the game's
+  // text is 8-bit: other characters are dropped)
+  textInput.char = c => {
+    const u = c.toUpperCase();
+    if (u >= 'A' && u <= 'Z' && u.length === 1) tap('Key' + u, c);
+    else if (c >= '0' && c <= '9') tap('Digit' + c, c);
+    else if (c === ' ') tap('Space', c);
+    else if (c.charCodeAt(0) < 256) msg(WM.CHAR, c.charCodeAt(0), 1);
   };
   window.addEventListener('keydown', e => key(e, true));
   window.addEventListener('keyup', e => key(e, false));
