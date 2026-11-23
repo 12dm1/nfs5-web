@@ -17,7 +17,8 @@ const PAGE_CONNECTING = 1, PAGE_ONLINE = 2, PAGE_OFFLINE = 3;
 
 export interface LanStats { sent: number; received: number; state: string; vip: string }
 
-export function attachLan(memory: WebAssembly.Memory, ptr: number, log: (s: string) => void): LanStats {
+/** server: a remote online server's wss:// address (a development server's ?lan= test parameter, main.ts), else this site's */
+export function attachLan(memory: WebAssembly.Memory, ptr: number, log: (s: string) => void, server: string | null = null): LanStats {
   const u32 = new Uint32Array(memory.buffer);
   const i32 = new Int32Array(memory.buffer);
   const w = (off: number) => (ptr + off) >> 2;
@@ -31,8 +32,7 @@ export function attachLan(memory: WebAssembly.Memory, ptr: number, log: (s: stri
   const ipText = (v: number) => `${v >>> 24}.${(v >>> 16) & 255}.${(v >>> 8) & 255}.${v & 255}`;
   function connect() {
     set(H.pageState, PAGE_CONNECTING);
-    // ?lan=wss://host/lan: a remote online server (web/online/standalone.mjs), else the page's own server
-    const url = new URLSearchParams(location.search).get('lan') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/lan`;
+    const url = server || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/lan`;
     const s = ws = new WebSocket(url);
     s.binaryType = 'arraybuffer';
     s.onopen = () => { backoff = 500; };

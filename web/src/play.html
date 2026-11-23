@@ -26,12 +26,51 @@
   #new li { background: #141416; border-left: 3px solid var(--red); border-radius: 4px; padding: 10px 12px; }
   #new b { display: block; font-weight: 800; font-style: italic; margin-bottom: 2px; }
   #new span { color: var(--dim); font-size: 13px; }
+  /* CLOUD1: the account line and the dialogs (play.ts) */
+  #acct { color: var(--dim); font-size: 14px; min-height: 1.6em; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; justify-content: center; }
+  #acct b { color: var(--fg); }
+  button.link { appearance: none; background: none; border: 0; padding: 0; color: var(--fg); font: inherit; text-decoration: underline; text-decoration-color: #5a5856; text-underline-offset: 3px; cursor: pointer; }
+  button.link:hover, button.link:focus-visible { color: var(--yellow); text-decoration-color: var(--yellow); outline: none; }
+  dialog { background: #141416; color: var(--fg); border: 1px solid #2a2a2d; border-radius: 8px; padding: 24px; width: min(420px, calc(100vw - 32px)); box-sizing: border-box; text-align: left; }
+  dialog.wide { width: min(620px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0, 0, 0, .72); }
+  dialog h2 { margin: 0 0 8px; font-size: 20px; font-weight: 900; font-style: italic; text-transform: uppercase; letter-spacing: .02em; }
+  dialog h3 { margin: 20px 0 6px; font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+  dialog p { margin: 0 0 12px; }
+  dialog .dim, dialog small { color: var(--dim); font-size: 13px; }
+  dialog label { display: block; margin: 10px 0 2px; font-size: 13px; color: var(--dim); }
+  dialog input[type=text], dialog input[type=password] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 9px 10px; border-radius: 5px; border: 1px solid #3a3a3c;
+    background: #0b0b0c; color: var(--fg); font: 16px system-ui, sans-serif; }
+  dialog input:focus-visible { outline: 2px solid var(--yellow); outline-offset: 1px; }
+  dialog button.btn { appearance: none; border: 1px solid #3a3a3c; border-radius: 5px; background: #1e1e21; color: var(--fg); font: 600 14px system-ui, sans-serif; padding: 8px 14px; cursor: pointer; }
+  dialog button.btn:hover, dialog button.btn:focus-visible { border-color: var(--yellow); outline: none; }
+  dialog button.primary { background: var(--red); border-color: var(--red); color: #fff; font-weight: 800; width: 100%; padding: 11px 14px; margin-top: 14px; font-size: 16px; }
+  dialog button.primary:hover, dialog button.primary:focus-visible { background: var(--yellow); border-color: var(--yellow); color: #111; }
+  dialog button.danger:hover, dialog button.danger:focus-visible { border-color: var(--red-hi); color: #ff8a8a; }
+  dialog button:disabled { opacity: .5; pointer-events: none; }
+  dialog .tabs { display: flex; gap: 4px; margin: 14px 0 4px; border-bottom: 1px solid #2a2a2d; }
+  dialog .tabs button { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--dim); font: 700 14px system-ui, sans-serif; padding: 8px 10px; cursor: pointer; }
+  dialog .tabs button[aria-selected=true] { color: var(--fg); border-bottom-color: var(--red); }
+  dialog .warn { color: var(--yellow); font-size: 13px; margin-top: 12px; }
+  dialog .err { color: #ff8a8a; font-size: 14px; min-height: 0; margin: 10px 0 0; }
+  dialog .err:empty { display: none; }
+  dialog .ok { color: #8fd18f; font-size: 14px; }
+  dialog .ok:empty { display: none; }
+  dialog .row { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 8px 0; border-top: 1px solid #222225; }
+  dialog .row:first-of-type { border-top: 0; }
+  dialog .x { position: absolute; top: 10px; right: 12px; appearance: none; background: none; border: 0; color: var(--dim); font-size: 24px; line-height: 1; cursor: pointer; padding: 4px; }
+  dialog .x:hover, dialog .x:focus-visible { color: var(--fg); outline: none; }
+  dialog .after { margin-top: 18px; padding-top: 14px; border-top: 1px solid #2a2a2d; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  dialog .after label { margin: 0; display: flex; gap: 6px; align-items: center; color: var(--dim); }
+  dialog .inline { display: flex; gap: 8px; align-items: flex-end; }
+  dialog .inline input { flex: 1; }
 </style>
 </head>
 <body>
 <main>
   <h1>NFS5 <span>Reforged</span></h1>
   <a id="play" href="/game">PLAY</a>
+  <div id="acct" aria-live="polite"></div>
   <div id="note">Runs in Chrome, Edge and Safari on PC, Mac, Android, iPhone and iPad. The first start loads the game, later starts are quick.</div>
   <section id="new" aria-labelledby="new-h">
     <h2 id="new-h">What's new</h2>
@@ -48,13 +87,49 @@
   </section>
   <a id="src" href="https://github.com/12dm1/nfs5-web" rel="noopener">Source code on GitHub</a>
 </main>
-<script>
-  // The game needs WebGPU and SharedArrayBuffer (the server sends the cross-origin isolation headers).
-  if (!('gpu' in navigator) || typeof SharedArrayBuffer === 'undefined') {
-    const n = document.getElementById('note');
-    n.textContent = 'This browser cannot run the game: it needs WebGPU. Open this page in an up-to-date Chrome, Edge or Safari.';
-    n.className = 'warn';
-  }
-</script>
+
+<dialog id="dlg-sign" aria-labelledby="sign-h">
+  <button type="button" class="x" data-close aria-label="Close">&times;</button>
+  <h2 id="sign-h">Cloud saves</h2>
+  <p class="dim">With an account your career is kept on our server, and you continue it on any device: sign in there and play.</p>
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" id="tab-new" aria-selected="true">Create account</button>
+    <button type="button" role="tab" id="tab-old" aria-selected="false">Sign in</button>
+  </div>
+  <form id="sign-form" method="post" action="/" novalidate>
+    <label for="f-user">Login</label>
+    <input type="text" id="f-user" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="15" required>
+    <small id="f-user-hint">3 to 15 letters, digits, _ or -. It is also your name online.</small>
+    <label for="f-pass">Password</label>
+    <input type="password" id="f-pass" name="password" autocomplete="new-password" maxlength="128" required>
+    <div id="f-pass2-row">
+      <label for="f-pass2">Repeat the password</label>
+      <input type="password" id="f-pass2" name="password2" autocomplete="new-password" maxlength="128">
+    </div>
+    <p class="warn" id="f-warn">There is no password recovery: let your browser or password manager save the password. Your career is tied to it.</p>
+    <p class="err" id="f-err" role="alert"></p>
+    <button type="submit" class="btn primary" id="f-go">Create account and play</button>
+  </form>
+  <div class="after">
+    <button type="button" class="link" id="f-guest">Play without an account</button>
+    <small>Your saves then stay in this browser only. You can create an account later: the saves here go with it.</small>
+    <label><input type="checkbox" id="f-noask"> Don't ask again on this device</label>
+  </div>
+</dialog>
+
+<dialog id="dlg-done" aria-labelledby="done-h">
+  <h2 id="done-h">Account ready</h2>
+  <p>Your career is saved to the cloud as <b id="done-name"></b>. Make sure the password is kept: by your browser, a password manager, or in a file.</p>
+  <button type="button" class="btn" id="done-file">Save the login and password as a file</button>
+  <button type="button" class="btn primary" id="done-play">Play</button>
+</dialog>
+
+<dialog id="dlg-acct" class="wide" aria-labelledby="acct-h">
+  <button type="button" class="x" data-close aria-label="Close">&times;</button>
+  <h2 id="acct-h">Saves</h2>
+  <div id="acct-body"></div>
+  <input type="file" id="restore-file" accept=".zip,application/zip" hidden>
+</dialog>
+<script type="module" src="/play.js"></script>
 </body>
 </html>

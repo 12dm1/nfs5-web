@@ -60,6 +60,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 |---|---|---|
 | IP race in the runtime (WEB2n) | done (native) | browser: WebSocket relay |
 | N1 entry server, race modes, host bots, net pursuit (`net_redirect`, `race_modes`, `net_host_bots`) | later | step 4, the nfsu2-web virtual LAN (docs/PLAN.md); no net pursuit |
+| Accounts and cloud saves (browser only, CLOUD1) | done | login + password on the PLAY page, SaveData synced before the game and after every save, the newer wins with backups, login = online name; web/cloud, web/src/cloud, docs/tasks/CLOUD1-cloud-saves.md (with the security review) |
 
 ## Not needed in the browser
 

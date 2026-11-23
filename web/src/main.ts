@@ -1,6 +1,10 @@
 // nfs5-web WEB3: the page. Starts the game process (host/process.ts) and attaches WebGPU, input and sound to it.
 // URL parameters for the tests: log=1 (the game's log to the server's stdout, POST /test-log), env=K=V,K=V, save=<OPFS
-// folder>, shots=<frame>,<frame> (POST /test-shot/<frame>: raw RGBA of the frame).
+// folder>, seed=<file>,<file>, shots=<frame>,<frame> (POST /test-shot/<frame>: raw RGBA of the frame), tag=<name>,
+// lan=<wss://...>, nocloud=1. They are taken only from a development server (it answers /test-dev.json): on the public
+// site a link must not change a player's game or saves (CLOUD1 review, after nfsu2-web's audit PAGE-1).
+// CLOUD1: a signed-in player's saves are brought from the cloud before the game starts and sent after every save
+// (cloud/sync.ts).
 import { startProcess } from './host/process';
 import { HostKind } from './host/abi';
 import { MANIFEST_URL, DATA_BASE } from './host/datacache';
@@ -9,11 +13,20 @@ import { attachInput } from './input';
 import { attachLan } from './net/lan';
 import { attachTouch } from './touch';
 import { attachSoftKeyboard } from './softkb';
+import { startCloud, type CloudSync } from './cloud/sync';
 
-const q = new URLSearchParams(location.search);
+const dev = await fetch('/test-dev.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).then(j => j?.dev === true, () => false);
+const q = dev ? new URLSearchParams(location.search) : new URLSearchParams();
 const statusEl = document.getElementById('status')!;
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const setStatus = (s: string) => { statusEl.textContent = s; };
+const toastEl = document.getElementById('toast')!;
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
+/** a line for the player over the game, for 9 s */
+const toast = (s: string) => {
+  toastEl.textContent = s; toastEl.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove('on'), 9000);
+};
 
 let pendingLog: string[] = [];
 const toServer = q.get('log') === '1';
@@ -66,15 +79,26 @@ async function main() {
     await w.write(await (await fetch('/test-seed/' + name)).arrayBuffer());
     await w.close();
   }
+  const saveDir = q.get('save') ?? 'save';
+  let cloud: CloudSync | null = null;
+  if (q.get('nocloud') !== '1') {
+    setStatus('Cloud saves...');
+    cloud = await startCloud({ saveDir, note: s => log(s), tell: s => { log('[cloud] ' + s); toast(s); } });
+    if (cloud) addEventListener('pagehide', () => void cloud!.flush());
+  }
   setStatus('Starting the game...');
   const p = await startProcess({
     module,
-    cfg: { args: ['nfs5', '/data/PORSCHE.EXE'], env, dataBase: DATA_BASE, manifestUrl: MANIFEST_URL, saveDir: q.get('save') ?? 'save' },
+    cfg: { args: ['nfs5', '/data/PORSCHE.EXE'], env, dataBase: DATA_BASE, manifestUrl: MANIFEST_URL, saveDir },
     initialPages: info.pages,
     onLog: (s, _fd, tid) => log(`[${tid}] ${s}`),
     onNote: s => log(s),
+    // the game wrote or removed a save: to the cloud a few seconds later (paths are the save folder's, any case)
+    onSaved: path => { if (/^savedata\//i.test(path)) cloud?.changed(); },
+    onRemoved: path => { if (/^savedata\//i.test(path)) cloud?.changed(); },
     onExit: code => {
       log(`[exit] ${code}`);
+      void cloud?.flush();
       // a page cannot close its own tab
       document.getElementById('stage')!.remove();
       statusEl.className = 'ended';
@@ -86,7 +110,7 @@ async function main() {
   void p.registered(HostKind.Input).then(r => { attachInput(p.memory, r.ptr, canvas); attachTouch(); attachSoftKeyboard(p.memory, canvas); });
   void p.registered(HostKind.Audio).then(r => attachAudio(p.memory, r.ptr, !!env.AUDIOSTAT && env.AUDIOSTAT !== '0'));
   // the game's Winsock (runtime/web/winsock_web.c) registers its mailbox at WSAStartup
-  void p.registered(HostKind.Lan).then(r => { g.lan = attachLan(p.memory, r.ptr, log); });
+  void p.registered(HostKind.Lan).then(r => { g.lan = attachLan(p.memory, r.ptr, log, q.get('lan')); });
   const shots = (q.get('shots') ?? '').split(',').filter(Boolean).map(Number);
   const r = await p.registered(HostKind.Gpu);
   const stats = await attachRenderer(p.memory, r.ptr, canvas, log, shots);

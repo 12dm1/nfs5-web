@@ -1,21 +1,31 @@
 [Unit]
-Description=nfs5-web: the browser game (page, module, game files) for nginx on 127.0.0.1:9460
+Description=nfs5-web: the browser game (page, module, game files, accounts and cloud saves) for nginx on 127.0.0.1:9460
 After=network.target
 
+# CLOUD1 (docs/tasks/CLOUD1-cloud-saves.md "Server"): a user of its own (DynamicUser), no longer www-data, which the VPS's PHP sites share:
+# their code cannot read or change the accounts in /var/lib/nfs5-web/cloud, and this one cannot touch theirs.
+# --internal-port 9461: the online server's questions (whose cookie, is a name taken), loopback only, never in nginx.
 [Service]
 Type=simple
-User=www-data
-Group=www-data
+DynamicUser=yes
 WorkingDirectory=/opt/nfs5-web
-ExecStart=/usr/bin/node /opt/nfs5-web/web/server.mjs --public --port 9460 --host 127.0.0.1 --data /opt/nfs5-web/data --mod /opt/nfs5-web/mod --music /opt/nfs5-web/music --addons /opt/nfs5-web/addons --exe /opt/nfs5-web/out/PORSCHE.EXE --cars "" --logs /var/lib/nfs5-web
+ExecStart=/usr/bin/node /opt/nfs5-web/web/server.mjs --public --port 9460 --host 127.0.0.1 --data /opt/nfs5-web/data --mod /opt/nfs5-web/mod --music /opt/nfs5-web/music --addons /opt/nfs5-web/addons --exe /opt/nfs5-web/out/PORSCHE.EXE --cars "" --logs /var/lib/nfs5-web/logs --cloud /var/lib/nfs5-web/cloud --internal-port 9461
 Restart=on-failure
 RestartSec=3
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/var/lib/nfs5-web
 StateDirectory=nfs5-web
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
 MemoryMax=600M
 
 [Install]
