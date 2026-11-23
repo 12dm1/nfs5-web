@@ -17,7 +17,7 @@ PLAY button (`web/src/play.html`), `/game` = the game (`web/src/index.html`). Th
 the game stops without install.txt; the menus open the same missing files as with the whole folder), `mod/`
 (out/mod), `music/` (zzzymus.viv), `addons/` (below), `data/FEData/Movies` (the menu backgrounds ch1-6 and era films
 er1-4pc-av from the PC game folder, 103 MB; the intro films EArts-av/inPC-av are left out as on the PC install, where
-they sit in Movies/backup). 692 MB, 1912 files in the manifest. Phone keyboard for text fields: TC2 (web/src/softkb.ts).
+they sit in Movies/backup). 692 MB, 1912 files in the manifest. Phone keyboard for text fields: TC2 (web/src/softkb.ts); on iPhone the emulated mouse events after a tap took the focus from its field and closed the keyboard, so input.ts drops mouse events for 1 s after a touch (TC2b).
 
 ### EA add-on cars (2026-11-23)
 
