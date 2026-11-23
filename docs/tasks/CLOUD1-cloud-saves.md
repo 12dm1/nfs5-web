@@ -19,9 +19,11 @@ Decisions (the user, 2026-11-23):
 
 * **PLAY page** (`web/src/play.html`, `play.ts`). Under PLAY: "Signed in as X, cloud save 5 min ago, Account", or "Cloud
   saves: not signed in, Sign in or create an account, Saves on this device".
-* **PLAY without an account** opens the dialog: *Create account* / *Sign in* tabs, login (3-15 letters, digits, `_`,
-  `-`; also the online name), password (8+) twice, the warning that there is no recovery, then *Play without an
-  account* and *Don't ask again on this device*.
+* **PLAY without an account** opens the dialog. First a big *Play without an account* button (it has the focus, so no
+  phone keyboard pops up) with *Don't ask again on this device* under it; then, after "or", the account form:
+  *Create account* / *Sign in* tabs, login (3-15 letters, digits, `_`, `-`; also the online name), password (8+)
+  twice, the warning that there is no recovery. Opened from *Sign in or create an account* instead, the dialog has
+  no guest button (2026-11-23: it was a small link under the form, and visitors had to read the form to find it).
 * **After creating an account**: "Account ready", a *Save the login and password as a file* button (a text file), Play.
   Chrome and Edge are asked to save the password (`PasswordCredential`); the others see a normal login form
   (`autocomplete=username/new-password`).

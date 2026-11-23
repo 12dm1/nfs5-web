@@ -60,8 +60,16 @@
   dialog .row:first-of-type { border-top: 0; }
   dialog .x { position: absolute; top: 10px; right: 12px; appearance: none; background: none; border: 0; color: var(--dim); font-size: 24px; line-height: 1; cursor: pointer; padding: 4px; }
   dialog .x:hover, dialog .x:focus-visible { color: var(--fg); outline: none; }
-  dialog .after { margin-top: 18px; padding-top: 14px; border-top: 1px solid #2a2a2d; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
-  dialog .after label { margin: 0; display: flex; gap: 6px; align-items: center; color: var(--dim); }
+  /* the way in without an account: first in the dialog PLAY opens, as big as PLAY; hidden when the player asked to sign in */
+  #guest { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; text-align: center; }
+  #guest[hidden] { display: none; }
+  #f-guest { appearance: none; border: 0; border-radius: 6px; background: var(--red); color: #fff; font: 900 italic clamp(17px, 4.6vw, 22px) system-ui, sans-serif;
+             letter-spacing: .02em; padding: .75em .6em; cursor: pointer; transition: background .12s, color .12s; }
+  #f-guest:hover, #f-guest:focus-visible { background: var(--yellow); color: #111; outline: none; }
+  #guest small { color: var(--dim); font-size: 13px; }
+  #guest label { margin: 0; display: flex; gap: 6px; align-items: center; justify-content: center; color: var(--dim); }
+  #guest .or { display: flex; align-items: center; gap: 12px; margin: 12px 0 4px; color: var(--dim); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
+  #guest .or::before, #guest .or::after { content: ''; flex: 1; border-top: 1px solid #2a2a2d; }
   dialog .inline { display: flex; gap: 8px; align-items: flex-end; }
   dialog .inline input { flex: 1; }
 </style>
@@ -90,6 +98,12 @@
 
 <dialog id="dlg-sign" aria-labelledby="sign-h">
   <button type="button" class="x" data-close aria-label="Close">&times;</button>
+  <div id="guest">
+    <button type="button" id="f-guest">Play without an account</button>
+    <small>Your saves stay in this browser. You can create an account later: the saves here go with it.</small>
+    <label><input type="checkbox" id="f-noask"> Don't ask again on this device</label>
+    <div class="or" aria-hidden="true">or</div>
+  </div>
   <h2 id="sign-h">Cloud saves</h2>
   <p class="dim">With an account your career is kept on our server, and you continue it on any device: sign in there and play.</p>
   <div class="tabs" role="tablist">
@@ -110,11 +124,6 @@
     <p class="err" id="f-err" role="alert"></p>
     <button type="submit" class="btn primary" id="f-go">Create account and play</button>
   </form>
-  <div class="after">
-    <button type="button" class="link" id="f-guest">Play without an account</button>
-    <small>Your saves then stay in this browser only. You can create an account later: the saves here go with it.</small>
-    <label><input type="checkbox" id="f-noask"> Don't ask again on this device</label>
-  </div>
 </dialog>
 
 <dialog id="dlg-done" aria-labelledby="done-h">

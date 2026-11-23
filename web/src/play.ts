@@ -1,6 +1,6 @@
 // The start page (play.html): the PLAY button, and CLOUD1's account line and dialogs (docs/tasks/CLOUD1-cloud-saves.md "Pages").
-// PLAY: signed in (or no cloud on this server, or "don't ask again"): straight to the game; else the dialog that offers
-// an account, with "Play without an account" under it. Everything a server or a player typed is put on the page as
+// PLAY: signed in (or no cloud on this server, or "don't ask again"): straight to the game; else the dialog with a big
+// "Play without an account" first and the account form under it. Everything a server or a player typed is put on the page as
 // text (textContent), never as markup.
 import { api, ago, CloudError, type Me } from './cloud/api';
 import { downloadZip, filesOfZip, keepLocalBackup, localBackups, profilesIn, readLocal, readLocalBackup, restoreLocal, withGameLock } from './cloud/sync';
@@ -73,7 +73,7 @@ play.addEventListener('click', async ev => {
   if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;       // a new tab: just the game
   ev.preventDefault();
   if (me === undefined) await Promise.race([refresh(), new Promise(r => setTimeout(r, 3000))]);
-  if (me && !me.user && store.get(NOASK) !== '1') openSign('new');
+  if (me && !me.user && store.get(NOASK) !== '1') openSign('new', go, true);
   else go();
 });
 
@@ -95,12 +95,14 @@ function setMode(m: 'new' | 'old') {
   fGo.textContent = m === 'new' ? 'Create account and play' : 'Sign in and play';
   fErr.textContent = '';
 }
-function openSign(m: 'new' | 'old', then: () => void = go) {
+/** guest: opened by PLAY, so "Play without an account" comes first (and has the focus: no phone keyboard pops up) */
+function openSign(m: 'new' | 'old', then: () => void = go, guest = false) {
   afterSign = then;
   setMode(m);
+  $('guest').hidden = !guest;
   $<HTMLInputElement>('f-noask').checked = store.get(NOASK) === '1';
   if (!sign.open) sign.showModal();
-  fUser.focus();
+  (guest ? $('f-guest') : fUser).focus();
 }
 $('tab-new').addEventListener('click', () => setMode('new'));
 $('tab-old').addEventListener('click', () => setMode('old'));
