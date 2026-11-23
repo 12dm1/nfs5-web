@@ -620,6 +620,21 @@ void pu_hud_mode(void){
     g_hud_fx = vw > 0 ? (float)w / (float)vw : 1.0f;
     g_hud_fy = vh > 0 ? (float)h / (float)vh : 1.0f;
 }
+/* The race's menus (pause, results: the pages of [0060C9C4]) are laid out on the HUD's virtual screen and hit-tested there, while
+ * the mouse comes in the race mode's pixels: a click on a button as drawn missed it (it hit only up and left of it, by the HUD
+ * scale). input_web.c puts the mouse into the layout's space while such a page is up: the inverse of the HUD's stretch and of
+ * hud_anchor_x (the point's third of the screen picks the side). */
+void pu_race_menu_point(int *x, int *y){
+    if (pu_pad_mode() != 1 || g_hud_w0 <= 0 || (g_hud_fx == 1.0f && g_hud_fy == 1.0f)) return;
+    const uint32_t pages = MR32(0x0060C9C4u);
+    if (!pages || MR32(pages + 4) == MR32(pages)) return;
+    const int sw = (int)MR32(0x00619784u), vw = (int)MR32(HUD_VW), vh = (int)MR32(HUD_VH);
+    if (sw <= 0 || vw <= 0 || vh <= 0) return;
+    const float c = (float)*x / (float)sw, side = c < 1.0f / 3.0f ? 0.0f : c > 2.0f / 3.0f ? 1.0f : 0.5f;
+    int vx = (int)lroundf(((float)*x - (float)(sw - g_hud_w0) * side) / g_hud_fx), vy = (int)lroundf((float)*y / g_hud_fy);
+    *x = vx < 0 ? 0 : vx >= vw ? vw - 1 : vx;
+    *y = vy < 0 ? 0 : vy >= vh ? vh - 1 : vy;
+}
 /* 0041E170, the layout loader, cdecl (name, set, width, height): the race and the Display page ask for the same record */
 void sub_0041e170(CPU *restrict c){
     int vw, vh;

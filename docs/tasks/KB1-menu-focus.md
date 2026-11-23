@@ -1,7 +1,6 @@
 # KB1: menu focus for keyboard and gamepad (experimental)
 
-Status 2026-11-23: opt-in with `?focus=1` (`/game?focus=1` on the public site). Without the flag the input path is
-the same as before. Research and code 2026-11-05; merged into main 2026-11-23. Addresses: Porsche Unleashed v3.5,
+Status 2026-11-23: on by default, `?focus=0` turns it off (it was opt-in with `?focus=1` until then). Research and code 2026-11-05; merged into main 2026-11-23. Addresses: Porsche Unleashed v3.5,
 base `0x00400000`.
 
 ## What it does
@@ -15,6 +14,14 @@ game's own code handles every click, so its checks (disabled items, prices, conf
 - A real mouse move drops the focus; the gamepad cursor (GP1) still works, the left stick drops the focus too.
 - Esc presses the page's `GOBACK`, `GOBACKMINUSONE` or `CANCELCREATEPLAYER` button when one is there.
 - Race pause menu: Continue, the quit dialog and Esc back out are covered.
+
+Race menus (pause, results: the pages of `[0x0060C9C4]`) are laid out and hit-tested on the HUD's virtual screen
+(`HUD_VW/HUD_VH` at `0x006C1F00/04`, e.g. 955x716 for a 1280x960 race with the HUD scale 0.67), and a live resize
+shifts each piece by its third of the screen. `readRaceFocusPage` maps the buttons to the screen that way for the
+frame. The mouse came in the race mode's pixels, so a click or tap on a button as drawn missed it in any race wider
+than 640x480 (it hit only up and left of it); `pu_race_menu_point` (runtime/pu_ext.c), called from
+`runtime/web/input_web.c` for the window messages and the cursor, maps it back into the layout's space while such a
+page is up. Checked 2026-11-23 on a 1280x960 Quick Race through the menus.
 
 Control types covered (vtable -> kind): `FEGoToButton 0x005B5D10`, bottom bar buttons `0x005B5D80`, `FEInputBox`,
 `FEComboBox 0x005B5C24`, `ColorBox 0x005B5BA8`, `FEColorSelectBox`, `FEListBox 0x005B611C`, sliders with an integer

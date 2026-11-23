@@ -41,6 +41,7 @@ void win32_post_message(uint32_t m, uint32_t wp, uint32_t lp);
 int win32_msg_room(void);
 
 int pu_pad_mode(void);
+void pu_race_menu_point(int *x, int *y);     /* pu_ext.c: the race's menus take the mouse in the HUD layout's space */
 int host_pad_read(uint32_t *buttons, float *lx, float *rt, float *lt){
     if (!__atomic_load_n(&g_mail.pad_on, __ATOMIC_ACQUIRE)) return 0;
     *buttons = g_mail.pad_buttons; *lx = g_mail.pad_lx; *rt = g_mail.pad_rt; *lt = g_mail.pad_lt;
@@ -59,6 +60,7 @@ static void cursor(int *x, int *y){
     int cy = (int)(((int64_t)__atomic_load_n(&g_mail.my, __ATOMIC_RELAXED) * h) >> 16);
     *x = cx < 0 ? 0 : cx >= (int)w ? (int)w - 1 : cx;
     *y = cy < 0 ? 0 : cy >= (int)h ? (int)h - 1 : cy;
+    pu_race_menu_point(x, y);
 }
 void metal_get_cursor(int *x, int *y){ cursor(x, y); }
 const uint8_t *host_dik_state(void){ return g_mail.dik; }
@@ -106,7 +108,9 @@ void kbd_pump(void){
             uint32_t x = ((e.l & 0xFFFFu) * w) >> 16, y = ((e.l >> 16) * h) >> 16;
             if (x >= w) x = w - 1;
             if (y >= h) y = h - 1;
-            lp = x | y << 16;
+            int px = (int)x, py = (int)y;
+            pu_race_menu_point(&px, &py);
+            lp = (uint32_t)px | (uint32_t)py << 16;
         }
         switch (e.m){
         case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: g_mbtn |= 1; break;

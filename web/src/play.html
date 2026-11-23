@@ -18,6 +18,8 @@
   #play[aria-disabled="true"] { background: #3a3a3c; color: #8a8784; pointer-events: none; }
   #note { color: var(--dim); font-size: 13px; max-width: 34em; min-height: 1.4em; }
   #note.warn { color: var(--yellow); }
+  #src { color: var(--dim); font-size: 13px; text-decoration: none; border-bottom: 1px solid #3a3a3c; }
+  #src:hover, #src:focus-visible { color: var(--yellow); border-color: var(--yellow); outline: none; }
 </style>
 </head>
 <body>
@@ -25,6 +27,7 @@
   <h1>NFS5 <span>Reforged</span></h1>
   <a id="play" href="/game">PLAY</a>
   <div id="note">Runs in Chrome, Edge and Safari on PC, Mac, Android, iPhone and iPad. The first start loads the game, later starts are quick.</div>
+  <a id="src" href="https://github.com/12dm1/nfs5-web" rel="noopener">Source code on GitHub</a>
 </main>
 <script>
   // The game needs WebGPU and SharedArrayBuffer (the server sends the cross-origin isolation headers).

@@ -34,8 +34,8 @@ export const padState = { mode: -1, padAt: -1e9, rumble: (_ms: number) => { } };
 export const textInput = { char: (_c: string) => { }, key: (_code: string) => { } };
 
 export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLElement) {
-  // The remaining frontend control types are not covered yet; keep the prototype opt-in.
-  const focusEnabled = new URLSearchParams(location.search).get('focus') === '1';
+  // KB1 menu focus: on by default, ?focus=0 turns it off.
+  const focusEnabled = new URLSearchParams(location.search).get('focus') !== '0';
   const sab = memory.buffer as unknown as SharedArrayBuffer;
   const i32 = new Int32Array(sab, ptr, 4096 / 4 + 2048), u32 = new Uint32Array(sab, ptr, 4096 / 4 + 2048);
   const dik = new Uint8Array(sab, ptr + 7196, 256), vk = new Uint8Array(sab, ptr + 7452, 256);

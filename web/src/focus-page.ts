@@ -148,6 +148,10 @@ export function readRaceFocusPage(buffer: ArrayBufferLike): FocusPage | null {
   if (!valid(begin, 8) || end - begin !== 8) return null;
   const page = u(begin), width = u(0x00619784), height = u(0x00619788);
   if (!valid(page, 0x130) || !u(page + 0x0c) || width < 320 || width > 8192 || height < 240 || height > 8192) return null;
+  // The race's menus are laid out on the HUD's virtual screen (runtime/pu_ext.c HUD_VW/HUD_VH), not on the race's mode.
+  const vw = u(0x006c1f00), vh = u(0x006c1f04);
+  const hudW = vw >= 320 && vw <= width ? vw : width, hudH = vh >= 240 && vh <= height ? vh : height;
+  const scale = height / hudH;
   const pageType = u(page);
   const offsets = pageType === 0x005b2d54 ? [0x120, 0x124, 0x128]
     : pageType === 0x005b2b0c ? [0x120, 0x124, 0x128, 0x12c]
@@ -159,9 +163,13 @@ export function readRaceFocusPage(buffer: ArrayBufferLike): FocusPage | null {
     const button = u(page + offset);
     if (!valid(button, 0x104) || u(button) !== 0x005b2904 || !m.getUint8(button + 0x103)) continue;
     const x = u(button + 4), y = u(button + 8), w = u(button + 12), h = u(button + 16);
-    if (!w || !h || x + w > width || y + h > height) continue;
+    if (!w || !h || x + w > hudW || y + h > hudH) continue;
     const back = pageType === 0x005b2d54 ? offset === 0x120 : pageType === 0x005b3554 ? offset === 0x12c : offset === 0x128;
-    items.push({ id: button, kind: 'button', x: x * 640 / width, y: y * 480 / height, width: w * 640 / width, height: h * 480 / height, command: back ? 'GOBACK' : undefined });
+    // HUD layout -> screen pixels: one scale for both axes, then the piece keeps its third of the screen after a live
+    // resize (runtime/pu_ext.c hud_anchor_x; the layout's width is hudW * scale)
+    const c = (x + w / 2) / hudW, side = c < 1 / 3 ? 0 : c > 2 / 3 ? 1 : 0.5;
+    const sx = x * scale + (width - hudW * scale) * side, sy = y * scale;
+    items.push({ id: button, kind: 'button', x: sx * 640 / width, y: sy * 480 / height, width: w * scale * 640 / width, height: h * scale * 480 / height, command: back ? 'GOBACK' : undefined });
   }
   return { window: page, items };
 }
