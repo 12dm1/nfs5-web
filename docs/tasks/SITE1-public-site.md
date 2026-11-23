@@ -15,7 +15,9 @@ PLAY button (`web/src/play.html`), `/game` = the game (`web/src/index.html`). Th
 `/opt/nfs5-web`: `web/` (server.mjs, online/, dist/ without source maps), `out/web/nfs5.wasm|json`, `out/PORSCHE.EXE`
 (patched), `data/` (from nfs5_clean only FEData, GameData, Drivers, fe.txt, version.txt, install.txt, readme.txt:
 the game stops without install.txt; the menus open the same missing files as with the whole folder), `mod/`
-(out/mod), `music/` (zzzymus.viv), `addons/` (below). 584 MB, 1901 files in the manifest.
+(out/mod), `music/` (zzzymus.viv), `addons/` (below), `data/FEData/Movies` (the menu backgrounds ch1-6 and era films
+er1-4pc-av from the PC game folder, 103 MB; the intro films EArts-av/inPC-av are left out as on the PC install, where
+they sit in Movies/backup). 692 MB, 1912 files in the manifest. Phone keyboard for text fields: TC2 (web/src/softkb.ts).
 
 ### EA add-on cars (2026-11-23)
 
