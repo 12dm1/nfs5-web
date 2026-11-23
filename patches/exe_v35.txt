@@ -157,3 +157,4 @@
 004ED013  08            10                #   the clamp value
 004ED38B  09            10                #   + cops + traffic <= 16 (was 9)
 004ED38F  09            10                #   the clamp value
+005372C7  0F85BA000000  909090909090      # MOUSE_getstate (mouse.c, 005372A0): always the window-cursor branch. The race's pause menu switches the access mode to DirectInput (relative deltas) and the menus keep it; the page's cursor is absolute (touch taps), so the DI branch made taps drag the cursor

@@ -481,6 +481,13 @@ void nettest_race(CPU *c){
 
 void nettest_hook(CPU *c, uint32_t ip){
     if (g_role < 0) init_role();
+    /* test: NETTEST_DIMOUSE=1 puts the mouse in the DirectInput access mode as the race's pause menu does (mouse.c
+     * MOUSE_setstate 005370C0, INPUT_STATE_ACCESSMODE 7); the menus' clicks must still land where they are made */
+    { static int done; if (!done && ip == 0x4D2B80u && getenv("NETTEST_DIMOUSE")){ done = 1;
+        uint32_t a[2] = { 7, 1 }; call_guest(c, 0x005370C0u, 2, a); LOG("mouse access mode %u", MR32(0x005DE758u)); }
+      static uint32_t n; if (done && ip == 0x4D2B80u && ++n % 120 == 0)
+        LOG("mouse mode %u cursor %d,%d window %d,%d", MR32(0x005DE758u), (int)MR32(0x0069E07Cu), (int)MR32(0x0069E080u),
+            (int)MR32(0x006A6448u), (int)MR32(0x006A6444u)); }
     if (!g_role || (g_online && getenv("NETTEST_UI"))){ if (ip == 0x4D2B80u && !g_busy){ g_busy = 1; online_auto(c); g_busy = 0; } if (!g_role) return; }
     if (ip == 0x4D2B80u) fe_tick(c);
     /* the joiner connects at game start and again when the frontend starts (the second
