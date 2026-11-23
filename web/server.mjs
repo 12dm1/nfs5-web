@@ -12,6 +12,7 @@ import { createOnline } from './online/vnet.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.dirname(HERE);
 const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 ? process.argv[i + 1] : d; };
 const PORT = +arg('port', 8077), DATA = arg('data', 'M:/Games/nfs5_clean'), EXE = arg('exe', path.join(ROOT, 'out/PORSCHE.EXE'));
+const DIST = path.resolve(arg('dist', path.join(HERE, 'dist')));
 const PASSWORD = arg('password', '');
 const HOST = arg('host', '127.0.0.1');
 // --public: the public site (behind nginx): / = the PLAY page, /game = the game, no test endpoints, the file list is
@@ -120,8 +121,8 @@ http.createServer((req, res) => {
   // POST /test-shot/<frame>: a frame's raw RGBA, for the text comparisons (no screenshots to look at)
   if (p.startsWith('/test-shot/') && req.method === 'POST') { const f = fs.createWriteStream(path.join(ROOT, 'out/web', 'shot_' + (+p.slice(11)) + '.rgba')); req.pipe(f); req.on('end', () => res.end()); return; }
   const rel = PUBLIC ? (p === '/' ? 'play.html' : p === '/game' ? 'index.html' : p.slice(1)) : (p === '/' ? 'index.html' : p.slice(1));
-  const full = path.resolve(HERE, 'dist', rel);
-  if (!full.startsWith(path.resolve(HERE, 'dist'))) { res.writeHead(403); res.end(); return; }
+  const full = path.resolve(DIST, rel);
+  if (full !== DIST && !full.startsWith(DIST + path.sep)) { res.writeHead(403); res.end(); return; }
   sendFile(res, full, TYPES[path.extname(full)] || 'application/octet-stream', { 'Cache-Control': 'no-cache' }, req);
 }).on('upgrade', (req, socket) => {
   if (new URL(req.url, 'http://x').pathname !== '/lan' || !authorized(req)) { socket.destroy(); return; }

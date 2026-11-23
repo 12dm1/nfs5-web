@@ -2,6 +2,9 @@
 // Layout (bytes): magic 0, msg_head 4, msg_tail 8, key_head 12, key_tail 16, mx 20, my 24, msgs 28 (256 * 12),
 // keys 3100 (256 * 16), dik 7196, vk 7452, then the pad: on 7708, buttons 7712, lx, rt, lt (floats) 7716; mode 7728 (from the
 // game: 0 frontend, 1 race menu, 2 driving), rumble seq 7732, low, high (floats) 7736, ms 7744.
+import { readFocusPage, readRaceFocusPage, moveFocus, focusActivationPoint, type FocusItem } from './focus-page';
+import { nextFocus, type FocusDirection } from './focus-geometry';
+
 const WM = { KEYDOWN: 0x100, KEYUP: 0x101, CHAR: 0x102, SYSKEYDOWN: 0x104, SYSKEYUP: 0x105, MOVE: 0x200, WHEEL: 0x20A };
 // KeyboardEvent.code -> [DirectInput code / scan code (0x80 = extended), Windows virtual key]
 const K: Record<string, [number, number]> = {
@@ -31,9 +34,16 @@ export const padState = { mode: -1, padAt: -1e9, rumble: (_ms: number) => { } };
 export const textInput = { char: (_c: string) => { }, key: (_code: string) => { } };
 
 export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLElement) {
+  // The remaining frontend control types are not covered yet; keep the prototype opt-in.
+  const focusEnabled = new URLSearchParams(location.search).get('focus') === '1';
   const sab = memory.buffer as unknown as SharedArrayBuffer;
   const i32 = new Int32Array(sab, ptr, 4096 / 4 + 2048), u32 = new Uint32Array(sab, ptr, 4096 / 4 + 2048);
   const dik = new Uint8Array(sab, ptr + 7196, 256), vk = new Uint8Array(sab, ptr + 7452, 256);
+  let cursorX = 0.5, cursorY = 0.5;
+  const activeFocusPage = () => {
+    const mode = Atomics.load(i32, 7728 >> 2);
+    return mode === 0 ? readFocusPage(memory.buffer) : mode === 1 ? readRaceFocusPage(memory.buffer) : null;
+  };
   let seq = 0;
   const msg = (m: number, w: number, l: number) => {
     const tail = Atomics.load(i32, 2);
@@ -49,12 +59,270 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     u32[o] = code & 255; u32[o + 1] = down ? 0x80 : 0; u32[o + 2] = (performance.now() | 0) >>> 0; u32[o + 3] = ++seq;
     Atomics.store(i32, 4, tail + 1);
   };
+  let focusId = 0, focusWindow = 0, editing = false, clickTimer = 0, consumedEscape = false;
+  let popupId = 0, popupX = 0, popupY = 0;
+  let listId = 0, listX = 0, listY = 0;
+  let colorId = 0, colorRegion = 0, colorEditing = false, colorX = 0, colorY = 0;
+  let sliderId = 0;
+  const outline = document.createElement('div');
+  Object.assign(outline.style, { position: 'fixed', pointerEvents: 'none', zIndex: '10', border: '2px solid #fff36a', boxSizing: 'border-box', display: 'none' });
+  document.body.appendChild(outline);
+  const clearFocus = () => { focusId = 0; focusWindow = 0; editing = false; listId = 0; colorId = 0; colorEditing = false; sliderId = 0; outline.style.display = 'none'; };
+  const showFocus = (item: FocusItem) => {
+    const r = el.getBoundingClientRect();
+    Object.assign(outline.style, { display: 'block', borderColor: colorEditing || sliderId ? '#66ffff' : '#fff36a', left: `${r.left + item.x * r.width / 640}px`, top: `${r.top + item.y * r.height / 480}px`, width: `${item.width * r.width / 640}px`, height: `${item.height * r.height / 480}px` });
+  };
+  const refreshFocus = () => {
+    if (focusId) {
+      const page = activeFocusPage();
+      const item = page?.window === focusWindow ? page.items.find(x => x.id === focusId) : undefined;
+      if (item) {
+        const rect = item.customEditor && item.id === colorId ? item.customRects?.[colorRegion] : undefined;
+        showFocus(rect ? { ...item, ...rect } : item);
+      } else clearFocus();
+    }
+    requestAnimationFrame(refreshFocus);
+  };
+  requestAnimationFrame(refreshFocus);
+  const clickFocus = (item: FocusItem, windowId: number) => {
+    if (clickTimer) return;
+    const page = activeFocusPage(), point = page?.window === windowId ? focusActivationPoint(page, item) : { x: item.x + item.width / 2, y: item.y + item.height / 2 };
+    const x = Math.floor(point.x * 65536 / 640), y = Math.floor(point.y * 65536 / 480);
+    const p = (x | y << 16) >>> 0;
+    cursorX = x / 65536; cursorY = y / 65536;
+    Atomics.store(i32, 5, x); Atomics.store(i32, 6, y);
+    msg(WM.MOVE, 0, p);
+    clickTimer = window.setTimeout(() => {
+      const current = activeFocusPage();
+      if (current?.window !== windowId || !current.items.some(x => x.id === item.id)) { clickTimer = 0; clearFocus(); return; }
+      msg(0x201, 1, p);
+      clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
+    }, 80);
+  };
+  const moveCursor = (x: number, y: number) => {
+    const x16 = Math.floor(x * 65536 / 640), y16 = Math.floor(y * 65536 / 480);
+    cursorX = x16 / 65536; cursorY = y16 / 65536;
+    Atomics.store(i32, 5, x16); Atomics.store(i32, 6, y16);
+    msg(WM.MOVE, 0, (x16 | y16 << 16) >>> 0);
+  };
+  const changeSlider = (item: FocusItem, windowId: number, direction: number) => {
+    if (clickTimer || item.sliderCount === undefined || item.sliderValue === undefined) return;
+    const value = Math.max(0, Math.min(item.sliderCount - 1, item.sliderValue + direction));
+    if (value === item.sliderValue) return;
+    const x = item.x + (value + 0.5) * item.width / item.sliderCount, y = item.y + item.height / 2;
+    const p = (Math.floor(x * 65536 / 640) | Math.floor(y * 65536 / 480) << 16) >>> 0;
+    moveCursor(x, y);
+    clickTimer = window.setTimeout(() => {
+      const page = readFocusPage(memory.buffer);
+      if (page?.window !== windowId || !page.items.some(t => t.id === item.id && t.kind === 'slider')) { clickTimer = 0; return; }
+      msg(0x201, 1, p);
+      clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
+    }, 80);
+  };
+  const scrollPopup = (item: FocusItem, windowId: number, down: boolean) => {
+    const arrow = down ? item.scrollDown : item.scrollUp;
+    if (!arrow || clickTimer) return;
+    const x = Math.floor((arrow.x + arrow.width / 2) * 65536 / 640);
+    const y = Math.floor((arrow.y + arrow.height / 2) * 65536 / 480);
+    const p = (x | y << 16) >>> 0;
+    moveCursor(arrow.x + arrow.width / 2, arrow.y + arrow.height / 2);
+    clickTimer = window.setTimeout(() => {
+      const current = readFocusPage(memory.buffer);
+      if (current?.window !== windowId || !current.items.some(x => x.id === item.id && x.expanded)) { clickTimer = 0; return; }
+      msg(0x201, 1, p);
+      clickTimer = window.setTimeout(() => {
+        msg(0x202, 0, p);
+        clickTimer = 0;
+        const after = readFocusPage(memory.buffer);
+        if (after?.window === windowId && after.items.some(x => x.id === item.id && x.expanded)) moveCursor(popupX, popupY);
+      }, 120);
+    }, 80);
+  };
+  const colorClick = (item: FocusItem, windowId: number, x: number, y: number, drag: boolean) => {
+    if (clickTimer) return;
+    const p = (Math.floor(x * 65536 / 640) | Math.floor(y * 65536 / 480) << 16) >>> 0;
+    moveCursor(x, y);
+    clickTimer = window.setTimeout(() => {
+      const page = readFocusPage(memory.buffer);
+      if (page?.window !== windowId || !page.items.some(t => t.id === item.id && t.customEditor)) { clickTimer = 0; return; }
+      msg(0x201, 1, p);
+      clickTimer = window.setTimeout(() => {
+        if (drag) msg(WM.MOVE, 1, p);
+        clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 80);
+      }, 60);
+    }, 60);
+  };
+  const focusKey = (e: KeyboardEvent, down: boolean): boolean => {
+    if (!focusEnabled) return false;
+    if (Atomics.load(i32, 7728 >> 2) === 2) { clearFocus(); return false; }
+    const page = activeFocusPage();
+    if (!page) { clearFocus(); return false; }
+    if (focusWindow && focusWindow !== page.window) clearFocus();
+    const item = page.items.find(x => x.id === focusId);
+    if (focusId && !item) clearFocus();
+    // The game's binding control must receive the next physical key itself.
+    if (page.items.some(x => x.capturing)) return false;
+    // A combo draws its rows in the expanded control and updates its hovered row on mouse move.
+    const popup = page.items.find(x => x.expanded);
+    if (popup) {
+      if (popup.customEditor) {
+        const rects = popup.customRects, hsv = popup.customHsv;
+        if (!rects || !hsv || hsv.some(v => !Number.isFinite(v) || v < 0 || v > 1)) return false;
+        const resetPoint = () => {
+          const r = rects[colorRegion];
+          colorX = colorRegion === 0 ? r.x + hsv[0] * r.width : colorRegion === 1 ? r.x + hsv[2] * r.width : r.x + r.width / 16;
+          colorY = colorRegion === 0 ? r.y + (1 - hsv[1]) * r.height : r.y + r.height / 2;
+          colorX = Math.max(r.x + 1, Math.min(r.x + r.width - 1, colorX));
+          colorY = Math.max(r.y + 1, Math.min(r.y + r.height - 1, colorY));
+        };
+        if (colorId !== popup.id) { colorId = popup.id; colorRegion = 0; colorEditing = false; focusId = popup.id; focusWindow = page.window; resetPoint(); }
+        if (e.code === 'Escape') {
+          if (down && !e.repeat) {
+            if (colorEditing) colorEditing = false;
+            else { const r = rects[4]; colorClick(popup, page.window, r.x + r.width / 2, r.y + r.height / 2, false); }
+          }
+          return true;
+        }
+        if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+          if (down && !e.repeat) {
+            if (colorRegion < 3) { colorEditing = !colorEditing; if (colorEditing) resetPoint(); }
+            else { const r = rects[colorRegion]; colorClick(popup, page.window, r.x + r.width / 2, r.y + r.height / 2, false); }
+          }
+          return true;
+        }
+        const dirs: Record<string, FocusDirection> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+        if (dirs[e.code] || e.code === 'Tab') {
+          if (down) {
+            if (colorEditing && dirs[e.code] && colorRegion < 3) {
+              const r = rects[colorRegion], dx = e.code === 'ArrowRight' ? 1 : e.code === 'ArrowLeft' ? -1 : 0, dy = e.code === 'ArrowDown' ? 1 : e.code === 'ArrowUp' ? -1 : 0;
+              if (!clickTimer && (dx || (dy && colorRegion === 0))) {
+                colorX = Math.max(r.x + 1, Math.min(r.x + r.width - 1, colorX + dx * Math.max(1, r.width / (colorRegion === 2 ? 8 : 20))));
+                colorY = Math.max(r.y + 1, Math.min(r.y + r.height - 1, colorY + dy * Math.max(1, r.height / 20)));
+                colorClick(popup, page.window, colorX, colorY, colorRegion !== 2);
+              }
+            } else {
+              colorEditing = false;
+              const index = e.code === 'Tab' ? (colorRegion + (e.shiftKey ? rects.length - 1 : 1)) % rects.length : nextFocus(rects, colorRegion, dirs[e.code]);
+              if (index >= 0) { colorRegion = index; resetPoint(); }
+            }
+            showFocus({ ...popup, ...rects[colorRegion] });
+          }
+          return true;
+        }
+        return false;
+      }
+      colorId = 0; colorEditing = false;
+      if ((popup.kind !== 'combo' && popup.kind !== 'color') || !popup.popupHeight || popup.popupHeight > 480) return false;
+      if (popupId !== popup.id) { popupId = popup.id; popupX = popup.x + popup.width / 2; popupY = popup.y + popup.height + 8; }
+      if (e.code === 'Escape') {
+        if (down && !e.repeat) clickFocus(popup, page.window);
+        return true;
+      }
+      if (e.code === 'ArrowDown' || e.code === 'ArrowUp') {
+        if (down) {
+          const y = popupY + (e.code === 'ArrowDown' ? 16 : -16);
+          if (y >= popup.y + popup.height && y < Math.min(480, popup.y + popup.popupHeight)) {
+            popupY = y;
+            moveCursor(popupX, popupY);
+          } else scrollPopup(popup, page.window, e.code === 'ArrowDown');
+        }
+        return true;
+      }
+      if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+        if (down && !e.repeat && popup.hovered && !clickTimer) {
+          const p = (Math.floor(popupX * 65536 / 640) | Math.floor(popupY * 65536 / 480) << 16) >>> 0;
+          msg(0x201, 1, p);
+          clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
+        }
+        return true;
+      }
+      return false;
+    }
+    popupId = 0;
+    if (sliderId && (!item || item.id !== sliderId || item.kind !== 'slider')) sliderId = 0;
+    if (sliderId && item) {
+      if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+        if (down) changeSlider(item, page.window, e.code === 'ArrowLeft' ? -1 : 1);
+        return true;
+      }
+      if (e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Escape') {
+        if (down) sliderId = 0;
+        return true;
+      }
+      if (e.code === 'Tab' && down) sliderId = 0;
+      else if (e.code !== 'Tab') return false;
+    }
+    const list = page.items.find(x => x.id === listId && x.kind === 'list');
+    if (listId && !list) listId = 0;
+    if (list) {
+      if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+        if (down) {
+          listY = Math.max(list.y + 1, Math.min(list.y + list.height - 1, listY + (e.code === 'ArrowDown' ? 16 : -16)));
+          moveCursor(listX, listY);
+        }
+        return true;
+      }
+      if (e.code === 'Escape') { if (down) listId = 0; return true; }
+      if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+        if (down && !e.repeat && list.hovered && !clickTimer) {
+          const p = (Math.floor(listX * 65536 / 640) | Math.floor(listY * 65536 / 480) << 16) >>> 0;
+          msg(0x201, 1, p);
+          clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
+          listId = 0;
+        }
+        return true;
+      }
+      return false;
+    }
+    if (e.code === 'Escape') {
+      if (!down && consumedEscape) { consumedEscape = false; return true; }
+      const back = page.items.find(x => x.command === 'GOBACK' || x.command === 'GOBACKMINUSONE' || x.command === 'CANCELCREATEPLAYER');
+      if (down && back) {
+        consumedEscape = true;
+        if (!e.repeat) { editing = false; clickFocus(back, page.window); }
+        return true;
+      }
+    }
+    if (editing) {
+      if (e.code === 'Tab' || e.code === 'Escape') { if (down) editing = false; else return true; }
+      else return false;
+    }
+    const direction: Record<string, FocusDirection> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    if (direction[e.code] || e.code === 'Tab') {
+      if (down) {
+        let target: FocusItem | undefined;
+        if (e.code === 'Tab') {
+          const at = page.items.findIndex(x => x.id === focusId);
+          const step = e.shiftKey ? -1 : 1;
+          target = page.items[(at < 0 ? (step > 0 ? 0 : page.items.length - 1) : (at + step + page.items.length) % page.items.length)];
+        } else target = moveFocus(page, focusId, direction[e.code]);
+        if (target) { focusId = target.id; focusWindow = page.window; showFocus(target); }
+      }
+      return page.items.length > 0;
+    }
+    if ((e.code === 'Enter' || e.code === 'NumpadEnter') && item) {
+      if (down && !e.repeat && !clickTimer) {
+        if (item.kind === 'slider') {
+          sliderId = item.id; showFocus(item);
+        } else if (item.kind === 'list') {
+          listId = item.id; listX = item.x + item.width / 2; listY = item.y + 8;
+          moveCursor(listX, listY);
+        } else {
+          clickFocus(item, page.window);
+          editing = item.kind === 'input';
+        }
+      }
+      return true;
+    }
+    return false;
+  };
   const key = (e: KeyboardEvent, down: boolean) => {
     const k = K[e.code];
     if (!k) return;
     // the browser's own keys stay with the browser
     if (e.ctrlKey && (e.code === 'KeyR' || e.code === 'KeyW' || e.code === 'KeyT' || e.code === 'KeyN' || e.code === 'KeyL')) return;
     e.preventDefault();
+    if (focusKey(e, down)) return;
     const [sc, v] = k;
     const ext = (sc & 0x80) !== 0, scan = sc & 0x7F;
     const alt = e.altKey && e.code !== 'AltLeft' && e.code !== 'AltRight';
@@ -87,9 +355,9 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   window.addEventListener('keydown', e => key(e, true));
   window.addEventListener('keyup', e => key(e, false));
   window.addEventListener('blur', () => {
+    clearFocus();
     for (let i = 0; i < 256; i++) { if (dik[i]) { keyEvent(i, false); dik[i] = 0; } vk[i] = 0; }
   });
-  let cursorX = 0.5, cursorY = 0.5;
   const pos = (e: MouseEvent) => {
     const r = el.getBoundingClientRect();
     const x = Math.max(0, Math.min(65535, Math.floor((e.clientX - r.left) / r.width * 65536)));
@@ -108,8 +376,16 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   window.addEventListener('pointerdown', e => { if (e.pointerType === 'touch') lastTouch = performance.now(); }, { capture: true });
   window.addEventListener('pointerup', e => { if (e.pointerType === 'touch') lastTouch = performance.now(); }, { capture: true });
   const emulated = () => performance.now() - lastTouch < 1000;
-  window.addEventListener('mousemove', e => { if (!emulated()) msg(WM.MOVE, wParam(e), pos(e)); });
-  el.addEventListener('mousedown', e => { e.preventDefault(); if (emulated()) return; el.focus(); msg(btn(e.button, true), wParam(e), pos(e)); });
+  window.addEventListener('mousemove', e => { if (emulated()) return; clearFocus(); msg(WM.MOVE, wParam(e), pos(e)); });
+  el.addEventListener('mousedown', e => {
+    e.preventDefault();
+    if (emulated()) return;
+    el.focus();
+    const p = pos(e), x = (p & 0xffff) * 640 / 65536, y = (p >>> 16) * 480 / 65536;
+    const item = focusEnabled && Atomics.load(i32, 7728 >> 2) === 0 ? readFocusPage(memory.buffer)?.items.find(t => t.kind === 'input' && x >= t.x && x < t.x + t.width && y >= t.y && y < t.y + t.height) : undefined;
+    editing = !!item;
+    msg(btn(e.button, true), wParam(e), p);
+  });
   window.addEventListener('mouseup', e => { if (!emulated()) msg(btn(e.button, false), wParam(e), pos(e)); });
   el.addEventListener('contextmenu', e => e.preventDefault());
   // A tap on a touch screen is a click the game sees: the button stays down at least TAP_HOLD ms (the game polls it once a frame
@@ -148,14 +424,14 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   const setKey = (code: string, down: boolean, now: number) => {
     const st = padKeys[code] ??= { down: false, next: 0 };
     if (down === st.down) {
-      if (down && code !== 'Escape' && now >= st.next) { press(code, true, true); st.next = now + REPEAT_PERIOD; }   // Escape would close the page it opened
+      if (down && code !== 'Escape' && code !== 'Enter' && now >= st.next) { press(code, true, true); st.next = now + REPEAT_PERIOD; }   // Escape would close the page it opened
       return;
     }
     press(code, down);
     st.down = down; st.next = now + REPEAT_DELAY;
   };
   const cursorParam = () => (Math.floor(cursorX * 65536) | Math.floor(cursorY * 65536) << 16) >>> 0;
-  let mode = -1, latched = 0, padMouse = false, wheelRest = 0, lastTime = 0, rumbleSeen = 0, wasOn = false;
+  let mode = -1, latched = 0, padMouse = false, padFocusA = false, wheelRest = 0, lastTime = 0, rumbleSeen = 0, wasOn = false;
   const setMouse = (down: boolean) => {
     if (down === padMouse) return;
     msg(down ? 0x201 : 0x202, down ? 1 : 0, cursorParam());
@@ -164,6 +440,7 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   const releaseAll = (now: number) => {
     for (const code in padKeys) setKey(code, false, now);
     setMouse(false);
+    padFocusA = false;
   };
   const deadStick = (x: number, y: number) => {
     const m = Math.hypot(x, y);
@@ -217,16 +494,20 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     setKey('ArrowDown', menu && is(B.DOWN), now);
     setKey('ArrowLeft', menu && is(B.LEFT), now);
     setKey('ArrowRight', menu && is(B.RIGHT), now);
+    if (!is(B.A)) padFocusA = false;
+    else if (menu && focusId) padFocusA = true;
+    setKey('Enter', menu && padFocusA && is(B.A), now);
     if (menu) {
       const m = Math.min(1, Math.hypot(lx, ly));
       if (m > 0) {
+        clearFocus();
         const speed = CURSOR_SPEED * Math.pow(m, CURSOR_CURVE) * seconds / Math.hypot(lx, ly);    // screen heights per second
         cursorX = Math.max(0, Math.min(65535 / 65536, cursorX + lx * speed * 0.75));
         cursorY = Math.max(0, Math.min(65535 / 65536, cursorY + ly * speed));
         Atomics.store(i32, 5, Math.floor(cursorX * 65536)); Atomics.store(i32, 6, Math.floor(cursorY * 65536));
         msg(WM.MOVE, padMouse ? 1 : 0, cursorParam());
       }
-      setMouse(is(B.A));
+      setMouse(!padFocusA && is(B.A));
       const [, ry] = pad ? deadStick(pad.axes[2] ?? 0, pad.axes[3] ?? 0) : [0, 0];
       wheelRest -= ry * WHEEL_NOTCHES * seconds;
       const notches = Math.trunc(wheelRest);

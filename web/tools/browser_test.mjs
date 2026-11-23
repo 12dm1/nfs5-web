@@ -14,8 +14,9 @@ const eval_ = arg('eval', '');
 // --origin-port <n>: the page thinks it is on that port, so a profile's saves from there show up while the server is on --port
 const ORIGIN = +arg('origin-port', PORT);
 
-const srv = spawn(process.execPath, [path.join(HERE, '../server.mjs'), '--port', String(PORT), ...(process.env.SERVER_ARGS ?? '').split(' ').filter(Boolean)], { stdio: ['ignore', 'inherit', 'inherit'] });
-await new Promise(r => setTimeout(r, 800));
+// --existing-server: reuse a server another browser is already using.
+const srv = process.argv.includes('--existing-server') ? null : spawn(process.execPath, [path.join(HERE, '../server.mjs'), '--port', String(PORT), ...(process.env.SERVER_ARGS ?? '').split(' ').filter(Boolean)], { stdio: ['ignore', 'inherit', 'inherit'] });
+if (srv) await new Promise(r => setTimeout(r, 800));
 const launch = {
   executablePath: arg('chrome', 'C:/Program Files/Google/Chrome/Application/chrome.exe'),
   headless: true,
@@ -26,6 +27,9 @@ const launch = {
 const prof = arg('profile', '');
 const browser = prof ? await chromium.launchPersistentContext(prof, launch) : await (await chromium.launch(launch)).newContext({ viewport: launch.viewport });
 const page = await browser.newPage();
+// A scratch bundle can be tested without overwriting web/dist, which may be in use.
+const bundle = arg('bundle', '');
+if (bundle) await page.route('**/main.js', route => route.fulfill({ path: bundle, contentType: 'text/javascript' }));
 page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') console.log('[console ' + m.type() + '] ' + m.text()); });
 page.on('pageerror', e => console.log('[pageerror] ' + e.message));
 if (process.argv.includes('--fakepad')) await page.addInitScript(() => {
@@ -34,6 +38,7 @@ if (process.argv.includes('--fakepad')) await page.addInitScript(() => {
   navigator.getGamepads = () => [pad];
   document.hasFocus = () => true;
 });
+try {
 await page.goto(`http://127.0.0.1:${ORIGIN}${URLPATH}`);
 // --script <file>: lines of "wait <s>", "move <x> <y>", "click <x> <y>" (640x480 coordinates), "type <text>", "key <Name>",
 // "shot" (the next frame into out/web/shot_<frame>.rgba), "eval <js>"
@@ -44,6 +49,7 @@ if (script) {
     const [c, ...a] = line.trim().split(' ');
     if (!c || c.startsWith('#')) continue;
     if (c === 'wait') await new Promise(r => setTimeout(r, +a[0] * 1000));
+    else if (c === 'until') await page.waitForFunction(a.join(' '), null, { timeout: 60000 });
     else if (c === 'move') await page.mouse.move(...P(a[0], a[1]));
     else if (c === 'click') { await page.mouse.move(...P(a[0], a[1])); await new Promise(r => setTimeout(r, 200)); await page.mouse.down(); await new Promise(r => setTimeout(r, 120)); await page.mouse.up(); }
     else if (c === 'type') await page.keyboard.type(a.join(' '), { delay: 120 });
@@ -64,6 +70,8 @@ if (script) {
 }
 await new Promise(r => setTimeout(r, SECONDS * 1000));
 if (eval_) console.log('[eval] ' + JSON.stringify(await page.evaluate(eval_)));
-await browser.close();
-srv.kill();
+} finally {
+  await browser.close();
+  srv?.kill();
+}
 process.exit(0);
