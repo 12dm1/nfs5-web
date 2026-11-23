@@ -24,13 +24,13 @@
 <main>
   <h1>NFS5 <span>Reforged</span></h1>
   <a id="play" href="/game">PLAY</a>
-  <div id="note">Chrome or Edge on a desktop. The first start loads the game, later starts are quick.</div>
+  <div id="note">Runs in Chrome, Edge and Safari on PC, Mac, Android, iPhone and iPad. The first start loads the game, later starts are quick.</div>
 </main>
 <script>
   // The game needs WebGPU and SharedArrayBuffer (the server sends the cross-origin isolation headers).
   if (!('gpu' in navigator) || typeof SharedArrayBuffer === 'undefined') {
     const n = document.getElementById('note');
-    n.textContent = 'This browser cannot run the game: it needs WebGPU. Open this page in Chrome or Edge.';
+    n.textContent = 'This browser cannot run the game: it needs WebGPU. Open this page in an up-to-date Chrome, Edge or Safari.';
     n.className = 'warn';
   }
 </script>
