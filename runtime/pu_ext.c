@@ -1044,3 +1044,27 @@ void pu_patch_read(const char *path, uint32_t buf, long got){
     (void)path; (void)buf; (void)got;
 #endif
 }
+
+/* ---- G11 (PC wrapper car_reflection.cpp, [display] tunnel_lamps=0): R3DSkyMapTextureLayer (vtable 005B398C, apply 00445B10,
+ * thiscall(streamA, streamB) ret 8) projects the tunnel lamps' glow onto the car from above; with the R1 cube reflection the car
+ * already reflects the lamp panels, the projection lies on top of it as bright patches. The game's own zero-texture path
+ * (00445B86..00445BB1) is replayed: streamB+4 = 0 makes the next texture layer skip the pass, the return value is what the
+ * game computes for an unused layer. TUNNEL_LAMPS=1 keeps the original. ---- */
+void sub_00445b10(CPU *restrict c){
+    static int lamps = -1;
+    if (lamps < 0){ const char *e = getenv("TUNNEL_LAMPS"); lamps = e && *e == '1'; }
+    static int tlog = -1; static unsigned calls, lit;
+    if (tlog < 0) tlog = getenv("TUNNELLOG") != NULL;
+    const uint32_t layer = c->ecx, stream_b = MR32(c->esp + 8);
+    if (tlog && !(++calls & 1023)) fprintf(stderr, "[tunnel] sky-map layer: %u calls, %u with a lamp texture (lamps %s)\n", calls, lit, lamps ? "on" : "off");
+    if (lamps || !layer || !stream_b){ sub_00445b10_orig(c); if (stream_b && MR32(stream_b + 4)) lit++; return; }
+    MR32(stream_b + 4) = 0;
+    uint32_t r;
+    if (MR32(layer + 0x14) == 0x20 || MR32(layer + 0x10) == 0x0E){
+        const uint32_t args[2] = { 0, 0 };
+        const uint32_t p = pu_guest_call(c, 0x0053F460u, layer, args, 2);
+        r = p ? MR32(p + 8) : 0;
+    } else r = MR32(layer + 8);
+    c->eax = r;
+    POP32(c->eip); c->esp += 8;
+}
