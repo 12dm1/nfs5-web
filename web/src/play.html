@@ -60,16 +60,18 @@
   dialog .row:first-of-type { border-top: 0; }
   dialog .x { position: absolute; top: 10px; right: 12px; appearance: none; background: none; border: 0; color: var(--dim); font-size: 24px; line-height: 1; cursor: pointer; padding: 4px; }
   dialog .x:hover, dialog .x:focus-visible { color: var(--fg); outline: none; }
-  /* the way in without an account: first in the dialog PLAY opens, as big as PLAY; hidden when the player asked to sign in */
-  #guest { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; text-align: center; }
-  #guest[hidden] { display: none; }
-  #f-guest { appearance: none; border: 0; border-radius: 6px; background: var(--red); color: #fff; font: 900 italic clamp(17px, 4.6vw, 22px) system-ui, sans-serif;
+  /* PLAY as a guest (play.ts): a chooser first (play as guest / create account / sign in), the form only when asked for */
+  #choose { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; text-align: center; }
+  #choose[hidden], #account[hidden] { display: none; }
+  #f-guest { appearance: none; border: 0; border-radius: 6px; background: var(--red); color: #fff; font: 900 italic clamp(18px, 5vw, 24px) system-ui, sans-serif;
              letter-spacing: .02em; padding: .75em .6em; cursor: pointer; transition: background .12s, color .12s; }
   #f-guest:hover, #f-guest:focus-visible { background: var(--yellow); color: #111; outline: none; }
-  #guest small { color: var(--dim); font-size: 13px; }
-  #guest label { margin: 0; display: flex; gap: 6px; align-items: center; justify-content: center; color: var(--dim); }
-  #guest .or { display: flex; align-items: center; gap: 12px; margin: 12px 0 4px; color: var(--dim); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
-  #guest .or::before, #guest .or::after { content: ''; flex: 1; border-top: 1px solid #2a2a2d; }
+  #choose small { color: var(--dim); font-size: 13px; }
+  #choose .pair { display: flex; gap: 8px; margin-top: 10px; }
+  #choose .pair .btn { flex: 1; padding: 11px 8px; font-size: 15px; }
+  #choose label { margin: 8px 0 0; display: flex; gap: 6px; align-items: center; justify-content: center; color: var(--dim); }
+  #f-back { display: block; margin: 0 0 12px; color: var(--dim); font-size: 14px; }
+  #f-back[hidden] { display: none; }
   dialog .inline { display: flex; gap: 8px; align-items: flex-end; }
   dialog .inline input { flex: 1; }
 </style>
@@ -86,7 +88,6 @@
       <li><b>High Stakes tracks</b><span>19 tracks from NFS: High Stakes with walls, AI and their own sounds</span></li>
       <li><b>Online</b><span>Races with people, with bots and career tournaments; PC, Mac and phones in one race</span></li>
       <li><b>Up to 15 opponents</b><span>Quick Race with a full grid, and opponents in cars like yours</span></li>
-      <li><b>EA's add-on cars</b><span>The official 928 GTS, 959, 911 GT2 and GT3</span></li>
       <li><b>Any screen</b><span>Widescreen at any resolution, resize the window mid-race, sharp HUD and text</span></li>
       <li><b>Smooth</b><span>Frame rate up to your display's, with the game's exact timing</span></li>
       <li><b>Graphics</b><span>Metallic paint with clear coat, live reflections on the cars in races and in the showroom, MSAA, double draw distance, top texture detail</span></li>
@@ -96,34 +97,41 @@
   <a id="src" href="https://github.com/12dm1/nfs5-web" rel="noopener">Source code on GitHub</a>
 </main>
 
-<dialog id="dlg-sign" aria-labelledby="sign-h">
+<dialog id="dlg-sign" aria-label="Play">
   <button type="button" class="x" data-close aria-label="Close">&times;</button>
-  <div id="guest">
-    <button type="button" id="f-guest">Play without an account</button>
-    <small>Your saves stay in this browser. You can create an account later: the saves here go with it.</small>
-    <label><input type="checkbox" id="f-noask"> Don't ask again on this device</label>
-    <div class="or" aria-hidden="true">or</div>
-  </div>
-  <h2 id="sign-h">Cloud saves</h2>
-  <p class="dim">With an account your career is kept on our server, and you continue it on any device: sign in there and play.</p>
-  <div class="tabs" role="tablist">
-    <button type="button" role="tab" id="tab-new" aria-selected="true">Create account</button>
-    <button type="button" role="tab" id="tab-old" aria-selected="false">Sign in</button>
-  </div>
-  <form id="sign-form" method="post" action="/" novalidate>
-    <label for="f-user">Login</label>
-    <input type="text" id="f-user" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="15" required>
-    <small id="f-user-hint">3 to 15 letters, digits, _ or -. It is also your name online.</small>
-    <label for="f-pass">Password</label>
-    <input type="password" id="f-pass" name="password" autocomplete="new-password" maxlength="128" required>
-    <div id="f-pass2-row">
-      <label for="f-pass2">Repeat the password</label>
-      <input type="password" id="f-pass2" name="password2" autocomplete="new-password" maxlength="128">
+  <div id="choose">
+    <button type="button" id="f-guest">Play as guest</button>
+    <small>Your saves stay in this browser. An account made later takes them along.</small>
+    <div class="pair">
+      <button type="button" class="btn" id="c-new">Create account</button>
+      <button type="button" class="btn" id="c-old">Sign in</button>
     </div>
-    <p class="warn" id="f-warn">There is no password recovery: let your browser or password manager save the password. Your career is tied to it.</p>
-    <p class="err" id="f-err" role="alert"></p>
-    <button type="submit" class="btn primary" id="f-go">Create account and play</button>
-  </form>
+    <small>With an account your career is kept in the cloud: continue it on any device.</small>
+    <label><input type="checkbox" id="f-noask"> Don't ask again on this device</label>
+  </div>
+  <div id="account" hidden>
+    <button type="button" class="link" id="f-back">&larr; Back</button>
+    <h2 id="sign-h">Cloud saves</h2>
+    <p class="dim">With an account your career is kept on our server, and you continue it on any device: sign in there and play.</p>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" id="tab-new" aria-selected="true">Create account</button>
+      <button type="button" role="tab" id="tab-old" aria-selected="false">Sign in</button>
+    </div>
+    <form id="sign-form" method="post" action="/" novalidate>
+      <label for="f-user">Login</label>
+      <input type="text" id="f-user" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="15" required>
+      <small id="f-user-hint">3 to 15 letters, digits, _ or -. It is also your name online.</small>
+      <label for="f-pass">Password</label>
+      <input type="password" id="f-pass" name="password" autocomplete="new-password" maxlength="128" required>
+      <div id="f-pass2-row">
+        <label for="f-pass2">Repeat the password</label>
+        <input type="password" id="f-pass2" name="password2" autocomplete="new-password" maxlength="128">
+      </div>
+      <p class="warn" id="f-warn">There is no password recovery: let your browser or password manager save the password. Your career is tied to it.</p>
+      <p class="err" id="f-err" role="alert"></p>
+      <button type="submit" class="btn primary" id="f-go">Create account and play</button>
+    </form>
+  </div>
 </dialog>
 
 <dialog id="dlg-done" aria-labelledby="done-h">

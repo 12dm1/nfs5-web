@@ -73,6 +73,8 @@ try {
   check('PLAY page: "not signed in"', true);
   await A.page.click('#play');
   check('PLAY without an account opens the account dialog', await A.page.locator('#dlg-sign').evaluate(d => d.open));
+  check('it starts with the chooser, "Play as guest" focused', await A.page.evaluate(() => document.activeElement?.id === 'f-guest' && document.getElementById('account').hidden));
+  await A.page.click('#c-new');
   await A.page.fill('#f-user', 'Tester_1');
   await A.page.fill('#f-pass', 'short');
   await A.page.click('#f-go');
@@ -107,7 +109,7 @@ try {
   await B.page.goto(`${BASE}/play`);
   await B.page.waitForFunction(() => /not signed in/.test(document.getElementById('acct')?.textContent ?? ''), null, { timeout: 15000 });
   await B.page.click('#play');
-  await B.page.click('#tab-old');
+  await B.page.click('#c-old');
   await B.page.fill('#f-user', 'tester_1');
   await B.page.fill('#f-pass', 'wrong password');
   await B.page.click('#f-go');
@@ -169,7 +171,7 @@ try {
   await C.page.goto(`${BASE}/play`);
   await C.page.waitForFunction(() => /not signed in/.test(document.getElementById('acct')?.textContent ?? ''), null, { timeout: 15000 });
   await C.page.click('#play');
-  await C.page.click('#tab-old');
+  await C.page.click('#c-old');
   await C.page.fill('#f-user', 'Tester_1');
   await C.page.fill('#f-pass', 'long enough pw 1');
   await Promise.all([C.page.waitForURL(/\/game$/, { timeout: 15000 }), C.page.click('#f-go')]);
