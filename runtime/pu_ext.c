@@ -452,18 +452,85 @@ static int opp_run(CPU *c, uint32_t self, int mode){
     g.ctx = &ctx; g.set_slot = opp_set_slot; g.install = opp_install;
     return opp_similar_run(&g, mode);
 }
+/* ---- CARS2: opponents 8..15 in menu races.  FEOpponentCarAccessor holds 7 opponent cars inline (this+24h, 760h each, then
+ * its fields at +33C4h/+33C8h), so the cars past them live in two shadow accessors: a block of the accessor's size with a
+ * copy of its header (vtable, mode) and fields, and 7 opponent cars built by their constructor 004EE5C0.  Generate runs
+ * on the real accessor, then on each shadow (every mode, OS1's included, fills them its own way, and the cars register
+ * in the game's car list 0069188C under their own addresses); the slot getter 004F5850 hands out slot 7+ from them. ---- */
+#define OPP_SLOTS 7u
+#define OPP_SIZE 0x33CCu
+#define OPP_SHADOWS 2
+static uint32_t g_opp_shadow[OPP_SHADOWS], g_opp_owner;
+static int g_opp_nested;
+static void opp_shadows(CPU *c, uint32_t real){
+    if (g_opp_nested) return;
+    g_opp_nested = 1; g_opp_owner = real;
+    for (int k = 0; k < OPP_SHADOWS; k++){
+        if (!g_opp_shadow[k]){
+            const uint32_t s = gheap_alloc(1, OPP_SIZE, 1);
+            if (!s) break;
+            for (uint32_t i = 0; i < OPP_SLOTS; i++) guest_call(c, 0x004EE5C0u, s + 0x24 + i * 0x760, NULL, 0);
+            g_opp_shadow[k] = s;
+        }
+        const uint32_t s = g_opp_shadow[k];
+        memcpy(g_mem + s, g_mem + real, 0x24);
+        MR32(s + 0x33C4) = MR32(real + 0x33C4); MR32(s + 0x33C8) = MR32(real + 0x33C8);
+        guest_call(c, 0x004F4FA0u, s, NULL, 0);
+    }
+    g_opp_nested = 0;
+}
+void sub_004f5850(CPU *restrict c){      /* the opponent car of a slot, thiscall(slot) */
+    const uint32_t self = c->ecx, i = MR32(c->esp + 4);
+    uint32_t r = self + 0x24 + i * 0x760;
+    if (self == g_opp_owner && i >= OPP_SLOTS && i < OPP_SLOTS * (1 + OPP_SHADOWS) && g_opp_shadow[(i - OPP_SLOTS) / OPP_SLOTS])
+        r = g_opp_shadow[(i - OPP_SLOTS) / OPP_SLOTS] + 0x24 + ((i - OPP_SLOTS) % OPP_SLOTS) * 0x760;
+    c->eax = r;
+    POP32(c->eip); c->esp += 4;
+}
+/* The AI drivers of a race (cdecl(count, difficulty), 004E3160): the game draws `count` distinct drivers of that difficulty
+ * and divides by the pool left, so a pool smaller than the count (7 easy, 7 medium, 21 hard of 35) is a division by
+ * zero.  Then: the stock call for any difficulty gives a vector of the right size, filled here with every driver of the
+ * difficulty first and the rest from the nearest one (a tie: the harder), in random order within each. */
+void sub_004e3160(CPU *restrict c){
+    const int n = (int)MR32(c->esp + 4), diff = (int)MR32(c->esp + 8);
+    const int count = (int)MR32(0x006907D0u);
+    const uint32_t tab = MR32(0x006907D4u);
+    int pool = 0;
+    if (diff != -1 && tab && count > 0 && count <= 256)
+        for (int i = 0; i < count; i++) if ((int16_t)MR16(tab + 8 + (uint32_t)i * 0x2C) == diff) pool++;
+    if (diff == -1 || n <= pool || n > count || count > 256){ sub_004e3160_orig(c); return; }
+    MR32(c->esp + 8) = 0xFFFFFFFFu;
+    sub_004e3160_orig(c);
+    const uint32_t v = c->eax, b = v ? MR32(v) : 0, e = v ? MR32(v + 4) : 0;
+    if (!b || (int)((e - b) / 2) != n) return;
+    int order[256], keys[256];
+    for (int i = 0; i < count; i++){
+        const int d = (int16_t)MR16(tab + 8 + (uint32_t)i * 0x2C);
+        keys[i] = abs(d - diff) * 2 + (d < diff) ;
+        order[i] = i;
+    }
+    for (int i = count - 1; i > 0; i--){ const int j = rand() % (i + 1), t = order[i]; order[i] = order[j]; order[j] = t; }
+    for (int i = 1; i < count; i++){      /* stable by key: the shuffle stays within a key */
+        const int t = order[i]; int j = i - 1;
+        while (j >= 0 && keys[order[j]] > keys[t]){ order[j + 1] = order[j]; j--; }
+        order[j + 1] = t;
+    }
+    for (int k = 0; k < n; k++) MR16(b + 2u * (uint32_t)k) = MR16(tab + (uint32_t)order[k] * 0x2C);
+    fprintf(stderr, "[cars2] %d drivers for difficulty %d (%d of it)\n", n, diff, pool);
+}
 void sub_004f4fa0(CPU *restrict c){      /* Generate, ecx = the accessor */
     const uint32_t self = c->ecx;
     MR32(self + 0x14) = OPP_MODE_COUNT;
     const int menu = (int)MR32(self + 0x18);
     int game = menu - OPP_MODES_OURS;
     if (menu >= 0 && menu < OPP_MODES_OURS){
-        if (opp_run(c, self, menu)){ POP32(c->eip); return; }
+        if (opp_run(c, self, menu)){ opp_shadows(c, self); POP32(c->eip); return; }
         game = 4;                            /* its random car */
     }
     if (game >= 0 && game <= 4) MR32(self + 0x18) = (uint32_t)game;
     sub_004f4fa0_orig(c);
     MR32(self + 0x18) = (uint32_t)menu;
+    opp_shadows(c, self);
 }
 void sub_004f5820(CPU *restrict c){      /* SetRange: 4 modes on low memory, 5 otherwise */
     const uint32_t count = OPP_MODE_COUNT;

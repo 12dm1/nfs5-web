@@ -85,12 +85,13 @@ static void *monitor(void *u){
 
 static void init_role(void){
     const char *e = getenv("NETTEST");
-    g_role = !e ? 0 : !strcmp(e, "host") || !strcmp(e, "online-host") ? 1 : !strcmp(e, "join") || !strcmp(e, "online-join") ? 2 : 0;
+    g_role = !e ? 0 : !strcmp(e, "host") || !strcmp(e, "online-host") ? 1 : !strcmp(e, "join") || !strcmp(e, "online-join") ? 2
+           : !strcmp(e, "quickrace") ? 3 : 0;
     g_online = e && !strncmp(e, "online-", 7);
     if (!g_role) return;
     g_t0 = now_s();
     if (getenv("NETTEST_PLAYERS")) g_players = atoi(getenv("NETTEST_PLAYERS"));
-    pthread_t t; pthread_create(&t, NULL, monitor, NULL);
+    pthread_t t; if (g_role != 3) pthread_create(&t, NULL, monitor, NULL);
     LOG("role %s", e);
 }
 
@@ -376,6 +377,45 @@ static void host_mode(CPU *c){
     if (pm){ set_index(c, pm, atoi(m)); LOG("race mode %s", m); }
 }
 
+/* ---- CARS2 test: NETTEST=quickrace [NETTEST_OPP=15] [NETTEST_DIFF=0..2] [NETTEST_PROFILE=name]: a single-player Quick Race
+ * through the menus; the opponent count and the difficulty are set through their accessors as the combos do, then
+ * PLAYGAME.  With CARLOG=<s> the race's cars show in [cars] lines. ---- */
+#define RTTI_INT 0x005CD6C8u
+static void qr_tick(CPU *c, uint32_t fe, uint32_t vt){
+    static int st; static double t0;
+    const double in = now_s() - t0;
+    if (!st){ st = 1; t0 = now_s(); return; }
+    switch (st){
+    case 1:
+        if (vt != VT_MAIN || in < 4) break;
+        { uint32_t u = accessor(c, "UserList.UserList", RTTI_USERS);
+          int r = u ? find_row(c, u, getenv("NETTEST_PROFILE") ? getenv("NETTEST_PROFILE") : "", "profile") : -1;
+          if (r >= 0) set_index(c, u, r); }
+        command(c, fe, "SETNAMETHENBACK"); st = 2; t0 = now_s(); break;
+    case 2:
+        if (vt != VT_MAIN || in < 3) break;
+        command(c, fe, "SETTYPEQUICKRACE"); navigate(c, fe, "quickrace", 0); st = 3; t0 = now_s(); break;
+    case 3: {
+        if (in < 5) break;
+        const int n = getenv("NETTEST_OPP") ? atoi(getenv("NETTEST_OPP")) : 15;
+        const uint32_t a = accessor(c, "Game.NumOpponents", RTTI_INT);
+        if (a){ set_index(c, a, n); LOG("quickrace: opponents %d -> accessor says %d, %d rows", n, (int)thiscall(c, a, vfn(a, 0x6C), 0, NULL),
+                                         (int)thiscall(c, a, vfn(a, 0x24), 0, NULL)); }
+        else LOG("quickrace: no Game.NumOpponents accessor");
+        if (getenv("NETTEST_DIFF")){
+            const uint32_t d = accessor(c, "Game.Difficutly", RTTI_LOCAL);
+            if (d){ set_index(c, d, atoi(getenv("NETTEST_DIFF"))); LOG("quickrace: difficulty %s", getenv("NETTEST_DIFF")); }
+        }
+        if (getenv("NETTEST_LAPS")){
+            const uint32_t l = accessor(c, "Track1.Laps", RTTI_LOCAL);
+            if (l){ int r = find_row(c, l, getenv("NETTEST_LAPS"), "laps"); if (r >= 0) set_index(c, l, r); }
+        }
+        command(c, fe, "PLAYGAME"); LOG("quickrace: PLAYGAME"); st = 4; break; }
+    case 4:   /* back in the menus after the race */
+        if (vt && MR32(SIMTICK) > 640){ LOG("quickrace: frontend again (screen vt %08x), sim tick %u", vt, MR32(SIMTICK)); st = 5; }
+        break;
+    }
+}
 static void fe_tick(CPU *c){
     static double since, last_ready, all_since;
     static int phase;
@@ -384,6 +424,7 @@ static void fe_tick(CPU *c){
     uint32_t fe = c->ecx, obj = fe ? MR32(fe + 0xE0) : 0, vt = obj ? MR32(obj) : 0;
     double t = now_s();
     int slot = cint(0xDC);
+    if (g_role == 3){ qr_tick(c, fe, vt); g_busy = 0; return; }
     if (g_online && online_tick(c, fe, vt)){ g_busy = 0; return; }
     if (g_role == 1){
         if (phase == 0 && vt == VT_CREATE && slot >= 0){ phase = 1; since = t; LOG("create screen, slot %d", slot); if (g_online) host_mode(c); }
@@ -414,6 +455,7 @@ static void fe_tick(CPU *c){
  * From the race's input hook 0x413800. */
 void nettest_race(CPU *c){
     static uint32_t finished_at, last_tick; static int left;
+    if (g_role == 3){ if (getenv("NETTEST_AI")) MR32(CARINFO + CI_AIDRIVE) = 1; return; }   /* quickrace: AI drives the player */
     if (MR32(0x006573E8u) != 3u || !comms()) return;
     const uint32_t tick = MR32(SIMTICK);
     if (tick < last_tick){ finished_at = 0; left = 0; }

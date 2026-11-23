@@ -149,3 +149,11 @@
 0042C11B  B908000000    B910000000        #   clear 16 flags (was 8)
 0042C2E6  C784832801000001000000  C78483BC01000001000000  #   set a racer's flag at +0x1BC
 0042C17C  3B35E88A5E00  81FE08000000      #   list places 1..8 only: the table has 8 rows and 8 place names (was: places < racers)
+
+# CARS2: up to 15 opponents in menu races (Quick Race); the 8 opponent cars past the 7 of FEOpponentCarAccessor and the AI
+# driver pool: runtime/pu_ext.c (sub_004f5850, sub_004f4fa0, sub_004e3160)
+004E553C  07            0F                # Game.NumOpponents accessor (FUN_004e5520 -> 004BA310): range 0..15 (was 0..7)
+004ED00F  08            10                # race setup FUN_004ecf00: humans + opponents <= 16 (was 8)
+004ED013  08            10                #   the clamp value
+004ED38B  09            10                #   + cops + traffic <= 16 (was 9)
+004ED38F  09            10                #   the clamp value
