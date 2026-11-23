@@ -21,7 +21,7 @@ static int g_file = -1;
 static uint32_t g_serial;
 
 /* ---- the paint map ---- */
-#define PAGES 24
+#define PAGES 48                    /* two builds a car, 16 cars (CARS2) + the showroom: a page evicted before its upload got another car's map (stripes) */
 typedef struct {
     uint32_t bits;                  /* guest address of the page's texels */
     int stride, rows, fmt, file, consumed;
@@ -59,6 +59,7 @@ static Page *page_for(uint32_t bits, int stride, int fmt){
     }
     Page *p = &g_pages[g_next_page];
     g_next_page = (g_next_page + 1) % PAGES;
+    if (p->band && !p->consumed && getenv("PAINTLOG")) fprintf(stderr, "[paintlog] page %08x evicted before its upload (%d paint texels)\n", p->bits, (int)p->paint);
     free(p->band); free(p->red); free(p->expect);
     memset(p, 0, sizeof *p);
     p->bits = bits; p->stride = stride; p->fmt = fmt; p->serial = g_serial; p->file = g_file;
@@ -156,7 +157,7 @@ int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
             if (p->consumed) r -= 0.001f;
             if (r > best){ best = r; page = p; }
         }
-        if (best < 0.5f) return 0;
+        if (best < 0.5f){ if (getenv("PAINTLOG")) fprintf(stderr, "[paintlog] upload %08x %dx%d fmt %d: no paint map (best %.2f)\n", data, w, h, fmt, best); return 0; }
     }
     const int f16 = fmt16(page->fmt);
     const size_t n = (size_t)page->stride * (size_t)page->rows;
@@ -183,7 +184,7 @@ int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
     free(live);
     page->consumed = 1;
     static int logs = 8;
-    if (logs > 0){ logs--; fprintf(stderr, "[paint] page %dx%d fmt %d: %u paint texels (build match %.2f)\n", w, h, fmt, kept, best); }
+    if (logs > 0 || getenv("PAINTLOG")){ logs--; fprintf(stderr, "[paint] page %dx%d fmt %d: %u paint texels (build match %.2f)\n", w, h, fmt, kept, best); }
     return kept > 0;
 }
 
