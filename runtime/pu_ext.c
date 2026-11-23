@@ -121,14 +121,18 @@ static void track_check(void){
     g_hs = 0;
     for (size_t i = 0; i < sizeof k_hs_tracks / sizeof *k_hs_tracks; i++) if (!strcasecmp(g_track, k_hs_tracks[i])) g_hs = 1;
     hs_walls_clear();
-    if (!g_hs) return;
-    /* the CRP's path, at 00628964 */
+    /* the CRP's path, at 00628964; its .hsw sidecar */
     char win[300], path[1024];
     snprintf(win, sizeof win, "%s", (const char *)(g_mem + 0x00628964u));
     size_t n = strlen(win);
     if (n > 4 && !strcasecmp(win + n - 4, ".crp")) win[n - 4] = 0;
     strncat(win, ".hsw", sizeof win - strlen(win) - 1);
-    const int segs = fileio_resolve_game(win, path, sizeof path) ? hs_walls_load(path) : -1;
+    const int found = fileio_resolve_game(win, path, sizeof path);
+    /* a converted track is one with a .hsw beside its CRP: only nfs5-track-tools writes that file, for the 19 High
+       Stakes tracks and for any other NFS4 track (community tracks made in T3ED, under names of their own) */
+    if (found) g_hs = 1;
+    if (!g_hs) return;
+    const int segs = found ? hs_walls_load(path) : -1;
     fprintf(stderr, "[hs] track '%s' walls '%s': %d\n", g_track, win, segs);
 }
 typedef struct { CPU *c; uint32_t car; } WallCtx;

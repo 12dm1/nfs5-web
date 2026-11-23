@@ -11,7 +11,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Roster, sound archives (`extended_content.cpp`, push repoints) | done | no code: the data layer gives `nfs5ext.trk`, `trackext.viv`, `zzzwzzz_mod.viv` the stock names (`tools/make_mod_layer.py`) |
 | Track names (HS8, `H_GetString`) | done | override 004E06D0, `runtime/pu_ext.c` |
 | Respawn guard (HS8, `H_SliceFree`) | done | override 0040F480 |
-| Walls + object collisions, stock impact (HS16-19, HZ5, HZ7, `hs_corridor.cpp`) | done | override 00498FF0, `runtime/ext/hs_walls.cpp`; the crash recorder is left out |
+| Walls + object collisions, stock impact (HS16-19, HZ5, HZ7, `hs_corridor.cpp`) | done | override 00498FF0, `runtime/ext/hs_walls.cpp`; the crash recorder is left out. A track is "converted" (walls + AI) when a `.hsw` lies beside its CRP, so community NFS4 tracks converted by nfs5-track-tools work under their own names |
 | AI on converted tracks (AI1, AI2, AI4-6, `ai_tuning.cpp`, stuck reset of `race_trace.cpp`) | done | instruction hooks, `runtime/ext/hs_ai.cpp`; the [ai] values are constants; lap times not compared with the PC yet |
 | Animated textures (HZ4, `tex_anim.cpp`, `.tan`) | done | in `r_web.c`, names from an override of 004677D0; tables load, the look is not checked |
 | Animated objects, smackables (HZ2-3) | check | data-driven; look in a race whether anything is missing |
