@@ -218,7 +218,7 @@ static const char *online_account(void){
  * place, +4 time; car index -> slot from the member list). ---- */
 int online_ctl_recv(char *out, int max);
 int online_ctl_send(const char *text);
-#define RESULTS 0x005E77A0u
+#define RESULTS (CARS_ROSTER + 0x200u)   /* stock 005E77A0, CARS1: the roster moved */
 static char g_dir[256]; static int g_dir_new; static uint32_t g_reported_tick;
 
 /* ---- ON2 stage 2: an online tournament race counts in the local career (ON2 section 4.1 route B: the stock pieces of
@@ -420,14 +420,14 @@ void nettest_race(CPU *c){
     last_tick = tick;
     const int pi = (int)MR32(0x0065741Cu);
     if (left || pi < 0 || pi > 15) return;
-    const uint32_t car = MR32(0x005E8E2Cu + 4u * (uint32_t)pi);
+    const uint32_t car = MR32(CARS_L_RACER + 4u * (uint32_t)pi);
     if (!car) return;
     const int b50 = (int)MR32(car + 0xB50u);
     if (!b50){ finished_at = 0; return; }
     if (!finished_at){ finished_at = tick ? tick : 1; LOG("local car finished (state %d) at tick %u", b50, tick); return; }
     if (tick - finished_at < 5 * 64) return;
     int all = 1; const int n = (int)MR32(0x005E8AE8u);
-    for (int i = 0; i < n && i < 9; i++){ const uint32_t k = MR32(0x005E8E2Cu + 4u * (uint32_t)i); if (k && !MR32(k + 0xB50u)) all = 0; }
+    for (int i = 0; i < n && i < 9; i++){ const uint32_t k = MR32(CARS_L_RACER + 4u * (uint32_t)i); if (k && !MR32(k + 0xB50u)) all = 0; }
     if (!all && tick - finished_at < 30 * 64) return;
     left = 1;
     LOG("leaving the race (tick %u, %s)", tick, all ? "every car finished" : "30 s after the finish");

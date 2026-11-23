@@ -8,6 +8,7 @@
  * The server announces a bot's car with records 0x226 (car id) and 0x225 (colour); the network race build (004B4E32)
  * replays the frontend's own setup over carInfo and loses them, so they are kept per slot and written back after it. */
 #include "cpu.h"
+#include "pu_cars.h"
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -20,10 +21,10 @@ void sub_004b4b80_orig(CPU *);
 void sub_0048d6a0_orig(CPU *);
 
 #define COMMS     0x00628C70u
-#define CARS      0x005E8B34u
+#define CARS      CARS_L_CARS      /* CARS1: moved (pu_cars.h) */
 #define MYCAR     0x0065741Cu
 #define SIMTICK   0x00606AC4u
-#define CARINFO   0x0065808Cu
+#define CARINFO   CARS_INFO        /* CARS1: moved */
 #define CI_STRIDE 0x580u
 #define BUILD_CAR_STATE 0x004A0110u
 #define SEND      0x0055D4D0u
@@ -35,7 +36,7 @@ static uint32_t g_fed[16], g_last_tick, g_packets, g_pkt;
 static int g_in_send;
 
 static void note_fed(uint32_t car){
-    for (uint32_t i = 0; i < 9; i++) if (MR32(CARS + 4 * i) == car){ g_fed[i] = MR32(SIMTICK); return; }
+    for (uint32_t i = 0; i < CARS_MAX; i++) if (MR32(CARS + 4 * i) == car){ g_fed[i] = MR32(SIMTICK); return; }
 }
 
 /* 0055D4D0(link, buf, len): send on a link, unreliable, cdecl */

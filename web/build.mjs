@@ -10,4 +10,5 @@ const entries = {
 for (const [k, v] of Object.entries(entries)) if (!fs.existsSync(v)) delete entries[k];
 await esbuild.build({ entryPoints: entries, outdir: 'dist', bundle: true, format: 'esm', target: ['chrome120'], sourcemap: true, logLevel: 'warning', loader: { '.txt': 'text' } });
 fs.copyFileSync('src/index.html', 'dist/index.html');
+fs.copyFileSync('src/play.html', 'dist/play.html');
 console.log('web/dist OK');

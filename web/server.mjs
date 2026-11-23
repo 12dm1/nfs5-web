@@ -14,6 +14,9 @@ const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 
 const PORT = +arg('port', 8077), DATA = arg('data', 'M:/Games/nfs5_clean'), EXE = arg('exe', path.join(ROOT, 'out/PORSCHE.EXE'));
 const PASSWORD = arg('password', '');
 const HOST = arg('host', '127.0.0.1');
+// --public: the public site (behind nginx): / = the PLAY page, /game = the game, no test endpoints, the file list is
+// read once at start, static files answer 304 to a matching ETag
+const PUBLIC = process.argv.includes('--public');
 // ON1 online: the virtual network's switch at /lan + the NetGather lobby (web/online); --udp <port> also lets PC
 // players in over real UDP (dx11z net_entry_host/net_entry_port), --cars the OS1 car ladder for the bots' cars
 const online = createOnline({ dataDir: DATA, carsJson: arg('cars', 'M:/Games/nfspu_nglide/_mod/netserver/cars.json'),
@@ -46,9 +49,17 @@ function listFiles() {
   files.set('porsche.exe', { p: 'PORSCHE.EXE', s: st.size, m: Math.floor(st.mtimeMs / 1000), full: EXE });
   return [...files.values()].map(({ p, d, s, m }) => d ? { p, d } : { p, s, m });
 }
-const manifest = () => JSON.stringify({ files: listFiles(), blocks: { url: '/data/', size: BLOCK, max: MAX_RUN } });
+const manifestNow = () => JSON.stringify({ files: listFiles(), blocks: { url: '/data/', size: BLOCK, max: MAX_RUN } });
+const manifestOnce = PUBLIC ? manifestNow() : '';
+const manifest = () => PUBLIC ? manifestOnce : manifestNow();
 
-function sendFile(res, file, type, extra = {}) {
+function sendFile(res, file, type, extra = {}, req = null) {
+  if (PUBLIC && req) {
+    let st; try { st = fs.statSync(file); } catch { res.writeHead(404); res.end('not found'); return; }
+    const tag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
+    if (req.headers['if-none-match'] === tag) { res.writeHead(304, { ETag: tag, ...extra }); res.end(); return; }
+    extra = { ...extra, ETag: tag };
+  }
   fs.readFile(file, (err, b) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
     res.writeHead(200, { 'Content-Type': type, 'Content-Length': b.length, ...extra });
@@ -96,17 +107,18 @@ http.createServer((req, res) => {
     fs.createReadStream(full).pipe(res);
     return;
   }
-  if (p === '/nfs5.wasm' || p === '/nfs5.json') { const f = path.join(ROOT, 'out/web', p.slice(1)); sendFile(res, f, TYPES[path.extname(f)], { 'Cache-Control': 'no-cache' }); return; }
+  if (p === '/nfs5.wasm' || p === '/nfs5.json') { const f = path.join(ROOT, 'out/web', p.slice(1)); sendFile(res, f, TYPES[path.extname(f)], { 'Cache-Control': 'no-cache' }, req); return; }
+  if (PUBLIC && p.startsWith('/test-')) { res.writeHead(404); res.end(); return; }
   // POST /test-log: the autotest page's lines (tools/ drive headless Chrome)
   if (p === '/test-log' && req.method === 'POST') { let s = ''; req.on('data', d => s += d); req.on('end', () => { process.stdout.write(s); res.end(); }); return; }
   // GET /test-seed/<name>: a save file of the native test folder (out/save/SaveData), for a test's first start
   if (p.startsWith('/test-seed/')) { sendFile(res, path.join(ROOT, 'out/save/SaveData', path.basename(p)), 'application/octet-stream'); return; }
   // POST /test-shot/<frame>: a frame's raw RGBA, for the text comparisons (no screenshots to look at)
   if (p.startsWith('/test-shot/') && req.method === 'POST') { const f = fs.createWriteStream(path.join(ROOT, 'out/web', 'shot_' + (+p.slice(11)) + '.rgba')); req.pipe(f); req.on('end', () => res.end()); return; }
-  const rel = p === '/' ? 'index.html' : p.slice(1);
+  const rel = PUBLIC ? (p === '/' ? 'play.html' : p === '/game' ? 'index.html' : p.slice(1)) : (p === '/' ? 'index.html' : p.slice(1));
   const full = path.resolve(HERE, 'dist', rel);
   if (!full.startsWith(path.resolve(HERE, 'dist'))) { res.writeHead(403); res.end(); return; }
-  sendFile(res, full, TYPES[path.extname(full)] || 'application/octet-stream', { 'Cache-Control': 'no-cache' });
+  sendFile(res, full, TYPES[path.extname(full)] || 'application/octet-stream', { 'Cache-Control': 'no-cache' }, req);
 }).on('upgrade', (req, socket) => {
   if (new URL(req.url, 'http://x').pathname !== '/lan' || !authorized(req)) { socket.destroy(); return; }
   online.upgrade(req, socket);

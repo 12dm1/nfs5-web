@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NFS5 Reforged</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Need for Speed: Porsche Unleashed in the browser">
+<style>
+  :root { --bg: #0b0b0c; --fg: #e8e6e3; --dim: #8a8784; --red: #c8102e; --red-hi: #e01b3a; --yellow: #ffcc00; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 24px 16px; box-sizing: border-box; text-align: center; }
+  h1 { margin: 0; font-size: clamp(28px, 6vw, 52px); font-weight: 900; font-style: italic; letter-spacing: .02em; text-transform: uppercase; }
+  h1 span { color: var(--red); }
+  #play { appearance: none; border: 0; border-radius: 6px; background: var(--red); color: #fff; font: 900 italic clamp(26px, 5vw, 40px) system-ui, sans-serif;
+          letter-spacing: .12em; padding: .45em 2.2em .45em 2.3em; cursor: pointer; text-decoration: none; transition: background .12s, color .12s, transform .12s; }
+  #play:hover, #play:focus-visible { background: var(--yellow); color: #111; outline: none; transform: translateY(-1px); }
+  #play:active { transform: translateY(1px); }
+  #play[aria-disabled="true"] { background: #3a3a3c; color: #8a8784; pointer-events: none; }
+  #note { color: var(--dim); font-size: 13px; max-width: 34em; min-height: 1.4em; }
+  #note.warn { color: var(--yellow); }
+</style>
+</head>
+<body>
+<main>
+  <h1>NFS5 <span>Reforged</span></h1>
+  <a id="play" href="/game">PLAY</a>
+  <div id="note">Chrome or Edge on a desktop. The first start loads the game, later starts are quick.</div>
+</main>
+<script>
+  // The game needs WebGPU and SharedArrayBuffer (the server sends the cross-origin isolation headers).
+  if (!('gpu' in navigator) || typeof SharedArrayBuffer === 'undefined') {
+    const n = document.getElementById('note');
+    n.textContent = 'This browser cannot run the game: it needs WebGPU. Open this page in Chrome or Edge.';
+    n.className = 'warn';
+  }
+</script>
+</body>
+</html>
