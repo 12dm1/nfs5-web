@@ -124,9 +124,7 @@ heard), the browser build in a browser (the wasm module was only compiled), long
 
 ## 5. What is left
 
-1. **Menu races.** The frontend clamps player + opponents to 8 and the total to 9 (0x4ECF98, 0x4ED00D, 0x4ED389),
-   and the opponent option range comes from the FE data. Raising the clamps is three byte patches. The option range
-   needs a code hook (the FE data files are game data and stay stock). Also the OS1 opponent accessor (004F4E60).
+1. **Menu races: done in CARS2 (2026-11-23, below).**
 2. **Results list beyond 8th.** The results table has 8 rows inline in a generic 0x7B0-byte widget (FUN_0042E8B0,
    cells at +4, fields at +0x784, row count 8 also in the constructor loop). 16 rows means re-laying out that class
    in all its methods, or a second table. Places 9+ are now simply not listed.
@@ -145,6 +143,25 @@ heard), the browser build in a browser (the wasm module was only compiled), long
    found (the two HUD widgets). The CARCHK lift does not see them, because their base is a register, not a data
    address.
 7. **Performance.** 16 cars on coastal ran at the same headless pace; not measured in the browser.
+
+## 5a. CARS2: up to 15 opponents from the Quick Race menu (2026-11-23)
+
+- `patches/exe_v35.txt`: the opponent combo's range 0..7 -> 0..15 (004E553C, the FEIntAccessor's max, set in
+  004E5520 for `Game.NumOpponents`); the race setup 004ECF00 clamps humans + opponents to 8 (004ED00F/13 -> 16) and
+  all cars incl. cops/traffic to 9 (004ED38B/8F -> 16). 0x4ECF98 is a mode check, not a clamp.
+- The opponent cars: FEOpponentCarAccessor (vtable 005B77D8, 0x33CC bytes) holds 7 opponent cars inline at
+  +0x24, 0x760 each, filled by Generate 004F4FA0. A slot registers its own address in a global list (004EEBA0 ->
+  DAT_0069188C), so the object cannot simply grow. `runtime/pu_ext.c` gives the accessor two shadow accessors (heap,
+  header copied, 7 cars built by 004EE5C0) that are generated after the real one; the slot getter 004F5850 (called
+  by the race setup 004EBBA0 and 004DE150) returns slots 7..20 from them.
+- The AI drivers: 004E3160 picks `n` distinct drivers of the difficulty; the pool is 7 easy, 7 medium, 21 hard, and
+  a count over the pool looped/divided by zero. Now the difficulty's drivers first (shuffled), then the nearest
+  difficulty's (`[cars2] 15 drivers for difficulty 0 (7 of it)`).
+- Tests: `NETTEST=quickrace` (runtime/nettest.c; NETTEST_OPP, NETTEST_DIFF, NETTEST_LAPS, NETTEST_AI) goes through
+  the menus as the player would and sets the combos through their accessors; `web/tools/menu_walk.mjs` clicks
+  buttons by command. Checked: 15 opponents on easy and medium, 16 racers drive, 144 fps headless.
+- Not changed: Knockout / Quick Knockout / career / Factory Driver keep their own counts; online stays at 8; the
+  results list shows 8 places; replays with more than 9 cars do not save.
 
 ## 6. Risks
 
