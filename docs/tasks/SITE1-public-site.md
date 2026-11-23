@@ -15,7 +15,19 @@ PLAY button (`web/src/play.html`), `/game` = the game (`web/src/index.html`). Th
 `/opt/nfs5-web`: `web/` (server.mjs, online/, dist/ without source maps), `out/web/nfs5.wasm|json`, `out/PORSCHE.EXE`
 (patched), `data/` (from nfs5_clean only FEData, GameData, Drivers, fe.txt, version.txt, install.txt, readme.txt:
 the game stops without install.txt; the menus open the same missing files as with the whole folder), `mod/`
-(out/mod), `music/` (zzzymus.viv). 576 MB, 1882 files in the manifest.
+(out/mod), `music/` (zzzymus.viv), `addons/` (below). 584 MB, 1901 files in the manifest.
+
+### EA add-on cars (2026-11-23)
+
+`addons/` = `out/addon_cars` (server `--addons`, a layer over the mod layer): the four official EA download packages
+(`_mod/reports/REL1/ea_addon_cars`, SOURCES.txt there) unpacked as their `move.txt` installs them, files unchanged:
+928 GTS (`928.crp/.tpg`, `928d/928L.fsh`, `928coupeGTS54.sim`; the package has no `.clr`), 959 (`959.clr/.crp/.tpg`,
+`959D/959L.fsh`, `959coupe29.sim`), 911 GT2 (`gt2.*`, no `.sim`: the base game's `GT2race.sim`), 911 GT3 (`gt3.*`, no
+`.sim`), and `FEData/Data/nfs5.car` of the 928 package (2000-06-07, EA's last roster: the 3.5 roster + 959/GT2/GT3
+records enabled (04-12, 38 bytes) + the 928 record (22 bytes)). The two `.sim` files replace the base game's
+(EA's own updates; the PC game folder has the same bytes). Checked: a direct race with the player on the 928 and
+928/959/GT2/GT3 opponents on their own `.sim` (5 racers, 120 fps, no new missing files); the menus no longer miss
+the four `.crp` files. The online server's `nfs5.car` copy is not changed (it reads only the names, equal).
 
 `--public`: no `/test-*` endpoints (`/test-shot` wrote files to disk), the manifest is read once at start, static
 files answer 304 to their ETag. nginx gzips the wasm (19 MB -> 6 MB). The service runs as www-data with a read-only

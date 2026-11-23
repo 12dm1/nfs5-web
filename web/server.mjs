@@ -1,5 +1,5 @@
 // nfs5-web WEB3 development server: page + module + game files, with the COOP/COEP headers SharedArrayBuffer needs.
-//   node web/server.mjs [--port 8077] [--data M:/Games/nfs5_clean] [--exe out/PORSCHE.EXE] [--mod out/mod] [--password x]
+//   node web/server.mjs [--port 8077] [--data M:/Games/nfs5_clean] [--exe out/PORSCHE.EXE] [--mod out/mod] [--addons out/addon_cars] [--password x]
 // /data-manifest + /data/<path>?b=<first block>&n=<blocks> are what web/src/host/io-worker.ts reads. The game files
 // come from the player's own folder and are never part of this repository. The patched EXE (./gen.sh) is served
 // as /data/PORSCHE.EXE in place of the folder's own.
@@ -24,6 +24,9 @@ const online = createOnline({ dataDir: DATA, carsJson: arg('cars', 'M:/Games/nfs
 // A copy of the game without the menu music (GameData/Music is optional at install time): this folder takes its place.
 const MUSIC = arg('music', path.join(ROOT, 'out/save/gamedata/music'));
 const MOD = arg('mod', path.join(ROOT, 'out/mod'));
+// EA's official add-on cars (928 GTS, 959, 911 GT2, 911 GT3: their files as the packages install them, with the 928
+// package's nfs5.car), a layer over the mod layer; a folder of the player's own, never in git
+const ADDONS = arg('addons', path.join(ROOT, 'out/addon_cars'));
 const BLOCK = 1 << 20, MAX_RUN = 16;
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.json': 'application/json', '.map': 'application/json' };
 
@@ -45,6 +48,7 @@ function listFiles() {
   walk(DATA, '', true);
   if (fs.existsSync(MUSIC) && !files.has('gamedata/music')) { files.set('gamedata/music', { p: 'GameData/Music', d: 1 }); walk(MUSIC, 'GameData/Music'); }
   if (fs.existsSync(MOD)) walk(MOD, '');
+  if (fs.existsSync(ADDONS)) walk(ADDONS, '');
   const st = fs.statSync(EXE);
   files.set('porsche.exe', { p: 'PORSCHE.EXE', s: st.size, m: Math.floor(st.mtimeMs / 1000), full: EXE });
   return [...files.values()].map(({ p, d, s, m }) => d ? { p, d } : { p, s, m });

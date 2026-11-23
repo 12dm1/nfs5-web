@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Server side of the nfs5-web site deploy. Expects in /tmp/nfs5-web-new: web/, out/, data/, mod/, music/,
+# Server side of the nfs5-web site deploy. Expects in /tmp/nfs5-web-new: web/, out/, data/, mod/, music/, addons/ (any subset),
 # nfs5-web.service, nginx-game.conf. Installs /opt/nfs5-web + the nfs5-web service, then turns the
 # nfs5-reforged site into the game: "location /" proxies to the service, the static landing's locations and the
 # site password go; /api/, /download/, /lan stay. Re-runnable (nginx is changed once, backup .bak-web).
@@ -7,7 +7,7 @@ set -euo pipefail
 SRC=/tmp/nfs5-web-new DIR=/opt/nfs5-web CONF=/etc/nginx/sites-available/nfs5-reforged.conf
 command -v node >/dev/null || { echo "node is not installed" >&2; exit 1; }
 sudo install -d -m 755 "$DIR"
-for d in web out data mod music; do
+for d in web out data mod music addons; do
   [ -d "$SRC/$d" ] || continue
   sudo rm -rf "$DIR/$d.new"; sudo cp -a "$SRC/$d" "$DIR/$d.new"
   sudo rm -rf "$DIR/$d.old"; [ -d "$DIR/$d" ] && sudo mv "$DIR/$d" "$DIR/$d.old"
