@@ -104,6 +104,9 @@ typedef struct { int used, w, h, fmt, levels, cutout, keyed, seg, paint; } Tex;
 static Tex g_tex[MAX_TEX];
 static int g_bound;             /* slot + 1, 0 none */
 #define LFB_SLOT (MAX_TEX - 1)
+static uint32_t g_tex_mean[LFB_SLOT];   /* GLASSLOG debug */
+static uint8_t *g_tex_shade[LFB_SLOT];  /* dark textures: 16 x 16 cells of alpha, luma (the car shadow layer) */
+static long g_frames;
 
 static void update_fogscale(void){
     const float w63 = 262144.0f / 5.0f;
@@ -429,6 +432,98 @@ static float g_pv_uv[MAX_VERTS * 2], g_pv_xy[MAX_VERTS * 2]; static int g_pv_nv;
  * arms the next draw. */
 static int g_refl_armed;
 void r_reflection_next(void){ g_refl_armed = 1; }
+/* The game's projected tree shadow (a dark texture drawn over the car's paint-page meshes only) left the grilles, lamps and wheels
+ * lit and laid its pattern on the glass as soot. Instead each car's shadow cover is measured from the layer (its texture's alpha
+ * and darkness at the vertices) over all its paint-page vertices, and the next frame darkens the whole car by it: the paint-page
+ * draws by their page, the car's other draws by screen box and depth. The light goes, the sky's reflection stays. */
+typedef struct { int slot; float x0, y0, x1, y1, z0, z1; double n, dark; } CarShade;
+#define CAR_SHADES 48
+static CarShade g_cs_cur[CAR_SHADES], g_cs_prev[CAR_SHADES]; static int g_ncs_cur, g_ncs_prev;
+static CarShade *cs_get(int slot){
+    for (int i = 0; i < g_ncs_cur; i++) if (g_cs_cur[i].slot == slot) return &g_cs_cur[i];
+    if (g_ncs_cur >= CAR_SHADES) return NULL;
+    CarShade *r = &g_cs_cur[g_ncs_cur++]; memset(r, 0, sizeof *r); r->slot = slot;
+    r->x0 = r->y0 = r->z0 = 1e30f; r->x1 = r->y1 = r->z1 = -1e30f;
+    return r;
+}
+static float cs_factor(const CarShade *r){
+    if (r->n <= 0.0) return 1.0f;
+    const float f = 1.0f - (float)(r->dark / r->n);
+    return f < 0.45f ? 0.45f : f > 1.0f ? 1.0f : f;
+}
+static void cs_scale(DV *o, int nv, float f){
+    if (f >= 0.995f) return;
+    for (int i = 0; i < nv; i++){
+        const uint32_t c = o[i].color;
+        o[i].color = (c & 0xFF000000u) | (uint32_t)(((c >> 16) & 255) * f) << 16 | (uint32_t)(((c >> 8) & 255) * f) << 8 | (uint32_t)((c & 255) * f);
+    }
+}
+static unsigned g_cs_other;    /* CSLOG: non-paint draws darkened this second */
+static void cs_flip(void){
+    static int lg = -1; if (lg < 0) lg = getenv("CSLOG") != NULL;
+    if (lg && g_frames % 60 == 0){
+        float mn = 1.0f; int k = -1;
+        for (int i = 0; i < g_ncs_cur; i++){ const float f = cs_factor(&g_cs_cur[i]); if (f < mn){ mn = f; k = i; } }
+        fprintf(stderr, "[carshade] frame %ld: %d cars, darkest %.2f (page %d), %u other draws darkened\n", g_frames, g_ncs_cur, mn, k >= 0 ? g_cs_cur[k].slot : 0, g_cs_other);
+        g_cs_other = 0;
+    }
+    memcpy(g_cs_prev, g_cs_cur, sizeof g_cs_cur); g_ncs_prev = g_ncs_cur; g_ncs_cur = 0;
+}
+static void cs_box(const DV *o, int nv, float *b){
+    for (int i = 0; i < nv; i++){
+        if (o[i].x < b[0]) b[0] = o[i].x;
+        if (o[i].x > b[1]) b[1] = o[i].x;
+        if (o[i].y < b[2]) b[2] = o[i].y;
+        if (o[i].y > b[3]) b[3] = o[i].y;
+        if (o[i].z < b[4]) b[4] = o[i].z;
+        if (o[i].z > b[5]) b[5] = o[i].z;
+    }
+}
+/* a car's own draw: its page's record, or a non-paint draw inside a shaded car's box and depth */
+static void cs_apply(DV *o, int nv, int page){
+    if (!g_ncs_prev || nv <= 0) return;
+    if (page){
+        for (int i = 0; i < g_ncs_prev; i++) if (g_cs_prev[i].slot == page){ cs_scale(o, nv, cs_factor(&g_cs_prev[i])); return; }
+        return;
+    }
+    /* car batches only: the car light layer (pu_paint.c, 00446530) puts each vertex's normal into its specular dword */
+    for (int i = 0; i < nv; i += 3) if (!(o[i].specular & 0x00FFFFFFu)) return;
+    float b[6] = { 1e30f, -1e30f, 1e30f, -1e30f, 1e30f, -1e30f };
+    cs_box(o, nv, b);
+    for (int i = 0; i < g_ncs_prev; i++){
+        const CarShade *r = &g_cs_prev[i];
+        const float f = cs_factor(r);
+        if (f >= 0.995f) continue;
+        const float mx = (r->x1 - r->x0) * 0.15f + 4.0f, my = (r->y1 - r->y0) * 0.15f + 4.0f, mz = (r->z1 - r->z0) * 0.5f + 1e-4f;
+        if (b[0] >= r->x0 - mx && b[1] <= r->x1 + mx && b[2] >= r->y0 - my && b[3] <= r->y1 + my && b[4] >= r->z0 - mz && b[5] <= r->z1 + mz){
+            cs_scale(o, nv, f); g_cs_other++; return;
+        }
+    }
+}
+static void cs_page(const DV *o, int nv, int page){
+    CarShade *r = cs_get(page);
+    if (!r) return;
+    float b[6] = { r->x0, r->x1, r->y0, r->y1, r->z0, r->z1 };
+    cs_box(o, nv, b);
+    r->x0 = b[0]; r->x1 = b[1]; r->y0 = b[2]; r->y1 = b[3]; r->z0 = b[4]; r->z1 = b[5];
+    r->n += nv;
+}
+/* the shadow layer over a page's vertices: how much light it takes, as the game's blend would (alpha over, colour tex x vertex) */
+static int cs_shadow(const DV *o, int nv, int bound, int page){
+    const uint8_t *g = bound ? g_tex_shade[bound - 1] : NULL;
+    if (!g || g_blend != 0) return 0;
+    CarShade *r = cs_get(page);
+    if (!r) return 1;
+    for (int i = 0; i < nv; i++){
+        const float u = o[i].u - floorf(o[i].u), v = o[i].v - floorf(o[i].v);
+        const int cx = (int)(u * 16.0f) & 15, cy = (int)(v * 16.0f) & 15;
+        const uint32_t c = o[i].color;
+        const float va = (float)(c >> 24) / 255.0f, vl = (float)(((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255)) / 765.0f;
+        const float ta = g[(cy * 16 + cx) * 2] / 255.0f, tl = g[(cy * 16 + cx) * 2 + 1] / 255.0f;
+        r->dark += ta * va * (1.0f - tl * vl);
+    }
+    return 1;
+}
 static int pv_same(const DV *o, int nv){
     if (nv != g_pv_nv) return 0;
     for (int i = 0; i < nv; i++)
@@ -495,20 +590,28 @@ static void draw_any(const char *n, const uint32_t *a){
         if (paintable && bound && (g_tex[bound - 1].paint || again)) car_clip_normals(a[1], vb, ib, o, nv);
         if (paintable && bound && g_tex[bound - 1].paint){
             g_pv_vb = a[1]; g_pv_ib = a[2]; g_pv_count = count; g_pv_slot = bound; g_pv_nv = nv;
+            if (g_race){ cs_page(o, nv, bound); cs_apply(o, nv, bound); }
             for (int i = 0; i < nv; i++){ g_pv_uv[i * 2] = o[i].u; g_pv_uv[i * 2 + 1] = o[i].v; g_pv_xy[i * 2] = o[i].x; g_pv_xy[i * 2 + 1] = o[i].y; }
         }
         else if (again){
             for (int i = 0; i < nv; i++){ o[i].rect[0] = g_pv_uv[i * 2]; o[i].rect[1] = g_pv_uv[i * 2 + 1]; o[i].rect[2] = 0.0f; o[i].rect[3] = 7.0f; }
             g_mask_slot = g_pv_slot;
             glass_log(bound, o, nv, 1);
+            if (g_race) cs_apply(o, nv, g_pv_slot);
             flush_verts(o, nv, 0);
             g_mask_slot = 0;
             return;
         }
         else {
             /* another layer over the same vertices keeps the record: the reflection may come after it */
-            if (paintable && g_pv_slot && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && pv_same(o, nv)) glass_log(bound, o, nv, 0);
-            else g_pv_vb = 0;
+            if (paintable && g_pv_slot && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && pv_same(o, nv)){
+                glass_log(bound, o, nv, 0);
+                if (g_race && cs_shadow(o, nv, bound, g_pv_slot)) return;     /* the car's shadow layer: measured, not drawn */
+            }
+            else {
+                g_pv_vb = 0;
+                if (g_race && paintable) cs_apply(o, nv, 0);
+            }
         }
         flush_verts(o, nv, 0); return; }
     if (!strcmp(n, "drawtrifan@12")){
@@ -833,7 +936,6 @@ static float tan_voffset(int bound){
 int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg);
 static long g_frames;
 /* GLASSLOG=1 (debug): the game's reflection pass over the car pages, once a second: texture, its mean colour, states, vertex colour */
-static uint32_t g_tex_mean[LFB_SLOT];
 static void glass_log(int bound, const DV *o, int nv, int refl){
     static int on = -1; static long last;
     if (on < 0){ const char *e = getenv("GLASSLOG"); on = e && *e && *e != '0'; }
@@ -867,7 +969,16 @@ void r_tupdate(uint32_t t, uint32_t data, int palette){
     if (keyed) clear_border(rgba, w, h);
     { uint64_t sr = 0, sg = 0, sb = 0, sa = 0;
       for (int i = 0; i < n; i++){ const uint32_t px = rgba[i]; sr += px & 255; sg += (px >> 8) & 255; sb += (px >> 16) & 255; sa += px >> 24; }
-      if (n) g_tex_mean[slot] = (uint32_t)(sa / n) << 24 | (uint32_t)(sr / n) << 16 | (uint32_t)(sg / n) << 8 | (uint32_t)(sb / n); }
+      if (n) g_tex_mean[slot] = (uint32_t)(sa / n) << 24 | (uint32_t)(sr / n) << 16 | (uint32_t)(sg / n) << 8 | (uint32_t)(sb / n);
+      free(g_tex_shade[slot]); g_tex_shade[slot] = NULL;
+      if (n && (sr + sg + sb) / 3 / (uint64_t)n < 0x40 && w >= 16 && h >= 16 && (g_tex_shade[slot] = calloc(512, 1))){
+          for (int cy = 0; cy < 16; cy++) for (int cx = 0; cx < 16; cx++){
+              uint32_t ca = 0, cl = 0, cn = 0;
+              for (int y = cy * h / 16; y < (cy + 1) * h / 16; y++) for (int x = cx * w / 16; x < (cx + 1) * w / 16; x++){
+                  const uint32_t px = rgba[y * w + x]; ca += px >> 24; cl += ((px & 255) + ((px >> 8) & 255) + ((px >> 16) & 255)) / 3; cn++; }
+              g_tex_shade[slot][(cy * 16 + cx) * 2] = (uint8_t)(ca / cn); g_tex_shade[slot][(cy * 16 + cx) * 2 + 1] = (uint8_t)(cl / cn);
+          }
+      } }
     upload_chain(slot, rgba);
     free(rgba);
     tan_upload(slot);
@@ -1110,6 +1221,7 @@ void r_reshape(int nw){
 }
 void r_pageflip(void){
     g_frames++;
+    cs_flip();
     close_draw();
     cmd_room(2);
     g_cmd[g_ncmd++] = C_PRESENT;

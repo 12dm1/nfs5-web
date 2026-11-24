@@ -208,9 +208,12 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   let env_c = envGain(envK(Nc, V, rough_coat * MAXMIP, P_SUN_REFL * vis), u.x0.x);
   let env_irr = envCone(N, 60.0, u.x0.x);
   let env_glow = envCone(N, P_GLOW_ANG, u.x0.x);
+  // the light (sun lobe, view light, sky fill, gain) falls on every paint texel: it scales the texel's own colour, so seams stay
+  // dark. Only the shine (sun spot, reflection, coat) follows the texel's darkness. Scaled by it too, a damage scrape (darker
+  // paint texels) lost the light and showed as a grey hole in lit paint.
   var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, albedo.rgb, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
-                      coat_c, rough_coat, P_GLOW * keep, P_VIEW_LIGHT * keep, env_irr, env_glow, P_ENV_DIFFUSE * keep, P_ENV_GLOW * keep,
-                      1.0 + (P_LIGHT_GAIN - 1.0) * keep);
+                      coat_c, rough_coat, P_GLOW, P_VIEW_LIGHT, env_irr, env_glow, P_ENV_DIFFUSE, P_ENV_GLOW,
+                      P_LIGHT_GAIN);
   rgb = mix(albedo.rgb * i.color.rgb, rgb, pk.r);   // texels the game does not paint keep the stock look
   return vec4f(fog(rgb, i.uvq.z), a);
 }

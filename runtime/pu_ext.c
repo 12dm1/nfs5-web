@@ -175,9 +175,34 @@ static void wall_rebuild(void *ctx){
     sub_0049ae30(c);
     c->esp = sp;
 }
+/* DAMAGETEST=<impact> (debug): from tick 300, eight stock panel hits (00494DF0) per car from all sides, so visual damage can be
+ * checked in a scripted quick race */
+static void damage_test(CPU *c, uint32_t car){
+    static int imp = -1;
+    if (imp < 0){ const char *e = getenv("DAMAGETEST"); imp = e ? atoi(e) : 0; }
+    if (imp <= 0 || !car) return;
+    const uint32_t tick = MR32(0x00606AC4u);
+    if (tick < 300 || tick >= 380 || (tick - 300) % 10) return;
+    static const float dirs[8][3] = { {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1}, {0.7f,0,0.7f}, {-0.7f,0,0.7f}, {0.7f,0,-0.7f}, {-0.7f,0,-0.7f} };
+    static uint32_t done[64][2]; static int nd;
+    const uint32_t k = (tick - 300) / 10;
+    for (int i = 0; i < nd; i++) if (done[i][0] == car && done[i][1] == k + 1) return;
+    if (nd < 64){ done[nd][0] = car; done[nd][1] = k + 1; nd++; } else return;
+    const uint32_t sp = c->esp;
+    float point[3]; memcpy(point, g_mem + car + 0x440, 12);
+    const float fi = (float)imp;
+    memcpy(g_mem + car + 0x430, &fi, 4);
+    const uint32_t an = put_vec(c, dirs[k]);
+    const uint32_t base = c->esp;
+    PUSHA(1); PUSHA(an); PUSHA(car); PUSHA(0);
+    sub_00494df0(c);
+    c->esp = sp; (void)base; (void)point;
+    if (k == 0) fprintf(stderr, "[damage] test hits on car %08x, impact %d\n", car, imp);
+}
 /* 00498FF0, the per-car collision step (car+E2C), cdecl */
 void sub_00498ff0(CPU *restrict c){
     const uint32_t car = MR32(c->esp + 4);
+    damage_test(c, car);
     track_check();
     { static int init; if (!init){ init = 1; hs_ai_init(g_mem); } }
     hs_ai_set_converted(g_hs);
