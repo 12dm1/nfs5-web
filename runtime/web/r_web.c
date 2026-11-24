@@ -105,7 +105,8 @@ static Tex g_tex[MAX_TEX];
 static int g_bound;             /* slot + 1, 0 none */
 #define LFB_SLOT (MAX_TEX - 1)
 static uint32_t g_tex_mean[LFB_SLOT];   /* GLASSLOG debug */
-static uint8_t *g_tex_shade[LFB_SLOT];  /* dark textures: 16 x 16 cells of alpha, luma (the car shadow layer) */
+#define SHADE_N 32
+static uint8_t *g_tex_shade[LFB_SLOT];  /* dark textures: SHADE_N x SHADE_N cells of alpha, luma (the car shadow layer) */
 static long g_frames;
 
 static void update_fogscale(void){
@@ -508,18 +509,28 @@ static void cs_page(const DV *o, int nv, int page){
     r->x0 = b[0]; r->x1 = b[1]; r->y0 = b[2]; r->y1 = b[3]; r->z0 = b[4]; r->z1 = b[5];
     r->n += nv;
 }
+/* a texture coordinate's cell under the draw's addressing (0 clamp, 1 repeat, 2 mirror): a car beside the projector reads the
+ * clamped edge, not the wrapped-round middle (the shadow came on metres before the car reached it) */
+static int shade_cell(float t, int mode){
+    if (mode == 0) t = t < 0.0f ? 0.0f : t > 0.9999f ? 0.9999f : t;
+    else if (mode == 2){ t = fmodf(fabsf(t), 2.0f); if (t >= 1.0f) t = 1.9999f - t; }
+    else t -= floorf(t);
+    int k = (int)(t * SHADE_N);
+    return k < 0 ? 0 : k >= SHADE_N ? SHADE_N - 1 : k;
+}
 /* the shadow layer over a page's vertices: how much light it takes, as the game's blend would (alpha over, colour tex x vertex) */
 static int cs_shadow(const DV *o, int nv, int bound, int page){
     const uint8_t *g = bound ? g_tex_shade[bound - 1] : NULL;
     if (!g || g_blend != 0) return 0;
     CarShade *r = cs_get(page);
     if (!r) return 1;
+    static int lg = -1; if (lg < 0) lg = getenv("CSLOG") != NULL;
+    if (lg){ static int n; if (n < 4){ n++; fprintf(stderr, "[carshade] shadow layer tex %d clamp %d %d\n", bound, g_clamp_s, g_clamp_t); } }
     for (int i = 0; i < nv; i++){
-        const float u = o[i].u - floorf(o[i].u), v = o[i].v - floorf(o[i].v);
-        const int cx = (int)(u * 16.0f) & 15, cy = (int)(v * 16.0f) & 15;
+        const int cx = shade_cell(o[i].u, g_clamp_s), cy = shade_cell(o[i].v, g_clamp_t);
         const uint32_t c = o[i].color;
         const float va = (float)(c >> 24) / 255.0f, vl = (float)(((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255)) / 765.0f;
-        const float ta = g[(cy * 16 + cx) * 2] / 255.0f, tl = g[(cy * 16 + cx) * 2 + 1] / 255.0f;
+        const float ta = g[(cy * SHADE_N + cx) * 2] / 255.0f, tl = g[(cy * SHADE_N + cx) * 2 + 1] / 255.0f;
         r->dark += ta * va * (1.0f - tl * vl);
     }
     return 1;
@@ -580,6 +591,13 @@ static void draw_any(const char *n, const uint32_t *a){
     if (!strcmp(n, "drawpointstrip@8")){ for (int i = 0; i < count; i++) point(vb + i * vs); return; }
     const uint8_t *ib = GP(a[2]);
     if (!ib) return;
+    { static long gd = -2; if (gd == -2){ const char *e = getenv("GDUMP"); gd = e ? atol(e) : -1; }
+      if (gd == g_frames && !strncmp(n, "draw", 4)){
+          const int bd = g_bound; const uint32_t m = bd ? g_tex_mean[bd - 1] : 0;
+          const DV v0 = conv(VI(vb, GP(a[2]), 0));
+          fprintf(stderr, "[gdump] %s tex %d %dx%d paint %d mean %06x a%02x blend %d aref %.2f n %d xy %.0f,%.0f uv %.3f,%.3f col %08x spec %08x\n", n, bd,
+                  bd ? g_tex[bd - 1].w : 0, bd ? g_tex[bd - 1].h : 0, bd ? g_tex[bd - 1].paint : 0, m & 0xFFFFFF, m >> 24, g_blend, g_alpharef, count, v0.x, v0.y, v0.u, v0.v, v0.color, v0.specular);
+      } }
     if (!strcmp(n, "drawtrimesh@12")){
         int nv = count * 3; if (nv > MAX_VERTS) nv = MAX_VERTS;
         for (int i = 0; i < nv; i++) o[i] = conv(VI(vb, ib, i));
@@ -971,12 +989,12 @@ void r_tupdate(uint32_t t, uint32_t data, int palette){
       for (int i = 0; i < n; i++){ const uint32_t px = rgba[i]; sr += px & 255; sg += (px >> 8) & 255; sb += (px >> 16) & 255; sa += px >> 24; }
       if (n) g_tex_mean[slot] = (uint32_t)(sa / n) << 24 | (uint32_t)(sr / n) << 16 | (uint32_t)(sg / n) << 8 | (uint32_t)(sb / n);
       free(g_tex_shade[slot]); g_tex_shade[slot] = NULL;
-      if (n && (sr + sg + sb) / 3 / (uint64_t)n < 0x40 && w >= 16 && h >= 16 && (g_tex_shade[slot] = calloc(512, 1))){
-          for (int cy = 0; cy < 16; cy++) for (int cx = 0; cx < 16; cx++){
+      if (n && (sr + sg + sb) / 3 / (uint64_t)n < 0x40 && w >= SHADE_N && h >= SHADE_N && (g_tex_shade[slot] = calloc(SHADE_N * SHADE_N * 2, 1))){
+          for (int cy = 0; cy < SHADE_N; cy++) for (int cx = 0; cx < SHADE_N; cx++){
               uint32_t ca = 0, cl = 0, cn = 0;
-              for (int y = cy * h / 16; y < (cy + 1) * h / 16; y++) for (int x = cx * w / 16; x < (cx + 1) * w / 16; x++){
+              for (int y = cy * h / SHADE_N; y < (cy + 1) * h / SHADE_N; y++) for (int x = cx * w / SHADE_N; x < (cx + 1) * w / SHADE_N; x++){
                   const uint32_t px = rgba[y * w + x]; ca += px >> 24; cl += ((px & 255) + ((px >> 8) & 255) + ((px >> 16) & 255)) / 3; cn++; }
-              g_tex_shade[slot][(cy * 16 + cx) * 2] = (uint8_t)(ca / cn); g_tex_shade[slot][(cy * 16 + cx) * 2 + 1] = (uint8_t)(cl / cn);
+              g_tex_shade[slot][(cy * SHADE_N + cx) * 2] = (uint8_t)(ca / cn); g_tex_shade[slot][(cy * SHADE_N + cx) * 2 + 1] = (uint8_t)(cl / cn);
           }
       } }
     upload_chain(slot, rgba);
