@@ -194,8 +194,50 @@ void pu_fe_capture(CPU *c){
     c->eax = r_eax; c->ecx = r_ecx; c->edx = r_edx; c->ebx = r_ebx; c->esi = r_esi; c->edi = r_edi; c->ebp = r_ebp;
     face = (face + 1) % 6;
 }
+
+/* ---- the sun and its lens flare (PC G7v5, G8) ----
+ * 00460290 draws the sun and, while [sun+144] is 0, reads the 4x4 pixels under it once as the flare's reference (1 = taken,
+ * 2 = the read failed: no flares for the race); 00460460 re-reads them every 200 ms and draws flare.dat by how many still match.
+ * The cube captures draw the sky too, so the first read happened in a face: a wrong reference, the flares never showed. In a capture
+ * the sun is drawn with the reference step skipped (144 = 3 for the call) and the flare check is off (140 = 0 for the call). */
+static int sun_on_screen(uint32_t sun){
+    float x, y; memcpy(&x, g_mem + sun + 0x12C, 4); memcpy(&y, g_mem + sun + 0x130, 4);
+    const float w = (float)(int32_t)MR32(0x00619784u), h = (float)(int32_t)MR32(0x00619788u);
+    return x >= 3.0f && y >= 3.0f && x <= w - 3.0f && y <= h - 3.0f;
+}
+void sub_00460290(CPU *restrict c){
+    const uint32_t sun = c->ecx;
+    /* also not off the screen: the first race frame has the sun at (0,-1), half the reference outside */
+    if (sun && MR32(sun + 0x144) == 0 && (g_cam_capture || !sun_on_screen(sun))){
+        MR32(sun + 0x144) = 3;
+        sub_00460290_orig(c);
+        MR32(sun + 0x144) = 0;
+        return;
+    }
+    sub_00460290_orig(c);
+}
+void sub_00460460(CPU *restrict c){
+    const uint32_t sun = c->ecx;
+    if (g_cam_capture && sun){
+        const uint8_t on = g_mem[sun + 0x140];
+        g_mem[sun + 0x140] = 0;
+        sub_00460460_orig(c);
+        g_mem[sun + 0x140] = on;
+        return;
+    }
+    sub_00460460_orig(c);
+}
+/* 00451710 sizes the sun and flare sprites as half width = W/640 s, half height = H/480 s: oval on a wide screen. Its width load
+ * (fild [00619784] at 0045181A) reads 00460458 instead (patches/exe_v35.txt), which holds H * 4/3 for the call. */
+void sub_00451710(CPU *restrict c){
+    MR32(0x00460458u) = MR32(0x00619788u) * 4u / 3u;
+    sub_00451710_orig(c);
+}
 #else
 #include "cpu.h"
 #include "decls.h"
 void sub_004d15e0(CPU *restrict c){ sub_004d15e0_orig(c); }
+void sub_00460290(CPU *restrict c){ sub_00460290_orig(c); }
+void sub_00460460(CPU *restrict c){ sub_00460460_orig(c); }
+void sub_00451710(CPU *restrict c){ MR32(0x00460458u) = MR32(0x00619784u); sub_00451710_orig(c); }
 #endif
