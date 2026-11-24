@@ -36,7 +36,7 @@ const MOD = arg('mod', path.join(ROOT, 'out/mod'));
 // package's nfs5.car), a layer over the mod layer; a folder of the player's own, never in git
 const ADDONS = arg('addons', path.join(ROOT, 'out/addon_cars'));
 const BLOCK = 1 << 20, MAX_RUN = 16;
-const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.json': 'application/json', '.map': 'application/json' };
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.json': 'application/json', '.map': 'application/json', '.jpg': 'image/jpeg', '.png': 'image/png' };
 
 // The game's file list: the folder, the optional music, the mod layer (tools/make_mod_layer.py) over them, in any letter case.
 let files = new Map();

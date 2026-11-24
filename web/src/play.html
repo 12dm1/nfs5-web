@@ -20,6 +20,14 @@
   #note.warn { color: var(--yellow); }
   #src { color: var(--dim); font-size: 13px; text-decoration: none; border-bottom: 1px solid #3a3a3c; }
   #src:hover, #src:focus-visible { color: var(--yellow); border-color: var(--yellow); outline: none; }
+  /* screenshots: the README's (docs/screens), 960 px copies on the page, the full size on a click */
+  #shots { width: 100%; max-width: 860px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  #shots a { display: block; border-radius: 4px; overflow: hidden; background: #141416; outline-offset: 2px; }
+  #shots a:first-child { grid-column: 1 / -1; }
+  #shots img { display: block; width: 100%; height: 100%; aspect-ratio: 16 / 9; object-fit: cover; transition: transform .2s; }
+  #shots a:first-child img { aspect-ratio: auto; }
+  #shots a:hover img, #shots a:focus-visible img { transform: scale(1.02); }
+  #shots a:focus-visible { outline: 2px solid var(--yellow); }
   #new { width: 100%; max-width: 860px; text-align: left; }
   #new h2 { margin: 0 0 14px; font-size: 13px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); text-align: center; }
   #new ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
@@ -82,6 +90,13 @@
   <a id="play" href="/game">PLAY</a>
   <div id="acct" aria-live="polite"></div>
   <div id="note">Runs in Chrome, Edge and Safari on PC, Mac, Android, iPhone and iPad. The first start loads the game, later starts are quick.</div>
+  <section id="shots" aria-label="Screenshots">
+    <a href="/screens/full/race-train.jpg" target="_blank" rel="noopener"><img src="/screens/race-train.jpg" width="960" height="506" alt="A race past a train on a High Stakes track"></a>
+    <a href="/screens/full/race-16-cars.jpg" target="_blank" rel="noopener"><img src="/screens/race-16-cars.jpg" width="960" height="509" loading="lazy" alt="A Quick Race start with 16 cars"></a>
+    <a href="/screens/full/race-snow.jpg" target="_blank" rel="noopener"><img src="/screens/race-snow.jpg" width="960" height="511" loading="lazy" alt="Racing in the snow"></a>
+    <a href="/screens/full/race-biplane.jpg" target="_blank" rel="noopener"><img src="/screens/race-biplane.jpg" width="960" height="513" loading="lazy" alt="A biplane over the track"></a>
+    <a href="/screens/full/quick-race-menu.jpg" target="_blank" rel="noopener"><img src="/screens/quick-race-menu.jpg" width="960" height="713" loading="lazy" alt="The Quick Race menu"></a>
+  </section>
   <section id="new" aria-labelledby="new-h">
     <h2 id="new-h">What's new</h2>
     <ul>
