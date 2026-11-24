@@ -28,6 +28,7 @@
 00497297  0F85          90E9              # PHYS1: car-car normal chosen by geometry, not by relative speed > 15 m/s (glancing hit = the hook; PC collision_normal_gate=0)
 00497772  0F85          90E9              # PHYS1: the same for the other car of the pair
 004F4E60  05            08                # OS1: the opponent accessor's constructor, push 5 modes -> 8
+0045181A  DB0584976100  DB0558044600      # G8: the sun/flare sprite size reads its width from 00460458 (padding after 00460290's ret), H*4/3 set by pu_cube.c: round on a wide screen
 004F5886  05            08                # OS1: the row height helper's limit
 004F58AA  05            08                # OS1: the row draw limit
 004F5871  46            70                # OS1: the dropdown's height, 8 rows of 14 px

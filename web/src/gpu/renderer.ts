@@ -125,7 +125,7 @@ fn sunVisibility() -> f32 {
 }
 fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df: vec3f, sun: vec3f, env_base: vec3f, env_coat: vec3f,
              metallic: f32, roughness: f32, spec_s: f32, refl_s: f32, coat: f32, coat_r: f32, sun_glow: f32, view_light: f32,
-             env_irr: vec3f, env_glow_col: vec3f, env_diffuse: f32, env_glow: f32, light_gain: f32) -> vec3f {
+             env_irr: vec3f, env_glow_col: vec3f, env_diffuse: f32, env_glow: f32, light_gain: f32, area: vec3f) -> vec3f {
   let lit = lum(df);
   let F0 = mix(vec3f(0.04), mix(base, vec3f(0.85), P_SILVER), metallic);
   let H = normalize(V + L); let VdotH = max(dot(V, H), 0.0);
@@ -141,8 +141,10 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   let sun_lum = lum(sun);
   let glow_env = env_glow_col * env_glow; let glow_env_lum = lum(glow_env);
   let base_lum = lum(base);
-  let bmax = max(base.r, max(base.g, base.b));
-  let chroma = clamp((bmax - min(base.r, min(base.g, base.b))) / max(bmax, 1e-4), 0.0, 1.0);
+  // the paint's colourfulness from the page around the texel (a far mip), not the texel's own: a grey damage scrape in blue paint
+  // took the white-paint lift (the whole sun glow as brightness, the achromatic gain) and lit up like a glint
+  let amax = max(area.r, max(area.g, area.b));
+  let chroma = clamp((amax - min(area.r, min(area.g, area.b))) / max(amax, 1e-4), 0.0, 1.0);
   let sat = P_GLOW_SAT * chroma;
   let base_pp = max(vec3f(base_lum) + (base - vec3f(base_lum)) * (1.0 + lobe * sat * sun_lum + glow_env_lum * sat), vec3f(0.0));
   let wgt = (1.0 - metallic) * (vec3f(1.0) - Fr * env_w);
@@ -208,9 +210,12 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   let env_c = envGain(envK(Nc, V, rough_coat * MAXMIP, P_SUN_REFL * vis), u.x0.x);
   let env_irr = envCone(N, 60.0, u.x0.x);
   let env_glow = envCone(N, P_GLOW_ANG, u.x0.x);
+  // the light (sun lobe, view light, sky fill, gain) falls on every paint texel: it scales the texel's own colour, so seams stay
+  // dark. Only the shine (sun spot, reflection, coat) follows the texel's darkness. Scaled by it too, a damage scrape (darker
+  // paint texels) lost the light and showed as a grey hole in lit paint.
   var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, albedo.rgb, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
-                      coat_c, rough_coat, P_GLOW * keep, P_VIEW_LIGHT * keep, env_irr, env_glow, P_ENV_DIFFUSE * keep, P_ENV_GLOW * keep,
-                      1.0 + (P_LIGHT_GAIN - 1.0) * keep);
+                      coat_c, rough_coat, P_GLOW, P_VIEW_LIGHT, env_irr, env_glow, P_ENV_DIFFUSE, P_ENV_GLOW,
+                      P_LIGHT_GAIN, textureSampleLevel(tx, sm, uv, 3.0).rgb);
   rgb = mix(albedo.rgb * i.color.rgb, rgb, pk.r);   // texels the game does not paint keep the stock look
   return vec4f(fog(rgb, i.uvq.z), a);
 }

@@ -181,10 +181,37 @@ int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
         const int pk = peak[page->band[t]];
         rg[t * 2] = 255; rg[t * 2 + 1] = (uint8_t)(page->red[t] >= pk ? 255 : page->red[t] * 255 / pk);
     }
+    /* paint texels drawn over after the tint (the scrapes a damaged car's page is built with, numbers, plates) stay paint, matte
+     * with their own colour: off the paint they took the game's sphere-map reflection pass (glinting like the glass) */
+    uint32_t over = 0;
+    for (size_t t = 0; t < n; t++) if (page->band[t] && !live[t]){ rg[t * 2] = 255; rg[t * 2 + 1] = 0; over++; }
+    /* untinted texels with paint all round (a 5 x 5 window at least 70 % live paint): the damage scrapes are drawn untinted, and
+     * off the paint they took the game's sphere-map reflection pass (the sun's glint, as on the glass); glass, lamps and plates are
+     * larger than that. They shade as matte paint with their own colour. */
+    uint32_t absorbed = 0;
+    {
+        const int W = page->stride, H = page->rows;
+        uint32_t *sum = calloc((size_t)(W + 1) * (H + 1), 4);
+        if (sum){
+            for (int y = 0; y < H; y++){
+                uint32_t row = 0;
+                for (int x = 0; x < W; x++){ row += live[(size_t)y * W + x]; sum[(size_t)(y + 1) * (W + 1) + x + 1] = sum[(size_t)y * (W + 1) + x + 1] + row; }
+            }
+            for (int y = 0; y < H; y++) for (int x = 0; x < W; x++){
+                const size_t t = (size_t)y * W + x;
+                if (live[t]) continue;
+                const int x0 = x - 2 < 0 ? 0 : x - 2, y0 = y - 2 < 0 ? 0 : y - 2, x1 = x + 3 > W ? W : x + 3, y1 = y + 3 > H ? H : y + 3;
+                const uint32_t cnt = sum[(size_t)y1 * (W + 1) + x1] - sum[(size_t)y0 * (W + 1) + x1] - sum[(size_t)y1 * (W + 1) + x0] + sum[(size_t)y0 * (W + 1) + x0];
+                const uint32_t area = (uint32_t)((x1 - x0) * (y1 - y0));
+                if (cnt * 10 >= area * 7){ rg[t * 2] = 255; rg[t * 2 + 1] = 0; absorbed++; }
+            }
+            free(sum);
+        }
+    }
     free(live);
     page->consumed = 1;
     static int logs = 8;
-    if (logs > 0 || getenv("PAINTLOG")){ logs--; fprintf(stderr, "[paint] page %dx%d fmt %d: %u paint texels (build match %.2f)\n", w, h, fmt, kept, best); }
+    if (logs > 0 || getenv("PAINTLOG")){ logs--; fprintf(stderr, "[paint] page %dx%d fmt %d: %u paint texels, %u drawn over and %u untinted islands as matte paint (build match %.2f)\n", w, h, fmt, kept, over, absorbed, best); }
     return kept > 0;
 }
 
