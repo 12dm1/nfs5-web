@@ -201,7 +201,11 @@ static int part_row(uint32_t article, uint32_t ident){
     return 0;
 }
 /* 0043A3B0, mov [esi+2C0h], ebx: esi = R3DCar, ebx = the clamped index */
+/* CARLOD=0 (web/src/quality.ts, phones): the game's own tiers; the garage model costs a third of a race frame's work */
 void pu_car_lod(CPU *c){
+    static int on = -1;
+    if (on < 0){ const char *e = getenv("CARLOD"); on = !(e && *e == '0'); }
+    if (!on) return;
     const int index = (int)c->ebx, detail = (int)MR32(0x006197C4u), state = (int)MR32(0x00657424u);
     if (detail < 0 || detail > 2) return;
     const uint32_t info = MR32(c->esi + 0xF4);
@@ -585,8 +589,14 @@ static void hud_virtualize(int w, int h, int *vw, int *vh){
 }
 #define DRAW_LIMIT1 0x006C1F08u
 #define DRAW_LIMIT2 0x006C1F0Cu
-#define DRAW_SCALE 2.0f
-#define DRAW_MIN 20000.0f
+/* DRAW_X=<scale>: 2 as on the PC; 1 = the game's own distance (web/src/quality.ts, phones: half a race frame's work goes on the far half) */
+static float draw_x(void){
+    static float x = -1.0f;
+    if (x < 0.0f){ const char *e = getenv("DRAW_X"); x = e && *e ? (float)atof(e) : 2.0f; if (x < 0.25f || x > 4.0f) x = 2.0f; }
+    return x;
+}
+#define DRAW_SCALE draw_x()
+#define DRAW_MIN (draw_x() >= 2.0f ? 20000.0f : 0.0f)
 /* The two object classes with fixed limits (600 and 700, squared, in 0047F890) scale along and never end before the rest, otherwise
  * ground and walls go missing under buildings that are still drawn. */
 static void draw_limits(float drawn){
@@ -817,6 +827,7 @@ void guest_wait_begin(void); void guest_wait_end(void);
  * from the clock, read by the loop itself): a pass that simulated nothing lets the guest lock go for a short sleep, so the
  * timer and the other threads get the lock at once and the core is free. ?env=RACE_SPIN=1 keeps the game's own spin. */
 static double g_idle_sleep_ms, g_idle_lock_ms; static int g_idle_sleeps;
+static double g_sim_ms; static int g_sim_n;
 static void race_idle(uint32_t tick){
     static int on = -1; static uint32_t last;
     if (on < 0){ const char *e = getenv("RACE_SPIN"); on = !(e && *e && *e != '0'); }
@@ -855,6 +866,8 @@ void pu_loop_stat(CPU *c){
     if (t - t0 >= 5000.0){
         fprintf(stderr, "[perf loop] per s: %.0f passes (%.0f without a tick), %.1f ticks, %.1f frames; most ticks in one pass %d; idle: %d sleeps, %.2f ms each, %.0f ms slept, %.0f ms getting the lock back, in 1 s\n",
                 passes * 1000.0 / (t - t0), idle * 1000.0 / (t - t0), (tick - tick0) * 1000.0 / (t - t0), (r_frames() - f0) * 1000.0 / (t - t0), maxticks, g_idle_sleeps, g_idle_sleeps ? g_idle_sleep_ms / g_idle_sleeps : 0.0, g_idle_sleep_ms * 1000.0 / (t - t0), g_idle_lock_ms * 1000.0 / (t - t0));
+        fprintf(stderr, "[perf sim] %d steps, %.2f ms each, %.0f ms a second\n", g_sim_n, g_sim_n ? g_sim_ms / g_sim_n : 0.0, g_sim_ms * 1000.0 / (t - t0));
+        g_sim_ms = 0; g_sim_n = 0;
         g_idle_sleep_ms = g_idle_lock_ms = 0; g_idle_sleeps = 0;
         t0 = t; f0 = r_frames(); tick0 = tick; passes = idle = maxticks = 0;
     }
@@ -924,7 +937,10 @@ static void race_reshape(CPU *c){
     c->eax = eax; c->ecx = ecx; c->edx = edx;
 }
 void sub_00414ff0(CPU *restrict c){
+    struct timespec s0, s1; clock_gettime(CLOCK_MONOTONIC, &s0);
     sub_00414ff0_orig(c);
+    clock_gettime(CLOCK_MONOTONIC, &s1);
+    g_sim_ms += (s1.tv_sec - s0.tv_sec) * 1e3 + (s1.tv_nsec - s0.tv_nsec) / 1e6; g_sim_n++;
     pu_interp_step();
     race_reshape(c);
 }

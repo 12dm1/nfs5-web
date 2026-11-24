@@ -14,9 +14,11 @@ import { attachLan } from './net/lan';
 import { attachTouch } from './touch';
 import { attachSoftKeyboard } from './softkb';
 import { startCloud, type CloudSync } from './cloud/sync';
+import { gfx, gfxEnv, setGfxForTest } from './quality';
 
 const dev = await fetch('/test-dev.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).then(j => j?.dev === true, () => false);
 const q = dev ? new URLSearchParams(location.search) : new URLSearchParams();
+setGfxForTest(q.get('gfx'));
 const statusEl = document.getElementById('status')!;
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const setStatus = (s: string) => { statusEl.textContent = s; };
@@ -68,7 +70,8 @@ async function main() {
   const info = await (await fetch('/nfs5.json', { cache: 'no-cache' })).json();
   setStatus('Loading the game module...');
   const module = await WebAssembly.compileStreaming(fetch('/nfs5.wasm', { cache: 'no-cache' }));
-  const env: Record<string, string> = { NFS5_SAVEDIR: '/save' };
+  const env: Record<string, string> = { NFS5_SAVEDIR: '/save', ...gfxEnv() };
+  log(`[gfx] profile ${gfx()}`);
   // the race's mode comes from the window when a race starts (renderer.ts raceMode); the canvas starts with it
   [canvas.width, canvas.height] = raceMode();
   for (const kv of (q.get('env') ?? '').split(',')) { const i = kv.indexOf('='); if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1); }

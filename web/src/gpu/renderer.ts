@@ -6,6 +6,8 @@
 const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14, PAINT: 15 };
 const VSIZE = 48, VERTEX_BUFFER = 24 << 20, UBO_ALIGN = 256, UBO_SLOTS = 65536 / 256 * 64;
 
+import { gfxLines, gfxSamples } from '../quality';
+
 const SHADER = /* wgsl */`
 struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDensity: f32, fogScale: f32, hard: f32, lodBias: f32, em: vec4f,
   camR: vec4f, camU: vec4f, camF: vec4f, proj: vec4f, vp: vec4f, sun: vec4f, x0: vec4f, x1: vec4f };
@@ -246,8 +248,8 @@ export function raceMode(): [number, number] {
   const q = new URLSearchParams(location.search);
   const dpr = devicePixelRatio || 1, pw = Math.max(1, innerWidth * dpr), ph = Math.max(1, innerHeight * dpr);
   const aspect = q.get('ws') === '0' ? 4 / 3 : Math.min(32 / 9, Math.max(4 / 3, pw / ph));
-  const cap = Math.min(2160, Number(q.get('rh') ?? 2160) || 2160);
-  const h = Math.max(720, Math.min(cap, Math.round(Math.min(ph, pw / aspect)))) & ~1;
+  const cap = Math.min(gfxLines(), Number(q.get('rh') ?? 2160) || 2160);
+  const h = Math.max(Math.min(720, cap), Math.min(cap, Math.round(Math.min(ph, pw / aspect)))) & ~1;
   return [Math.round(h * aspect / 8) * 8, h];
 }
 
@@ -256,7 +258,7 @@ export function raceMode(): [number, number] {
 function fitTarget(lw: number, lh: number): [number, number] {
   const q = new URLSearchParams(location.search);
   const dpr = devicePixelRatio || 1, pw = Math.max(1, innerWidth * dpr), ph = Math.max(1, innerHeight * dpr);
-  const aspect = lw / lh, cap = Math.min(2160, Number(q.get('rh') ?? 2160) || 2160);
+  const aspect = lw / lh, cap = Math.min(gfxLines(), Number(q.get('rh') ?? 2160) || 2160);
   const h = Math.max(480, Math.min(cap, Math.round(Math.min(ph, pw / aspect)))) & ~1;
   return [Math.max(2, Math.round(h * aspect / 2) * 2), h];
 }
@@ -281,7 +283,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   // AA1 (PC dx11z [display] msaa): the scene draws into a 4x multisampled colour + depth pair, resolved into colorTex before a
   // present, a shot or a pixel read. ?msaa=1 turns it off. The PC's alpha-to-coverage ended as "discard below the game's
   // threshold, survivors opaque", which the shader's hard cutout already does, so there is no coverage from alpha here.
-  const msaaParam = Number(new URLSearchParams(location.search).get('msaa') ?? 4);
+  const msaaParam = Number(new URLSearchParams(location.search).get('msaa') ?? gfxSamples());
   const SAMPLES = msaaParam === 1 ? 1 : 4;
   const makeTargets = () => {
     const colorTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
