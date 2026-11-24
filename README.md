@@ -16,6 +16,33 @@ lifter this repository started from (`licenses/`).
 **Status:** the game runs in the browser on PCs and phones: menus, career, Quick Race with up to 15 opponents,
 the High Stakes tracks, the EA add-on cars, gamepad and touch controls, and online races (see [docs/PLAN.md](docs/PLAN.md)).
 
+## Features
+
+On top of the stock game; the technical list with the hooks and checks is [docs/FEATURES.md](docs/FEATURES.md).
+
+**Content and races**
+- The 19 *High Stakes* tracks converted to Porsche Unleashed: walls, object collisions, animated objects and textures,
+  ambient sound, AI tuned for them.
+- Quick Race with up to 15 opponents (16 cars instead of 8), and "similar cars" / "similar tuned" opponents.
+- Online instead of network play: a lobby inside the game's menus, races between players, races with bots filling
+  the grid, and career tournaments whose points and prizes move your career on.
+- Accounts with cloud saves: the career follows you to any device; playing as a guest needs no account.
+- Fixes: car-to-car hits no longer hook a car sideways, an exact 64-step game timer, fast CPUs measured right.
+
+**Picture**
+- Any screen shape from 4:3 to 32:9 (Hor+ camera), drawn at the window's real pixels up to 2160 lines, and resized live.
+- Frame interpolation: the race is drawn at the display's rate (120 Hz and more) instead of the game's 64 steps.
+- Car paint on every car: metallic base with flakes, a clear coat with an orange-peel ripple, sun glints, and
+  reflections from a live cube map of the scene (a separate one in the showroom); seams, grilles and plates stay matte.
+- The garage-quality car models in races, twice the draw distance, sharp text, the HUD scaled to the screen, MSAA x4.
+- A light profile on phones and tablets: the game's own car models and draw distance, cheaper reflections, up to 720
+  lines without MSAA (a race frame costs about a third).
+
+**Controls and sound**
+- Gamepads with the standard layout, in menus and races, with impact rumble.
+- Touch controls on phones and tablets: steering stick, pedals, gears, camera, reset, pause; vibration on impacts.
+- Low-latency sound through an AudioWorklet, without breaks while tracks load.
+
 ## What you need
 
 - **The game:** your own English PC copy of *Porsche Unleashed* with the official **v3.5** update. The build takes
