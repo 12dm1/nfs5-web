@@ -1,47 +1,82 @@
 # Need for Speed: Porsche Unleashed in the browser
 
+<p align="center">
+  <a href="https://nfs5-reforged.duckdns.org/"><b>&#9654;&nbsp; PLAY IN THE BROWSER &nbsp;&mdash;&nbsp; nfs5-reforged.duckdns.org</b></a>
+  <br>
+  <sub>Chrome, Edge or Safari on a PC, Mac, Android phone, iPhone or iPad. No install; play as a guest or with an account.</sub>
+</p>
+
+<p align="center">
+  <a href="https://nfs5-reforged.duckdns.org/"><img src="docs/screens/race-train.jpg" alt="A race on a converted High Stakes track" width="100%"></a>
+</p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screens/race-16-cars.jpg" alt="16 cars in one race"></td>
+    <td width="50%"><img src="docs/screens/race-snow.jpg" alt="Snow on a converted High Stakes track"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screens/race-biplane.jpg" alt="A converted High Stakes track"></td>
+    <td width="50%"><img src="docs/screens/quick-race-menu.jpg" alt="Quick Race with 15 opponents in the showroom"></td>
+  </tr>
+</table>
+
 A fan project that runs the PC game *Need for Speed: Porsche Unleashed* (2000) in the browser, with the
 NFS5 Reforged features, tracks converted from *Need for Speed: High Stakes*, and online races. The game's x86 code
 is translated to C ahead of time and compiled to WebAssembly; the game's THRASH renderer runs on WebGPU, the sound
-on Web Audio. You bring your own copy of the game.
-
-Built after [nfsu2-web](https://github.com/th0mk/nfsu2-web) (MIT), the browser port of NFS Underground 2, whose
-lifter this repository started from (`licenses/`).
-
-> Not affiliated with or endorsed by Electronic Arts. This repository contains none of the game's code or data:
-> no EXE, no DLL, no game files, no lifted C, no compiled module. All of that is made locally from your copy.
-
-**Play it:** https://nfs5-reforged.duckdns.org/ — in a current browser on a PC, Mac, Android phone, iPhone or iPad.
-
-**Status:** the game runs in the browser on PCs and phones: menus, career, Quick Race with up to 15 opponents,
-the High Stakes tracks, the EA add-on cars, gamepad and touch controls, and online races (see [docs/PLAN.md](docs/PLAN.md)).
+on Web Audio.
 
 ## Features
 
-On top of the stock game; the technical list with the hooks and checks is [docs/FEATURES.md](docs/FEATURES.md).
+> Everything below is added to the stock game. The technical list, with the game functions each one hooks and how it
+> was checked, is [docs/FEATURES.md](docs/FEATURES.md).
 
-**Content and races**
-- The 19 *High Stakes* tracks converted to Porsche Unleashed: walls, object collisions, animated objects and textures,
-  ambient sound, AI tuned for them.
-- Quick Race with up to 15 opponents (16 cars instead of 8), and "similar cars" / "similar tuned" opponents.
-- Online instead of network play: a lobby inside the game's menus, races between players, races with bots filling
-  the grid, and career tournaments whose points and prizes move your career on.
-- Accounts with cloud saves: the career follows you to any device; playing as a guest needs no account.
-- Fixes: car-to-car hits no longer hook a car sideways, an exact 64-step game timer, fast CPUs measured right.
+### Tracks and races
+- **The 19 *Need for Speed: High Stakes* tracks**, converted to Porsche Unleashed, with their official names.
+- Walls and roadside-object collisions on them with the game's own impacts, animated objects and textures, the sky
+  and horizon, and their ambient sounds.
+- AI tuned for the converted tracks: speed limits per corner, ramps, recovery when a car is stuck.
+- **Quick Race with up to 15 opponents**: 16 cars on the grid instead of 8.
+- **"Similar cars" and "similar tuned" opponents** in Quick Race.
 
-**Picture**
-- Any screen shape from 4:3 to 32:9 (Hor+ camera), drawn at the window's real pixels up to 2160 lines, and resized live.
-- Frame interpolation: the race is drawn at the display's rate (120 Hz and more) instead of the game's 64 steps.
-- Car paint on every car: metallic base with flakes, a clear coat with an orange-peel ripple, sun glints, and
-  reflections from a live cube map of the scene (a separate one in the showroom); seams, grilles and plates stay matte.
-- The garage-quality car models in races, twice the draw distance, sharp text, the HUD scaled to the screen, MSAA x4.
-- A light profile on phones and tablets: the game's own car models and draw distance, cheaper reflections, up to 720
-  lines without MSAA (a race frame costs about a third).
+### Online and saves
+- **Online instead of network play**: one click from the main menu to a lobby with chat, inside the game's own menus.
+- Race modes: races between players, races with bots filling the grid, and **career tournaments** whose points,
+  prizes and progress count in your own career.
+- **Accounts with cloud saves**: your career follows you to any device; the newer save wins, the older one is kept as
+  a backup and can be downloaded.
+- **Play as a guest** without an account; an account made later takes the guest's saves along.
 
-**Controls and sound**
-- Gamepads with the standard layout, in menus and races, with impact rumble.
-- Touch controls on phones and tablets: steering stick, pedals, gears, camera, reset, pause; vibration on impacts.
-- Low-latency sound through an AudioWorklet, without breaks while tracks load.
+### Picture
+- **Any screen shape from 4:3 to 32:9** with a Hor+ camera; the race is drawn at the window's real pixels, up to
+  2160 lines, and follows a resized window live.
+- **Frame interpolation**: the race is drawn at the display's rate (120 Hz and more) instead of the game's 64 steps
+  a second.
+- **Car paint on every car**: a metallic base with flakes, a clear coat with an orange-peel ripple, sun glints, and a
+  paint mask so seams, grilles, badges and plates stay matte.
+- **Live reflections**: a cube map of the scene around the car, and a separate one in the showroom.
+- The garage-quality car models in races, **twice the draw distance**, distant wheels.
+- Sharp menu and HUD text, the HUD scaled to the screen, the highest texture detail, **MSAA x4**.
+- **A light profile on phones and tablets**: the game's own car models and draw distance, cheaper reflections, up to
+  720 lines without MSAA; a race frame costs about a third.
+
+### Controls and sound
+- **Gamepads** with the standard layout in menus and races, with **rumble** on impacts.
+- **Touch controls** on phones and tablets: steering stick, gas, brake, hand brake, gears, camera, look back, reset,
+  pause; vibration on impacts; full screen and landscape on the first touch.
+- **Low-latency sound** through an AudioWorklet, without breaks while a track loads.
+
+### Fixes
+- An exact game timer: a steady 64 simulation steps a second, no lost ticks.
+- Car-to-car hits no longer hook a car sideways.
+- The CPU speed check no longer misreads fast processors.
+- Crashes of the 16-car races fixed (roadside objects, the lap line).
+
+> Not affiliated with or endorsed by Electronic Arts. This repository contains none of the game's code or data:
+> no EXE, no DLL, no game files, no lifted C, no compiled module. All of that is made locally from your own copy.
+
+Built after [nfsu2-web](https://github.com/th0mk/nfsu2-web) (MIT), the browser port of NFS Underground 2, whose
+lifter this repository started from (`licenses/`).
 
 ## What you need
 
