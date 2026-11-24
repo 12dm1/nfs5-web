@@ -265,6 +265,7 @@ static void ui_rects(DV *verts, int n){
 }
 static int tan_substitute(int bound);
 static float tan_voffset(int bound);
+static void glass_log(int bound, const DV *o, int nv, int refl);
 static int g_paint_on = -1, g_mask_slot;
 static void game_state(DrawState *d, int topo){
     if (g_paint_on < 0){ const char *e = getenv("PAINT"); g_paint_on = !(e && *e == '0'); }
@@ -421,7 +422,19 @@ static void car_clip_normals(uint32_t vba, const uint8_t *vb, const uint8_t *ib,
     }
 }
 static uint32_t g_pv_vb, g_pv_ib; static int g_pv_count, g_pv_slot;
-static float g_pv_uv[MAX_VERTS * 2];
+static float g_pv_uv[MAX_VERTS * 2], g_pv_xy[MAX_VERTS * 2]; static int g_pv_nv;
+/* the game's reflection pass over a car page draws the same vertices again. Same buffers and triangle count are not enough: the
+ * game's projected layers (tree shadows, lamps) and car shadows draw the same vertices too, and taken for the reflection they
+ * were masked off the paint, so they darkened only the glass and the lamp boxes. The reflection layer's apply (00445520, pu_ext.c)
+ * arms the next draw. */
+static int g_refl_armed;
+void r_reflection_next(void){ g_refl_armed = 1; }
+static int pv_same(const DV *o, int nv){
+    if (nv != g_pv_nv) return 0;
+    for (int i = 0; i < nv; i++)
+        if (fabsf(o[i].x - g_pv_xy[i * 2]) > 0.01f || fabsf(o[i].y - g_pv_xy[i * 2 + 1]) > 0.01f) return 0;
+    return 1;
+}
 static void draw_any(const char *n, const uint32_t *a);
 void r_draw(const char *n, const uint32_t *a){
     if (g_hud_w0 > 0 && g_race && g_lw != g_hud_w0){
@@ -477,19 +490,26 @@ static void draw_any(const char *n, const uint32_t *a){
         for (int i = 0; i < nv; i++) o[i] = conv(VI(vb, ib, i));
         const int bound = tan_substitute(g_bound);
         const int paintable = (g_race || MR32(0x0065B928u)) && !g_cap;
-        if (paintable && bound && (g_tex[bound - 1].paint || (g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_slot))) car_clip_normals(a[1], vb, ib, o, nv);
+        const int armed = g_refl_armed; g_refl_armed = 0;
+        const int again = armed && paintable && bound && !g_tex[bound - 1].paint && g_pv_slot && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && pv_same(o, nv);
+        if (paintable && bound && (g_tex[bound - 1].paint || again)) car_clip_normals(a[1], vb, ib, o, nv);
         if (paintable && bound && g_tex[bound - 1].paint){
-            g_pv_vb = a[1]; g_pv_ib = a[2]; g_pv_count = count; g_pv_slot = bound;
-            for (int i = 0; i < nv; i++){ g_pv_uv[i * 2] = o[i].u; g_pv_uv[i * 2 + 1] = o[i].v; }
+            g_pv_vb = a[1]; g_pv_ib = a[2]; g_pv_count = count; g_pv_slot = bound; g_pv_nv = nv;
+            for (int i = 0; i < nv; i++){ g_pv_uv[i * 2] = o[i].u; g_pv_uv[i * 2 + 1] = o[i].v; g_pv_xy[i * 2] = o[i].x; g_pv_xy[i * 2 + 1] = o[i].y; }
         }
-        else if (paintable && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && g_pv_slot){
+        else if (again){
             for (int i = 0; i < nv; i++){ o[i].rect[0] = g_pv_uv[i * 2]; o[i].rect[1] = g_pv_uv[i * 2 + 1]; o[i].rect[2] = 0.0f; o[i].rect[3] = 7.0f; }
             g_mask_slot = g_pv_slot;
+            glass_log(bound, o, nv, 1);
             flush_verts(o, nv, 0);
             g_mask_slot = 0;
             return;
         }
-        else g_pv_vb = 0;
+        else {
+            /* another layer over the same vertices keeps the record: the reflection may come after it */
+            if (paintable && g_pv_slot && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && pv_same(o, nv)) glass_log(bound, o, nv, 0);
+            else g_pv_vb = 0;
+        }
         flush_verts(o, nv, 0); return; }
     if (!strcmp(n, "drawtrifan@12")){
         if (count < 3) return;
@@ -811,6 +831,27 @@ static float tan_voffset(int bound){
     return e->kind == 2 ? (float)(tan_ticks() & 0x3FF) * e->scroll : 0.0f;     /* whole repeats at the wrap */
 }
 int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg);
+static long g_frames;
+/* GLASSLOG=1 (debug): the game's reflection pass over the car pages, once a second: texture, its mean colour, states, vertex colour */
+static uint32_t g_tex_mean[LFB_SLOT];
+static void glass_log(int bound, const DV *o, int nv, int refl){
+    static int on = -1; static long last;
+    if (on < 0){ const char *e = getenv("GLASSLOG"); on = e && *e && *e != '0'; }
+    if (!on || !g_race) return;
+    /* each new kind of pass once: texture, blend, alpha reference */
+    static uint32_t seen[64]; static int nseen;
+    const uint32_t key = (uint32_t)bound << 8 | (uint32_t)g_blend << 4 | (uint32_t)refl << 1 | (g_alpharef > 0.0f);
+    for (int i = 0; i < nseen; i++) if (seen[i] == key) return;
+    if (nseen >= 64) return;
+    seen[nseen++] = key; (void)last;
+    double r = 0, g = 0, b = 0, a = 0;
+    for (int i = 0; i < nv; i++){ const uint32_t cl = o[i].color; a += cl >> 24; r += (cl >> 16) & 255; g += (cl >> 8) & 255; b += cl & 255; }
+    if (nv){ r /= nv; g /= nv; b /= nv; a /= nv; }
+    const uint32_t m = bound ? g_tex_mean[bound - 1] : 0;
+    fprintf(stderr, "[glass] %s frame %ld tick %u: tex %d %dx%d keyed %d mean %02x%02x%02x a%02x | blend %d zw %d aref %.2f hard %d fog %d | verts %d argb %.0f %.0f %.0f %.0f\n",
+            refl ? "reflection" : "other", g_frames, MR32(0x00606AC4u), bound, bound ? g_tex[bound - 1].w : 0, bound ? g_tex[bound - 1].h : 0, bound ? g_tex[bound - 1].keyed : 0,
+            (m >> 16) & 255, (m >> 8) & 255, m & 255, m >> 24, g_blend, g_zwrite, g_alpharef, hard_wanted(), g_fogon, nv, a, r, g, b);
+}
 void r_tupdate(uint32_t t, uint32_t data, int palette){
     (void)palette;
     if (!t || t > LFB_SLOT || !data || !g_tex[t - 1].used) return;
@@ -824,6 +865,9 @@ void r_tupdate(uint32_t t, uint32_t data, int palette){
     const int keyed = cutout || (solid && clear * 100 >= n && mid * 100 <= n);
     g_tex[slot].cutout = cutout; g_tex[slot].keyed = keyed;
     if (keyed) clear_border(rgba, w, h);
+    { uint64_t sr = 0, sg = 0, sb = 0, sa = 0;
+      for (int i = 0; i < n; i++){ const uint32_t px = rgba[i]; sr += px & 255; sg += (px >> 8) & 255; sb += (px >> 16) & 255; sa += px >> 24; }
+      if (n) g_tex_mean[slot] = (uint32_t)(sa / n) << 24 | (uint32_t)(sr / n) << 16 | (uint32_t)(sg / n) << 8 | (uint32_t)(sb / n); }
     upload_chain(slot, rgba);
     free(rgba);
     tan_upload(slot);

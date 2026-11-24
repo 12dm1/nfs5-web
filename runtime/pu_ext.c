@@ -1061,6 +1061,15 @@ void pu_patch_read(const char *path, uint32_t buf, long got){
 #endif
 }
 
+/* ---- R3DSpecularTextureLayer (vtable 005B39B4, apply 00445520): the car's sphere-map reflection pass. Its apply runs right
+ * before the layer's drawtrimesh, so the web renderer is told the next draw over the car page is the reflection (masked off the
+ * paint, which has its own). Other passes over the same vertices (the projected tree shadows and lamps) are drawn as they are. ---- */
+void r_reflection_next(void) __attribute__((weak));
+void sub_00445520(CPU *restrict c){
+    sub_00445520_orig(c);
+    if (r_reflection_next) r_reflection_next();
+}
+
 /* ---- G11 (PC wrapper car_reflection.cpp, [display] tunnel_lamps=0): R3DSkyMapTextureLayer (vtable 005B398C, apply 00445B10,
  * thiscall(streamA, streamB) ret 8) projects the tunnel lamps' glow onto the car from above; with the R1 cube reflection the car
  * already reflects the lamp panels, the projection lies on top of it as bright patches. The game's own zero-texture path
