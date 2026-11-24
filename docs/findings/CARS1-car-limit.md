@@ -180,3 +180,14 @@ heard), the browser build in a browser (the wasm module was only compiled), long
   would break; nothing does today.
 - Stock-size races take the same code paths with new addresses. The 8-car trace is deterministic across lifts, but
   there is no stock-vs-new trace comparison (the baseline exe has no monitor).
+
+## Lap line gap (2026-11-24)
+
+00435460 (called by 004277D0 at the player's lap line, from 00416310) keeps one time gap per racer in a 12-slot stack
+array at ebp-30h (slots 8..11 overlap its other locals). With 13 or more racers the loop wrote over the saved ebp and
+both arguments, and the result was stored through the overwritten pointer: Dolphin Cove, 16 racers, "memory access out
+of bounds" when the player crossed the line near the front (other places wrote to a low address silently). Overridden in
+`runtime/pu_cars.c` with the same steps for any number of racers (`CARLOG` logs the first calls: `[cars] lap line`).
+A scan for other stack arrays indexed next to reads of the car and racer counts (5E8AE8, 5E8B58, 658080) found none
+indexed by car: 00405AD0 (traffic lane), 00402790 (axis), 004A7DC0 (k nearest cars, k from its caller), 004B00D2 (parity),
+004B4FD0 (network humans, at most 8).

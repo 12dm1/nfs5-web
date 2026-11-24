@@ -104,3 +104,43 @@ void pu_cars_setup_hook(uint32_t ip){
         memcpy(info, rep, lo); memcpy(info + lo, x, all - lo); break;
     }
 }
+
+/* CARS2: 00435460, cdecl(int *gap, uint8_t *fast): at the player's lap line (004277D0 from 00416310) the largest time gap
+ * between the player and another racer, for the lap commentary, and whether the player is faster than 13.39.  The game
+ * keeps one gap per racer in a 12-slot stack array (ebp-30h; slots 8..11 share its other locals): with 13+ racers slots 12
+ * and up overwrote the saved ebp and the arguments, and the result went through a wrong pointer ("memory access out of
+ * bounds" as the player crossed the line near the front: Dolphin Cove, 16 racers, 2026-11-24).  The same steps for any
+ * number of racers. */
+#define RACER_PLAYER 0x0065741Cu
+void sub_00435460(CPU *restrict c){
+    const uint32_t out_gap = MR32(c->esp + 4), out_fast = MR32(c->esp + 8);
+    int n = (int)MR32(CARS_N_RACERS);
+    if (n > CARS_MAX) n = CARS_MAX;
+    const uint32_t me_i = MR32(RACER_PLAYER), me = MR32(CARS_L_RACER + 4u * me_i);
+    float k_half, k_fast;
+    memcpy(&k_half, g_mem + 0x005B23F0u, 4); memcpy(&k_fast, g_mem + 0x005B2DF8u, 4);
+    const int32_t my_dist = (int32_t)MR32(me + 0xB54);
+    float my_speed; memcpy(&my_speed, g_mem + me + 0x35C, 4);
+    int32_t best = -10000;
+    for (int i = 0; i < n; i++){
+        const uint32_t car = MR32(CARS_L_RACER + 4u * (uint32_t)i);
+        const int32_t d = (int32_t)MR32(car + 0xB54) - my_dist;
+        float speed; memcpy(&speed, g_mem + car + 0x35C, 4);
+        /* ahead: the player's speed, at least half the other's; behind: the other's, at least half the player's */
+        const double v = d > 0 ? ((double)my_speed > (double)speed * k_half ? (double)my_speed : (double)speed * k_half)
+                               : ((double)speed > (double)my_speed * k_half ? (double)speed : (double)my_speed * k_half);
+        int32_t g = 0;
+        if ((double)my_speed > (double)k_fast && d != 0){
+            const float q = (float)((double)(int32_t)((uint32_t)d << 6) / v);
+            g = (int32_t)x86_cvt_i32(x87_round(c->fcw, (double)q));
+        }
+        g /= 64;                                    /* cdq; and edx,3Fh; add; sar 6: toward zero */
+        if ((uint32_t)i != me_i && g > best) best = g;
+    }
+    MR32(out_gap) = (uint32_t)best;
+    g_mem[out_fast] = (double)my_speed > (double)k_fast;
+    static int logs = -1;
+    if (logs < 0) logs = getenv("CARLOG") ? 8 : 0;
+    if (logs > 0){ logs--; fprintf(stderr, "[cars] lap line: %d racers, largest gap %d, fast %d\n", n, best, g_mem[out_fast]); }
+    POP32(c->eip);
+}
