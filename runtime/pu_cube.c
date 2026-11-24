@@ -1,6 +1,7 @@
 /* The race's reflection cube (PC wrapper scene_probe.cpp RunCubemap, R1). After the rear mirror the scene is drawn once more from the main
  * camera's spot into one face of a cube, with the game's own view, traversal and flush; the player's car is left out. One face per frame:
- * the PC draws all six every second frame, which a browser's frame budget does not hold. ?env=CUBE=0 turns it off. */
+ * the PC draws all six every second frame, which a browser's frame budget does not hold. ?env=CUBE=0 turns it off; CUBE_EVERY=<n>
+ * draws a face every n-th frame (web/src/quality.ts, phones). */
 #ifdef __wasm__
 #include <stdint.h>
 #include <stdio.h>
@@ -32,10 +33,17 @@ static const float k_rot[6][9] = {
 
 /* at 00468AA6, after the mirror pass: edi = the race renderer */
 void pu_cube_capture(CPU *c){
-    static int on = -1, face;
+    static int on = -1, face, every = 1, skip;
     static uint32_t buf;
-    if (on < 0){ const char *e = getenv("CUBE"); on = !(e && *e == '0'); }
+    if (on < 0){
+        const char *e = getenv("CUBE"); on = !(e && *e == '0');
+        /* CUBE_EVERY=<n> (the page's light profile on phones): one face every n-th frame; the whole scene is drawn once more for a face */
+        const char *n = getenv("CUBE_EVERY"); every = n && *n ? atoi(n) : 1;
+        if (every < 1 || every > 30) every = 1;
+    }
     if (!on) return;
+    if (++skip < every) return;
+    skip = 0;
     const uint32_t race = c->edi, engine = MR32(ENGINE);
     const uint32_t main_view = race ? MR32(race + 4) : 0, traversal = MR32(TRAVERSAL);
     if (!engine || !main_view || !traversal) return;

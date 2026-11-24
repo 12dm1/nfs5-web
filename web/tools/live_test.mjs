@@ -20,7 +20,13 @@ page.on('console', m => {
 page.on('pageerror', e => console.log('[pageerror] ' + e.message));
 await page.goto(SITE + '/');
 console.log('PLAY page note: ' + await page.textContent('#note'));
-await Promise.all([page.waitForURL('**/game'), page.click('#play')]);
+// a fresh profile is a guest: PLAY opens the chooser first (CLOUD1), "Play as guest" goes on to the game
+await page.click('#play');
+if (await page.locator('#f-guest').waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)) {
+  console.log('PLAY: the guest chooser, "Play as guest"');
+  await page.click('#f-guest');
+}
+await page.waitForURL('**/game');
 console.log('after PLAY: ' + page.url() + ', crossOriginIsolated=' + await page.evaluate(() => crossOriginIsolated));
 await page.waitForTimeout(SECONDS * 1000);
 console.log(`status line: ${await page.textContent('#status').catch(() => '?')}`);

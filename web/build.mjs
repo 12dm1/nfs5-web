@@ -3,6 +3,7 @@ import * as esbuild from 'esbuild';
 import fs from 'node:fs';
 const entries = {
   'main': 'src/main.ts',
+  'play': 'src/play.ts',
   'host/game-worker': 'src/host/game-worker.ts',
   'host/io-worker': 'src/host/io-worker.ts',
   'audio/worklet': 'src/audio/worklet.ts',

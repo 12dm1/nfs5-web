@@ -6,6 +6,8 @@
 const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14, PAINT: 15 };
 const VSIZE = 48, VERTEX_BUFFER = 24 << 20, UBO_ALIGN = 256, UBO_SLOTS = 65536 / 256 * 64;
 
+import { gfxLines, gfxSamples } from '../quality';
+
 const SHADER = /* wgsl */`
 struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDensity: f32, fogScale: f32, hard: f32, lodBias: f32, em: vec4f,
   camR: vec4f, camU: vec4f, camF: vec4f, proj: vec4f, vp: vec4f, sun: vec4f, x0: vec4f, x1: vec4f };
@@ -69,7 +71,7 @@ fn shade(i: VO) -> vec4f {
 // ---- car paint (PC dx11_shaders.h PSMaterial car branch, shaders/material_core.inc mat_shade_car; [car_paint] values of dx11z.ini) ----
 const PI = 3.14159265;
 const P_METAL = 0.2; const P_GRAZING = 0.5; const P_FLAKE_SCALE = 1200.0; const P_FLAKE = 0.015; const P_SILVER = 0.5;
-const P_COAT = 1.0; const P_COAT_GLOSS = 0.0; const P_PEEL = 0.0; const P_ROUGH = 0.15; const P_METAL_MAP = 0.0;
+const P_COAT = 1.0; const P_COAT_GLOSS = 0.0; const P_PEEL = 0.5; const P_PEEL_SCALE = 48.0; const P_ROUGH = 0.15; const P_METAL_MAP = 0.0;
 const P_SPEC = 20.0; const P_REFL = 1.0; const P_GLOW = 35.8; const P_GLOW_ANG = 15.0; const P_GLOW_SAT = 0.6;
 const P_VIEW_LIGHT = 1.2; const P_VIEW_DARK = 0.25; const P_ENV_DIFFUSE = 0.3; const P_ENV_GLOW = 0.0;
 const P_SUN_FOG = 150.0; const P_LIGHT_GAIN = 1.7; const P_DARK_MATTE = 1.0; const P_DARK_POWER = 4.0; const P_SUN_REFL = 0.1;
@@ -83,6 +85,14 @@ fn fresnel(F0: vec3f, c: f32) -> vec3f { let t = 1.0 - c; let t2 = t * t; return
 fn fresnel_rk(F0: vec3f, c: f32, r: f32, k: f32) -> vec3f { let t = 1.0 - c; let t2 = t * t; let g = 1.0 - r; let Fm = max(vec3f(g), F0); return F0 + (Fm - F0) * (t2 * t2 * t) * k; }
 fn hash2(x: i32, y: i32) -> f32 { var h = u32(x) * 374761393u + u32(y) * 668265263u; h = (h ^ (h >> 13u)) * 1274126177u; h = h ^ (h >> 16u); return f32(h & 16777215u) / 16777215.0; }
 fn flake_offset(uv: vec2f, s: f32) -> vec2f { let c = floor(uv * s); let x = i32(c.x); let y = i32(c.y); return vec2f(hash2(x, y), hash2(x + 7919, y + 104729)) * 2.0 - vec2f(1.0); }
+// smooth value noise in [-1, 1]^2 (PC material_core.inc mat_peel_offset): the clear coat's orange-peel ripple
+fn peel_offset(uv: vec2f, s: f32) -> vec2f {
+  let p = uv * s; let c = floor(p); var f = fract(p); f = f * f * (vec2f(3.0) - 2.0 * f);
+  let x = i32(c.x); let y = i32(c.y);
+  let a = vec2f(hash2(x, y), hash2(x + 7919, y + 104729)); let b = vec2f(hash2(x + 1, y), hash2(x + 7920, y + 104729));
+  let c0 = vec2f(hash2(x, y + 1), hash2(x + 7919, y + 104730)); let d = vec2f(hash2(x + 1, y + 1), hash2(x + 7920, y + 104730));
+  return mix(mix(a, b, f.x), mix(c0, d, f.x), f.y) * 2.0 - vec2f(1.0);
+}
 fn tilt(T: mat3x3f, off: vec2f, s: f32) -> vec3f { return normalize(T * normalize(vec3f(off * s, 1.0))); }
 fn cotangent(N: vec3f, p1: vec3f, p2: vec3f, uv1: vec2f, uv2: vec2f) -> mat3x3f {
   let a = cross(p2, N); let b = cross(N, p1);
@@ -188,7 +198,10 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   let fade = clamp(2.0 - fw * P_FLAKE_SCALE, 0.0, 1.0);
   var Nb = N;
   if (P_FLAKE * keep * fade > 0.0) { Nb = tilt(T, flake_offset(uv, P_FLAKE_SCALE), P_FLAKE * keep * fade * 0.6); }
-  let Nc = N;
+  // the coat's ripple, faded out where its cells get smaller than two pixels (the PC has no fade: a far car shimmered)
+  let peel_fade = clamp(2.0 - fw * P_PEEL_SCALE * 4.0, 0.0, 1.0);
+  var Nc = N;
+  if (P_PEEL * peel_fade > 0.0) { Nc = tilt(T, peel_offset(uv, P_PEEL_SCALE), P_PEEL * peel_fade * 0.08); }
   let vis = sunVisibility();
   let sun = SUN_COL * P_SUN_REFL * vis;
   let env_b = envGain(envK(Nb, V, rough * MAXMIP, P_SUN_REFL * vis), u.x0.x);
@@ -246,8 +259,8 @@ export function raceMode(): [number, number] {
   const q = new URLSearchParams(location.search);
   const dpr = devicePixelRatio || 1, pw = Math.max(1, innerWidth * dpr), ph = Math.max(1, innerHeight * dpr);
   const aspect = q.get('ws') === '0' ? 4 / 3 : Math.min(32 / 9, Math.max(4 / 3, pw / ph));
-  const cap = Math.min(2160, Number(q.get('rh') ?? 2160) || 2160);
-  const h = Math.max(720, Math.min(cap, Math.round(Math.min(ph, pw / aspect)))) & ~1;
+  const cap = Math.min(gfxLines(), Number(q.get('rh') ?? 2160) || 2160);
+  const h = Math.max(Math.min(720, cap), Math.min(cap, Math.round(Math.min(ph, pw / aspect)))) & ~1;
   return [Math.round(h * aspect / 8) * 8, h];
 }
 
@@ -256,7 +269,7 @@ export function raceMode(): [number, number] {
 function fitTarget(lw: number, lh: number): [number, number] {
   const q = new URLSearchParams(location.search);
   const dpr = devicePixelRatio || 1, pw = Math.max(1, innerWidth * dpr), ph = Math.max(1, innerHeight * dpr);
-  const aspect = lw / lh, cap = Math.min(2160, Number(q.get('rh') ?? 2160) || 2160);
+  const aspect = lw / lh, cap = Math.min(gfxLines(), Number(q.get('rh') ?? 2160) || 2160);
   const h = Math.max(480, Math.min(cap, Math.round(Math.min(ph, pw / aspect)))) & ~1;
   return [Math.max(2, Math.round(h * aspect / 2) * 2), h];
 }
@@ -281,7 +294,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   // AA1 (PC dx11z [display] msaa): the scene draws into a 4x multisampled colour + depth pair, resolved into colorTex before a
   // present, a shot or a pixel read. ?msaa=1 turns it off. The PC's alpha-to-coverage ended as "discard below the game's
   // threshold, survivors opaque", which the shader's hard cutout already does, so there is no coverage from alpha here.
-  const msaaParam = Number(new URLSearchParams(location.search).get('msaa') ?? 4);
+  const msaaParam = Number(new URLSearchParams(location.search).get('msaa') ?? gfxSamples());
   const SAMPLES = msaaParam === 1 ? 1 : 4;
   const makeTargets = () => {
     const colorTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
@@ -301,7 +314,10 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   // ?paintdbg=1..6: what the paint shader sees (1 paint mask: magenta paint, green stock; 2 normal; 3 environment; 4 vertex light; 5 keep/paint/sun visibility; 6 albedo)
   const paintDbg = Number(new URLSearchParams(location.search).get('paintdbg') ?? 0);
   const PDBG = ['', 'select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 1.0), pk.r > 0.5)', 'N * 0.5 + 0.5', 'env_b', 'i.color.rgb', 'vec3f(keep, pk.r, vis)', 'albedo.rgb'][paintDbg] ?? '';
+  // ?peel=<0..2>: the orange peel's strength for a look (0 = off)
+  const peelQ = Number(new URLSearchParams(location.search).get('peel') ?? NaN);
   let code = PDBG ? SHADER.replace('return vec4f(fog(rgb, i.uvq.z), a);', `return vec4f(${PDBG}, 1.0);`) : SHADER;
+  if (peelQ >= 0 && peelQ <= 2) code = code.replace('const P_PEEL = 0.5;', `const P_PEEL = ${peelQ.toFixed(3)};`);
   const module = device.createShaderModule({ code });
   void module.getCompilationInfo().then(ci => { for (const m of ci.messages) log(`[gpu] shader ${m.type} line ${m.lineNum}: ${m.message}`); });
   const blitModule = device.createShaderModule({ code: BLIT });

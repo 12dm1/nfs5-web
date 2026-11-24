@@ -34,6 +34,8 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 | Car reflection cube (R1, `scene_probe.cpp`) | done | runtime/pu_cube.c at hook 00468AA6: the game's own view, sky, traversal and car pass into one face of a 256 px HDR cube per frame (the PC draws six every second frame), mip chain, emissive gain and sun mask as on the PC; `?env=CUBE=0` off, `?cubelog=1` face stats |
 | Car paint for every car (CP1, CAR1-2, `car_paint.cpp`, `car_shading.cpp`) | done | runtime/pu_paint.c: the page builder 00443F60 / tint blit 00444130 give a paint map per car page (R paint, G shine kept), the light layer 00446530 puts camera-space normals into the specular dword; corners the game's clipper appends past the model's vertices take the code of the model corner they copy, or of the nearest corner (r_web.c car_clip_normals); `fs_car` in `renderer.ts` is the PC `mat_shade_car` with the `[car_paint]` values of dx11z.ini (flakes, clear coat, cube reflection, sun glow); the game's own reflection pass skips painted texels. `?env=PAINT=0` off, `?paintdbg=1..6` debug views. In races and menus (not in `fe=0` direct races, which stay 640x480) |
 | Showroom cube (FE1, `scene_probe.cpp`) | done | runtime/pu_cube.c at hooks 004D2FEA, 004D3091 and override 004D15E0: one face a menu frame from the car's spot with only that frame's location models; paint in the menus too, with the light from above and `env_hdr_menu`; checked on the Quick Race screen only |
+| Light profile for phones and tablets (PERF-M1, browser only) | done | `web/src/quality.ts`: the game's own car LODs (`CARLOD=0`) and draw distance (`DRAW_X=1`), a reflection face every third frame (`CUBE_EVERY=3`), up to 720 lines, no MSAA; Coastal with 8 cars 12.5 -> 3.5 ms of game work a frame on a desktop core; localStorage `nfs5.gfx` = high / low |
+| Orange peel on the clear coat (CAR2 `mat_car_coat_normal`) | done | `renderer.ts` peel_offset, strength 0.5 (the PC's ini has 0), faded out on far cars; `?peel=` on a dev server; the look is not checked |
 | Track and road materials (MAT, `materials.cpp`) | later | material packs |
 | MSAA (AA1) | done | 4x in `web/src/gpu/renderer.ts`, resolved before a present or a pixel read, `?msaa=1` turns it off; the PC A2C ended as the hard cutout the shader already has |
 | PBR road reflections (MAT14) | later | after materials |
@@ -60,6 +62,7 @@ Status: **done** = in the build and checked by a script, **next** = the order be
 |---|---|---|
 | IP race in the runtime (WEB2n) | done (native) | browser: WebSocket relay |
 | N1 entry server, race modes, host bots, net pursuit (`net_redirect`, `race_modes`, `net_host_bots`) | later | step 4, the nfsu2-web virtual LAN (docs/PLAN.md); no net pursuit |
+| Accounts and cloud saves (browser only, CLOUD1) | done | login + password on the PLAY page, SaveData synced before the game and after every save, the newer wins with backups, login = online name; web/cloud, web/src/cloud, docs/tasks/CLOUD1-cloud-saves.md (with the security review) |
 
 ## Not needed in the browser
 

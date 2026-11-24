@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
@@ -409,6 +410,25 @@ static void qr_tick(CPU *c, uint32_t fe, uint32_t vt){
         if (getenv("NETTEST_LAPS")){
             const uint32_t l = accessor(c, "Track1.Laps", RTTI_LOCAL);
             if (l){ int r = find_row(c, l, getenv("NETTEST_LAPS"), "laps"); if (r >= 0) set_index(c, l, r); }
+        }
+        /* NETTEST_PICK="zMergedList.Car=gt2;OpponentCar.Car=similar;Track1.Track=snowy": list rows by part of their text
+         * (any case), in this order (the opponent modes depend on the player's car) */
+        if (getenv("NETTEST_PICK")){
+            char spec[256]; snprintf(spec, sizeof spec, "%s", getenv("NETTEST_PICK"));
+            for (char *it = strtok(spec, ";"); it; it = strtok(NULL, ";")){
+                char *eq = strchr(it, '='); if (!eq) continue; *eq = 0;
+                uint32_t nm = gstr(it), acc = call_guest(c, FIND_ACC, 1, &nm);
+                if (!acc){ LOG("quickrace: no %s accessor", it); continue; }
+                int n = (int)thiscall(c, acc, vfn(acc, 0x24), 0, NULL), hit = -1;
+                for (int i = 0; i < n && i < 256 && hit < 0; i++){
+                    uint32_t ia = (uint32_t)i, sp = thiscall(c, acc, vfn(acc, 0x30), 1, &ia);
+                    if (!sp) continue;
+                    char low[128]; const char *t = (const char*)g_mem + sp; int k = 0;
+                    for (; t[k] && k < 127; k++) low[k] = (char)tolower((unsigned char)t[k]); low[k] = 0;
+                    if (strstr(low, eq + 1)){ hit = i; LOG("quickrace: %s row %d/%d '%.40s'", it, i, n, t); }
+                }
+                if (hit >= 0) set_index(c, acc, hit); else LOG("quickrace: %s has no '%s' in %d rows", it, eq + 1, n);
+            }
         }
         command(c, fe, "PLAYGAME"); LOG("quickrace: PLAYGAME"); st = 4; break; }
     case 4:   /* back in the menus after the race */

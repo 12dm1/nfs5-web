@@ -77,5 +77,7 @@ CARS_MOVES(CARS_DEF)
 #define CARS_N_CARS     0x005E8B58u
 #define CARS_N_RACERS   0x005E8AE8u
 #define CARS_NUMCARS    0x00658080u
+#define CARS_NUMSMACK   0x0065807Cu     /* roadside objects (smackables) of the race, counted by 004A17F0 */
+#define CARS_OBJECTS    128u            /* cars + smackables share one object list: 004A1280 indexes it by (id & 0x7F) - numcars */
 
 #endif

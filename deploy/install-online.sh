@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Server side of the nfs5-web online deploy (docs/tasks/ON1-online.md "Deployment"). Expects in /tmp/nfs5-web-online:
-# online/*.mjs, data/nfs5.car, data/nfs5.trn, nfs5-web-online.service, nginx-lan.conf.
+# online/*.mjs, data/nfs5.car, data/nfs5.trn, nfs5-web-online.service, nginx-lan.conf, nginx_headers.py.
 # Touches only /opt/nfs5-web-online, the nfs5-web-online service and the /lan block of nfs5-reforged.conf. Re-runnable.
 set -euo pipefail
 SRC=/tmp/nfs5-web-online DIR=/opt/nfs5-web-online CONF=/etc/nginx/sites-available/nfs5-reforged.conf
 command -v node >/dev/null || { echo "node is not installed" >&2; exit 1; }
 sudo install -d -m 755 "$DIR/online" "$DIR/data/FEData/Data"
 sudo install -m 644 "$SRC"/online/*.mjs "$DIR/online/"
-sudo install -m 644 "$SRC/data/nfs5.car" "$SRC/data/nfs5.trn" "$DIR/data/FEData/Data/"
+# the game data only when the upload has it (a code-only update keeps what is there)
+if [ -f "$SRC/data/nfs5.car" ] && [ -f "$SRC/data/nfs5.trn" ]; then sudo install -m 644 "$SRC/data/nfs5.car" "$SRC/data/nfs5.trn" "$DIR/data/FEData/Data/"; fi
 sudo install -m 644 "$SRC/nfs5-web-online.service" /etc/systemd/system/nfs5-web-online.service
 sudo systemctl daemon-reload
 sudo systemctl enable nfs5-web-online >/dev/null 2>&1
@@ -22,6 +23,18 @@ if ! grep -q 'location = /lan ' "$CONF"; then
   sudo install -m 644 "$tmp" "$CONF"; rm "$tmp"
   if ! sudo nginx -t 2>/dev/null; then sudo cp "$CONF.bak-online" "$CONF"; echo "nginx -t failed, restored" >&2; exit 1; fi
   sudo systemctl reload nginx
+fi
+# CLOUD1: the proxy headers the online server's checks need (Host and X-Real-IP on /lan), added once
+if [ -f "$SRC/nginx_headers.py" ]; then
+  tmp=$(mktemp)
+  if python3 "$SRC/nginx_headers.py" "$CONF" > "$tmp"; then
+    sudo cp "$CONF" "$CONF.bak-headers"
+    sudo install -m 644 "$tmp" "$CONF"
+    if ! sudo nginx -t 2>/dev/null; then sudo cp "$CONF.bak-headers" "$CONF"; echo "nginx -t failed with the headers, restored" >&2; rm "$tmp"; exit 1; fi
+    sudo systemctl reload nginx
+    echo "nginx: proxy headers added (backup $CONF.bak-headers)"
+  fi
+  rm -f "$tmp"
 fi
 sleep 1
 echo "service: $(systemctl is-active nfs5-web-online)"

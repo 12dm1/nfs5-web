@@ -3,13 +3,15 @@
 // N1-internet-entry-server.md). Transport-free: the caller hands in datagrams and sends what comes out, so one
 // lobby serves browsers (virtual network over a WebSocket, web/online/vnet.mjs) and PC players (real UDP).
 //
-//   const ng = createNetGather({ transmit(rinfo, buf), log, carFile, carsJson, verbose })
+//   const ng = createNetGather({ transmit(rinfo, buf), log, carFile, carsJson, verbose, personaFor(key, typed) })
+//   personaFor: the name a client plays under (CLOUD1: a signed-in browser's account name; vnet.mjs decides it)
 //   ng.datagram(key, rinfo, buf)   a datagram from a client; key identifies the client's socket
 //   ng.tick()                      once a second: keepalives, resends, timeouts
 import fs from 'node:fs';
 import { loadTournaments, onlineEvents, createTournament } from './tournament.mjs';
 
-export function createNetGather({ transmit, ctlSend = () => {}, log = console.log, carFile = '', carsJson = '', trnFile = '', verbose = false } = {}) {
+export function createNetGather({ transmit, ctlSend = () => {}, log = console.log, carFile = '', carsJson = '', trnFile = '', verbose = false,
+                                  personaFor = (key, typed) => typed } = {}) {
 // ON2 career tournaments (tournament.mjs): the events that can run online
 const EVENTS = onlineEvents(loadTournaments(trnFile));
 if (EVENTS.length) log(`career tournaments: ${EVENTS.length} events for online (${trnFile})`);
@@ -893,7 +895,8 @@ function onJoin(msg, rinfo, key) {
   const login = cstr(p, 0x3c, 0x34);
   const info = cstr(p, 0x70, 0x18);
   const [account, password = ''] = login.replace(/^c/, '').split('~');
-  const [persona, clientVer, serverVer] = info.split('~');
+  const [typed, clientVer, serverVer] = info.split('~');
+  const persona = personaFor(key, typed);
   let c = clients.get(key);
   let result = 1;
   if (!c) {

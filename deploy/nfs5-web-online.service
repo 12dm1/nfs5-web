@@ -12,7 +12,9 @@ Type=simple
 DynamicUser=yes
 WorkingDirectory=/opt/nfs5-web-online
 StateDirectory=nfs5-web-online
-ExecStart=/usr/bin/node /opt/nfs5-web-online/online/standalone.mjs --port 9450 --host 127.0.0.1 --data /opt/nfs5-web-online/data --cars /opt/nfs5-reforged/netserver/cars.json --logs /var/lib/nfs5-web-online
+# --accounts (CLOUD1): the site's internal port (nfs5-web.service --internal-port): signed-in players play under their
+# login, guests cannot use one; --origin: the site whose pages may open /lan (nginx passes the Host, this is a fallback)
+ExecStart=/usr/bin/node /opt/nfs5-web-online/online/standalone.mjs --port 9450 --host 127.0.0.1 --data /opt/nfs5-web-online/data --cars /opt/nfs5-reforged/netserver/cars.json --logs /var/lib/nfs5-web-online --accounts http://127.0.0.1:9461 --origin https://nfs5-reforged.duckdns.org
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
