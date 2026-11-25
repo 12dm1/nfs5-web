@@ -6,7 +6,7 @@
 //   key?k=ArrowDown&n=1   a key press (Playwright keyboard; k=Shift+Tab works)
 //   pad?b=0&ms=150        a pad button held for ms (b: 0 A, 1 B, 9 Start, 12..15 d-pad); pad?ax=0&v=-1&ms=300 a stick axis
 //   cmd?c=QUICKRACE       click the button with this command (mouse, at its centre)
-//   click?x=320&y=240     a mouse click at 640x480 coordinates
+//   click?x=320&y=240     a mouse click at 640x480 coordinates; drag?x1=&y1=&x2=&y2=&steps=1 a drag
 //   eval?js=...           the page evaluates it, the result as JSON
 //   log?n=40&grep=re      the game's last log lines
 //   reload, quit
@@ -174,6 +174,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     async click(q) {
       const b = await page.locator('canvas').boundingBox();
       await page.mouse.click(b.x + +q.get('x') / 640 * b.width, b.y + +q.get('y') / 480 * b.height, { delay: 200 });
+      return 'ok';
+    },
+    async drag(q) {
+      const b = await page.locator('canvas').boundingBox(), at = (x, y) => [b.x + x / 640 * b.width, b.y + y / 480 * b.height];
+      await page.mouse.move(...at(+q.get('x1'), +q.get('y1'))); await page.waitForTimeout(150);
+      await page.mouse.down(); await page.waitForTimeout(150);
+      await page.mouse.move(...at(+q.get('x2'), +q.get('y2')), { steps: +(q.get('steps') ?? 1) }); await page.waitForTimeout(150);
+      await page.mouse.up();
       return 'ok';
     },
     async eval(q) { return await page.evaluate(q.get('js')); },
