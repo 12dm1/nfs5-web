@@ -1328,3 +1328,62 @@ void sub_00445b10(CPU *restrict c){
     c->eax = r;
     POP32(c->eip); c->esp += 8;
 }
+
+/* ---- PERF2: 00488B50 in C (the track traversal's segment test, ~10 % of a 4K race frame as lifted x87) ----
+ * thiscall(const float *P, const float *Q, bool keyed) ret 0Ch, this = [00628960] (0047F9A9): does the 2D segment
+ * P -> P + (Q - P) (x at +0, z at +8; the end rounded to float as the game stores it) cross one of the [this+28h] records
+ * of 28 bytes at [this+2Ch] (+4 x0, +8 z0, +0Ch dx, +10h dz) whose byte [this+30h][i] is 0?  keyed: only a record whose
+ * first byte is set counts.  al = 1 / 0.  The test is 00489CC0's (its out pointer NULL here), with the same double
+ * operations and float stores as the lifted x87 code, so the answers are the same.  SEGCHK=1 runs the lifted function as
+ * well and logs any difference (its answer is the one used then). */
+static int seg_cross(const float *A, float bx0, float bz0, float bx1, float bz1, double K0, double K1){
+    /* 00489CC0(A, B): A = (A[0], A[2]) -> (A[3], A[5]), B the same layout */
+    const double s0 = (double)bz1 - (double)bz0;
+    const float dax = (float)((double)A[3] - (double)A[0]);
+    const float daz = (float)((double)A[5] - (double)A[2]);
+    const double s1 = (double)bx1 - (double)bx0;
+    const double den = (double)dax * s0 - s1 * (double)daz;
+    if (!(den != K0) || den != den) return 0;           /* C3 set: equal or unordered */
+    const float denf = (float)den;
+    const float ex = (float)((double)A[2] - (double)bz0);
+    const float ez = (float)((double)A[0] - (double)bx0);
+    const float t = (float)(((double)ex * s1 - (double)ez * s0) / (double)denf);
+    if (!((double)t >= K0)) return 0;                    /* C0: below or unordered */
+    if ((double)t > K1) return 0;
+    const double u = ((double)ex * (double)dax - (double)ez * (double)daz) / (double)denf;
+    if (!(u >= K0)) return 0;
+    if (u > K1) return 0;
+    return 1;
+}
+void sub_00488b50(CPU *restrict c){
+    const uint32_t self = c->ecx, pp = MR32(c->esp + 4), qp = MR32(c->esp + 8);
+    const int keyed = MR8(c->esp + 12) != 0;
+    const float *P = (const float *)(g_mem + pp), *Q = (const float *)(g_mem + qp);
+    const float dx = (float)((double)Q[0] - (double)P[0]), dz = (float)((double)Q[2] - (double)P[2]);
+    const float bx1 = (float)((double)dx + (double)P[0]), bz1 = (float)((double)dz + (double)P[2]);
+    const double K0 = (double)MRF32(0x005B23F8u), K1 = (double)MRF32(0x005B24A8u);
+    const uint32_t n = MR32(self + 0x28), recs = MR32(self + 0x2C), skip = MR32(self + 0x30);
+    int hit = 0;
+    for (uint32_t i = 0; i < n; i++){
+        if (MR8(skip + i)) continue;
+        const uint32_t r = recs + i * 0x1Cu;
+        const float *R = (const float *)(g_mem + r + 4);   /* x0, z0, dx, dz */
+        float A[6];
+        A[0] = R[0]; A[2] = R[1];
+        A[3] = (float)((double)R[2] + (double)R[0]); A[5] = (float)((double)R[3] + (double)R[1]);
+        if (seg_cross(A, P[0], P[2], bx1, bz1, K0, K1) && (!keyed || MR8(r))){ hit = 1; break; }
+    }
+    static int chk = -1;
+    if (chk < 0){ const char *e = getenv("SEGCHK"); chk = e && *e == '1'; }
+    if (chk){
+        static long calls, bad, hits;
+        sub_00488b50_orig(c);
+        calls++; hits += hit;
+        if ((int)(c->eax & 0xFF) != hit && ++bad <= 20)
+            fprintf(stderr, "[segchk] MISMATCH call %ld: C %d lifted %d (n %u keyed %d)\n", calls, hit, (int)(c->eax & 0xFF), n, keyed);
+        if (calls % 200000 == 0) fprintf(stderr, "[segchk] %ld calls (%ld hits), %ld mismatches\n", calls, hits, bad);
+        return;
+    }
+    c->eax = (c->eax & 0xFFFFFF00u) | (uint32_t)hit;
+    POP32(c->eip); c->esp += 12u;
+}
