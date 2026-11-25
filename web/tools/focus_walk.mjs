@@ -22,7 +22,7 @@ const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 
 const PORT = +arg('port', 8770), DEPTH = +arg('depth', 3), MAX_PAGES = +arg('max-pages', 80), ROWS = !process.argv.includes('--no-rows');
 const OUT = path.resolve(ROOT, arg('out', 'out/focus_walk.json'));
 const SEED = arg('seed', 'player.lst,5îïðïðî.sav,îïðïðî1.hud,îïðïðî2.hud');
-const START = arg('start', '').split(',').filter(Boolean);
+const START = arg('start', '').split(/\s*>\s*/).filter(Boolean);     // as printed: 'a > b'
 // never pressed: they leave the menus, start a race, change or delete the profile, spend money
 const DENY = new RegExp(arg('deny', '^(QUIT|PLAYGAME|REMOVEPLAYER|CREATEPLAYERDONE|SETNAMETHENBACK|CREATEPLAYERENTER)$|BUY|SELL|DELETE|RESET|FORFEIT|PURCHASE|REPAIR|STARTRACE|RACENOW|ACCEPT|SAVE'));
 const BACK = new Set(['GOBACK', 'GOBACKMINUSONE', 'CANCELCREATEPLAYER', 'SETNAMETHENBACK']);
@@ -129,8 +129,10 @@ async function replay(route) {
   await boot();
   let f = await settled();
   for (const step of route) {
-    const it = findItem(f?.page, step);
-    if (!it || !await focusOn(it)) throw new Error('replay: ' + step + ' not found');
+    let it = findItem(f?.page, step);
+    // pages that build in steps (an overlay layer over a page that is still coming up)
+    for (let t = 0; t < 8 && !it; t++) { await sleep(1500); f = await settled(3000); it = findItem(f?.page, step); }
+    if (!it || !await focusOn(it)) throw new Error('replay: ' + step + ' not found in ' + (f?.page?.items ?? []).map(label).join(' '));
     await press('Enter');
     f = await skipMovie(await changed(sigOf(f.page)));
   }
@@ -185,7 +187,8 @@ async function visit(route, f, depth) {
   const items = f.page.items;
   const reach = paths(items);
   const unreachable = items.filter(it => !reach.has(it.id)).map(label);
-  const back = items.find(it => BACK.has(it.command ?? ''));
+  // a message with one button (the factory driver's welcome): Esc presses it (input.ts)
+  const back = items.find(it => BACK.has(it.command ?? '')) ?? (items.length === 1 && items[0].kind === 'button' ? items[0] : undefined);
   const rec = { route, where, depth, window: f.page.window, items: items.map(it => ({ label: label(it), kind: it.kind })),
     unreachable, back: back ? label(back) : null, census: await census(new Set(items.map(it => it.id))), rows: [], children: [] };
   report.pages.push(rec);
@@ -215,8 +218,12 @@ async function visit(route, f, depth) {
     // back: Esc (the focus layer clicks the page's back item), else the path again
     await press('Escape');
     let home = await changed(nsig);
-    if (sigOf(home?.page) !== sig) home = await changed(sigOf(home?.page), 4000);
-    if (sigOf(home?.page) !== sig) { rec.children[rec.children.length - 1].back = 'Esc did not lead back'; await replay(route); }
+    if (sigOf(home?.page) !== sig) home = await changed(sigOf(home?.page), 9000);
+    if (sigOf(home?.page) !== sig) {
+      // what Esc led to (a slow 3D page, a page whose items changed after the visit below, a dialog)
+      rec.children[rec.children.length - 1].back = 'Esc did not lead back: ' + (home?.mode !== 0 ? 'mode ' + home?.mode : (home?.page?.items ?? []).map(label).join(' '));
+      await replay(route);
+    }
   }
 }
 

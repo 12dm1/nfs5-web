@@ -424,9 +424,12 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     }
     if (e.code === 'Escape') {
       if (!down && consumedEscape) { consumedEscape = false; return true; }
-      // the profile page has no Back: its "choose" (SETNAMETHENBACK) returns with the highlighted profile, the one in use
+      // the profile page has no Back: its "choose" (SETNAMETHENBACK) returns with the highlighted profile, the one in use;
+      // a message with a single button and nothing else (the factory driver's welcome, a modal layer over a hidden bottom bar):
+      // its button is the way on
       const back = page.items.find(x => x.command === 'GOBACK' || x.command === 'GOBACKMINUSONE' || x.command === 'CANCELCREATEPLAYER')
-        ?? page.items.find(x => x.command === 'SETNAMETHENBACK');
+        ?? page.items.find(x => x.command === 'SETNAMETHENBACK')
+        ?? (page.items.length === 1 && page.items[0].kind === 'button' && Atomics.load(i32, 7728 >> 2) === 0 ? page.items[0] : undefined);
       if (down && back) {
         consumedEscape = true;
         if (!e.repeat) { editing = false; clickFocus(back, page.window); }

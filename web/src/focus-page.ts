@@ -32,6 +32,8 @@ const kinds = new Map<number, FocusItem['kind']>([
   [0x005b6278, 'button'],       // FEMovieControlButton (its click: 004CE760)
   [0x005b7e0c, 'control'],      // FEKnockoutTrackListControl (its click: 004FA470)
 ]);
+/** controls of their own class that are clicked like buttons but have no goto command attribute at +0x148 */
+const OWN_CLICK = new Set([0x005b8ce4, 0x005b6278, 0x005b7e0c]);
 
 /** The rows of an open combo (FEComboBox) or of a list box (FEListBox derives from it, same fields), as the game's own hover
  * test (004C6F60) sees them: rows from the first visible one down, each as high as the accessor's row height (+0x68 of the
@@ -182,7 +184,7 @@ export function readFocusPage(buffer: ArrayBufferLike): FocusPage | null {
     const width = i(obj + 0x100) - i(obj + 0xf8), height = i(obj + 0x104) - i(obj + 0xfc);
     if (width <= 0 || height <= 0 || x < 0 || y < 0 || x + width > 640 || y + height > 480) continue;
     let command: string | undefined;
-    if (kind === 'button' && inRange(obj, 0x14c)) {
+    if (kind === 'button' && !OWN_CLICK.has(vt) && inRange(obj, 0x14c)) {
       const attribute = u(obj + 0x148), start = u(attribute + 0x3c), stop = u(attribute + 0x40);
       if (inRange(attribute, 0x44) && stop >= start && stop - start <= 64 && (stop === start || inRange(start, stop - start))) {
         command = Array.from({ length: stop - start }, (_, n) => String.fromCharCode(m.getUint8(start + n))).join('');
