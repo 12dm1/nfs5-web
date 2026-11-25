@@ -97,9 +97,24 @@ button without a command.
 | Replay bar (HReplay) | fixed | bug 4 |
 | In-race Options (`[0x00606AA4]`) | n/a | no race page returns code 1 in this build (HPause returns 2 / 3 / 0x1A only), so the frontend options never open inside a race |
 
-## Re-checks 2026-11-25
+## Re-checks 2026-11-25 (current build)
 
-(filled in below as they run)
+- Bug 2: Quick Race opponents combo (428,95, 8 rows): Enter opened it (`expanded true`), Enter closed it, Esc closed it
+  with the value unchanged. The first Down only puts the highlight on the current row (by design: the cursor lands on the
+  selected row), the second moves it; a pick test therefore needs two Downs to change the value. The singleplayer
+  difficulty combo (243,206) reached its last row (3 of 3) and closed in the walk.
+- Bug 3: knockout car compare 86 of 87, quick race / knockout track and car combos last row reached in the walks.
+- Bugs 1 and 4: verified live before the 2026-11-25 changes; the later commits touched only frontend code (combo click
+  point, one-button message pages, camera pictures, dialogs), not the race pages. Not re-run after that.
+
+## Next steps (not done, stopped on request to save tokens)
+
+1. Re-run bug 1 (`focus_drive --players 2`, pad Start / B / leave) and bug 4 (NETTEST quickrace, replay bar slots) on
+   the final build, and the pick test with two Downs on the Quick Race difficulty / opponents combo.
+2. Walk the owned-car career garage (repair, advancedrepair, parts, partsdesc, carsetupdesc): needs a profile with a
+   career car (seed a save with money or a car).
+3. Walk joingame / settingsMP with two players in the lobby.
+4. Real gamepad check in the browser (checklist in the final report).
 
 ## Risks and limits
 
