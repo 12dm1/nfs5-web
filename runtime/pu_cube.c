@@ -1,5 +1,5 @@
 /* The race's reflection cube (PC wrapper scene_probe.cpp RunCubemap, R1). After the rear mirror the scene is drawn once more from the main
- * camera's spot into one face of a cube, with the game's own view, traversal and flush; the player's car is left out. One face per frame:
+ * camera's spot into one face of a cube, with the game's own view, traversal and flush; the player's car is left out. One face per frame
  * the PC draws all six every second frame, which a browser's frame budget does not hold. ?env=CUBE=0 turns it off; CUBE_EVERY=<n>
  * draws a face every n-th frame (web/src/quality.ts, phones). */
 #ifdef __wasm__
@@ -31,8 +31,14 @@ static const float k_rot[6][9] = {
     {-1, 0, 0,   0, 1, 0,   0, 0,-1},   /* -Z */
 };
 
-/* at 00468AA6, after the mirror pass: edi = the race renderer */
+int r_cube_faces_per_frame(void);
+static void cube_face(CPU *c);
+/* at 00468AA6, after the mirror pass: edi = the race renderer; r_web.c picks how many faces (1..6) by the frame rate */
 void pu_cube_capture(CPU *c){
+    const int n = r_cube_faces_per_frame();
+    for (int i = 0; i < n; i++) cube_face(c);
+}
+static void cube_face(CPU *c){
     static int on = -1, face, every = 1, skip;
     static uint32_t buf;
     if (on < 0){

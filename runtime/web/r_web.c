@@ -1346,6 +1346,42 @@ void r_reshape(int nw){
     thrash_screen_width(nw);
     g_lw = nw; g_s_video = 0; g_clipvalid = 0;
 }
+/* The race's reflection cube: faces drawn a frame (runtime/pu_cube.c), by the frame rate. One face a frame refreshes the cube
+ * 10 times a second at 60 fps; a fast PC has room for more. Every second the mean frame interval is measured; one more face
+ * stays while the rate keeps within 8 % of the best of late, else it goes and no more is tried for 20 s; a heavier scene
+ * (15 % under the best, or under 50 fps) drops one. ?env=CUBE_FACES=<1..6> fixes the count, CUBELOG=1 logs the changes. */
+static int g_cube_n = 1, g_cube_fixed = -1, g_cube_seen;
+int r_cube_faces_per_frame(void){ g_cube_seen = 1; return g_cube_n; }   /* the race only: pu_cube.c */
+static void cube_adapt(void){
+    if (g_cube_fixed < 0){
+        const char *e = getenv("CUBE_FACES"); g_cube_fixed = e && *e ? atoi(e) : 0;
+        if (g_cube_fixed < 0 || g_cube_fixed > 6) g_cube_fixed = 0;
+        e = getenv("CUBE_EVERY"); if (e && atoi(e) > 1) g_cube_fixed = 1;      /* the phones' light profile */
+        if (g_cube_fixed) g_cube_n = g_cube_fixed;
+    }
+    if (g_cube_fixed) return;
+    static double last, win0, sum, best, block;
+    static int cnt, raised, lg = -1;
+    if (lg < 0){ const char *e = getenv("CUBELOG"); lg = e && *e && *e != '0'; }
+    const double t = pf_now(), dt = t - last;
+    last = t;
+    const int seen = g_cube_seen; g_cube_seen = 0;
+    if (!seen || dt <= 0.0 || dt > 250.0){ win0 = t; sum = 0; cnt = 0; raised = 0; return; }   /* no race view, a load or a pause */
+    sum += dt; cnt++;
+    if (t - win0 < 1000.0 || cnt < 20) return;
+    const double a = sum / cnt;
+    win0 = t; sum = 0; cnt = 0;
+    best = best > 0.0 ? best * 1.003 : a;          /* the best of late, let go slowly: the scene changes */
+    const int was = g_cube_n;
+    if (raised){
+        raised = 0;
+        if (a > best * 1.08){ g_cube_n--; block = t + 20000.0; }
+    }
+    else if (g_cube_n > 1 && (a > best * 1.15 || a > 20.0)){ g_cube_n--; block = t + 10000.0; }
+    else if (g_cube_n < 6 && t >= block && a < 20.0){ g_cube_n++; raised = 1; }
+    if (a < best) best = a;
+    if (lg && g_cube_n != was) fprintf(stderr, "[cube] %d faces a frame (%.1f fps, best %.1f)\n", g_cube_n, 1000.0 / a, 1000.0 / best);
+}
 void r_pageflip(void){
     glass_flush();
     g_frames++;
@@ -1365,6 +1401,7 @@ void r_pageflip(void){
             __builtin_wasm_memory_atomic_wait32((int32_t *)&g_ring.presents_done, done, 100000000LL);
         guest_wait_end();
     }
+    cube_adapt();
     if (g_pf_on > 0){
         const double t = pf_now(), wp = t - w0;
         g_pf_wait_present += wp;
