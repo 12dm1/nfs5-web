@@ -117,11 +117,171 @@ static void record(CPU *c, uint32_t page, uint32_t image, uint32_t tint, uint32_
         }
     }
 }
+/* ---- GLASS1: the glass pages' map (the builder's files 3 and 4: tpage5 "glass", window=1, and tpage6 "intglass", global) ----
+ * The builder blits the window image onto the glass page; its see-through texels (alpha between the clear cut-outs and the
+ * opaque seals and frames: 128 in a 32-bit source, 68 on the 4444 showroom pages; on the intglass page any but the frame) are
+ * intact glass. Each blit's texels are
+ * kept as the blit left them (the page may be uploaded inside the build); at the upload a texel still the same and
+ * see-through gets G = 255 in the page's map (R = 0: no paint). A texel drawn over later (the broken-glass image a damaged
+ * window gets) differs and keeps the game's look, as does a texel a later blit of the build covers. r_web.c draws the page
+ * as the game does, then the glass shader's reflection pass over it, and masks the game's sphere-map pass off the intact glass.
+ * GLASS=0 turns it off. */
+#define GLASS_PAGES 24
+typedef struct {
+    uint32_t bits, serial;
+    int stride, rows, fmt, blits, consumed;
+    uint8_t *mask;                  /* 1: see-through glass of the build's first blit */
+    uint32_t *snap;                 /* the texel as the build left it */
+} GlassPage;
+static GlassPage g_glass[GLASS_PAGES];
+static int g_glass_next;
+static int glass_log_on(void){ static int on = -1; if (on < 0){ const char *e = getenv("GLASSLOG"); on = e && *e && *e != '0'; } return on; }
+static int glass_on(void){ static int on = -1; if (on < 0){ const char *e = getenv("GLASS"); on = !(e && *e == '0'); } return on; }
+static int texel_alpha(int fmt, uint32_t v){
+    if (fmt == 0x115C) return (int)((v >> 12) & 0xF) * 17;
+    if (fmt == 0x613) return (v & 0x8000u) ? 255 : 0;
+    return (int)(v >> 24);
+}
+static GlassPage *glass_for(uint32_t bits, int stride, int fmt){
+    for (int i = 0; i < GLASS_PAGES; i++){
+        GlassPage *g = &g_glass[i];
+        if (g->bits == bits && g->serial == g_serial && g->stride == stride && g->fmt == fmt) return g;
+    }
+    GlassPage *g = &g_glass[g_glass_next];
+    g_glass_next = (g_glass_next + 1) % GLASS_PAGES;
+    free(g->mask); free(g->snap);
+    memset(g, 0, sizeof *g);
+    g->bits = bits; g->stride = stride; g->fmt = fmt; g->serial = g_serial;
+    return g;
+}
+/* after the blit: its texels as it left them */
+static void glass_blit(CPU *c, uint32_t page, uint32_t image, uint32_t tint, uint32_t fmt, int x, int y){
+    const int stride = (int)MR32(page + 4);
+    uint32_t bits = MR32(page + 0x28);
+    if (!bits || stride <= 0 || stride > 1024) return;
+    bits += 0x10;
+    int16_t w16, h16; memcpy(&w16, g_mem + image + 4, 2); memcpy(&h16, g_mem + image + 6, 2);
+    const int w = w16, h = h16;
+    if (w <= 0 || h <= 0 || w > 1024 || h > 1024) return;
+    const int32_t pos = (int32_t)MR32(image + 0xC);
+    const int x0 = ((pos << 20) >> 20) + x, y0 = ((pos << 4) >> 20) + y;
+    if (y0 < 0 || y0 + h > 1024) return;
+    GlassPage *g = glass_for(bits, stride, (int)fmt);
+    if (y0 + h > g->rows){
+        const size_t n = (size_t)stride * (size_t)(y0 + h), o = (size_t)stride * (size_t)g->rows;
+        uint8_t *m = realloc(g->mask, n); uint32_t *sn = realloc(g->snap, n * 4);
+        if (m) g->mask = m;
+        if (sn) g->snap = sn;
+        if (!m || !sn) return;
+        memset(g->mask + o, 0, n - o); memset(g->snap + o, 0, (n - o) * 4);
+        g->rows = y0 + h;
+    }
+    if (g->blits < 255) g->blits++;
+    const int f16 = fmt16(g->fmt);
+    uint32_t glass = 0, hist[16] = {0};
+    /* the glass page's window alpha (the most common one between the cut-outs and the seals: 128 in a 32-bit source, 68 on
+     * the 4444 showroom pages); the fainter texels round it are the edges by the seals, and with the reflection at full
+     * strength they lit the seals' outline */
+    int amin = 0x10;
+    if (g_file == 3){
+        uint32_t ah[256] = {0};
+        for (int j = 0; j < h; j++) for (int i = 0; i < w; i++){
+            const int tx = x0 + i;
+            if (tx >= 0 && tx < stride) ah[texel_alpha(g->fmt, raw_at(g_mem + bits, f16, (size_t)(y0 + j) * (size_t)stride + (size_t)tx))]++;
+        }
+        int mode = -1;
+        for (int a = 0x10; a <= 0xB0; a++) if (ah[a] && (mode < 0 || ah[a] > ah[mode])) mode = a;
+        if (mode > 0) amin = mode * 3 / 4 > 0x10 ? mode * 3 / 4 : 0x10;
+    }
+    for (int j = 0; j < h; j++) for (int i = 0; i < w; i++){
+        const int tx = x0 + i;
+        if (tx < 0 || tx >= stride) continue;
+        const size_t t = (size_t)(y0 + j) * (size_t)stride + (size_t)tx;
+        const uint32_t v = raw_at(g_mem + bits, f16, t);
+        const int a = texel_alpha(g->fmt, v);
+        g->snap[t] = v;
+        /* not the opaque seals and frames; on the glass page not its clear cut-outs either. The intglass page is window but for
+         * its frame: the race's image (INTGLASS.FSH "glat") is clear, alpha 0, the menus' ("glai") a light tint */
+        g->mask[t] = g->blits == 1 && a <= 0xB0 && (a >= amin || g_file == 4);
+        glass += g->mask[t]; hist[a >> 4]++;
+    }
+    if (glass_log_on()){
+        const uint32_t bpp = pu_guest_call(c, 0x00537F90u, 0, &image, 1);
+        fprintf(stderr, "[glass] build page %08x stride %d fmt %x: blit %d image %08x %dx%d at %d,%d bpp %u tint %x: %u see-through texels; alpha by 16:",
+                bits, stride, fmt, g->blits, image, w, h, x0, y0, bpp, tint, glass);
+        for (int k = 0; k < 16; k++) fprintf(stderr, " %u", hist[k]);
+        fprintf(stderr, "\n");
+    }
+}
+/* r_web.c r_tupdate (through paint_map): the glass map of an upload, the number of intact glass texels */
+/* a page's texel (builder formats 0x613 1555, 0x115C 4444, 0x20 8888) or an upload's (slot formats 3, 7, 6) as A8R8G8B8 */
+static uint32_t texel_argb(int fmt, uint32_t v){
+    if (fmt == 0x613 || fmt == 3){
+        const uint32_t r = (v >> 10) & 31, g = (v >> 5) & 31, b = v & 31;
+        return ((v & 0x8000u) ? 0xFF000000u : 0u) | (r << 3 | r >> 2) << 16 | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2);
+    }
+    if (fmt == 0x115C || fmt == 7) return ((v >> 12) & 15) * 17u << 24 | ((v >> 8) & 15) * 17u << 16 | ((v >> 4) & 15) * 17u << 8 | (v & 15) * 17u;
+    return v;
+}
+static int coarse(int fmt){ return fmt == 0x115C || fmt == 7 ? 17 : fmt == 0x613 || fmt == 3 ? 8 : 0; }
+/* the build's texel and the upload's are the same within the coarser format's step: the race's glass page is built in 32
+ * bits and uploaded as a 4444 copy */
+static int texel_same(uint32_t a, uint32_t b, int tol){
+    if (!tol) return a == b;
+    for (int k = 0; k < 32; k += 8){ const int d = (int)((a >> k) & 255) - (int)((b >> k) & 255); if (d > tol || d < -tol) return 0; }
+    return 1;
+}
+static int glass_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
+    if (fmt != 3 && fmt != 6 && fmt != 7) return 0;
+    const int up16 = fmt != 6;
+    GlassPage *page = NULL;
+    float best = 0.0f;
+    for (int i = 0; i < GLASS_PAGES; i++){        /* by content, as the paint: the build the upload matches best */
+        GlassPage *g = &g_glass[i];
+        if (!g->mask || g->stride != w || g->rows > h) continue;
+        const int tol = coarse(g->fmt) > coarse(fmt) ? coarse(g->fmt) : coarse(fmt);
+        const size_t n = (size_t)g->stride * (size_t)g->rows, step = n / 2048 + 1;
+        uint32_t seen = 0, same = 0, seen_f = 0, same_f = 0;
+        for (size_t t = 0; t < n; t += step){
+            const int eq = texel_same(texel_argb(fmt, raw_at(g_mem + data, up16, t)), texel_argb(g->fmt, g->snap[t]), tol);
+            if (g->mask[t]){ seen++; same += eq; } else { seen_f++; same_f += eq; }
+        }
+        float r = seen ? (float)same / (float)seen : 0.0f;
+        /* the frame too: the clear intglass page is all transparent black but for its frame, as are other, empty pages */
+        /* a real copy matches all but the format's rounding (1.00 in the logs); half matches were room textures with soft
+         * alpha (the showroom's spotlight cones) taken for the gradient intglass page */
+        if (seen < 64 || seen_f < 16 || same_f * 10 < seen_f * 9) r = 0.0f;
+        if (g->consumed) r -= 0.001f;
+        if (g->bits == data) r += 0.0005f;
+        if (r > best){ best = r; page = g; }
+    }
+    if (!page || best < 0.9f) return 0;
+    const int tol = coarse(page->fmt) > coarse(fmt) ? coarse(page->fmt) : coarse(fmt);
+    const size_t n = (size_t)page->stride * (size_t)page->rows;
+    memset(rg, 0, (size_t)w * h * 2);
+    uint32_t kept = 0, broken = 0;
+    for (size_t t = 0; t < n; t++){
+        if (!page->mask[t]) continue;
+        if (!texel_same(texel_argb(fmt, raw_at(g_mem + data, up16, t)), texel_argb(page->fmt, page->snap[t]), tol)){ broken++; continue; }
+        rg[t * 2 + 1] = 255; kept++;
+    }
+    /* the page's opaque seals and frame: G = 100, under the glass pass's 0.5 (no reflection) but enough to keep the game's
+     * sphere-map pass off them (it lit the rubber grey, like a specular) */
+    uint32_t seals = 0;
+    for (size_t t = 0; t < n; t++)
+        if (!page->mask[t] && texel_alpha(page->fmt, page->snap[t]) >= 0xC0 &&
+            texel_same(texel_argb(fmt, raw_at(g_mem + data, up16, t)), texel_argb(page->fmt, page->snap[t]), tol)){ rg[t * 2 + 1] = 100; seals++; }
+    if (glass_log_on()) fprintf(stderr, "[glass] %u seal and frame texels off the stock reflection\n", seals);
+    page->consumed = 1;
+    if (glass_log_on()) fprintf(stderr, "[glass] upload %08x %dx%d fmt %d (built as %x): %u intact glass texels, %u drawn over (build match %.2f)\n", data, w, h, fmt, page->fmt, kept, broken, best);
+    return (int)kept;
+}
 /* 00443F60, the page builder: thiscall(file, page, fmt) ret 0C */
 void sub_00443f60(CPU *restrict c){
     const int outer = g_file;
     g_serial++;
     g_file = (int)MR32(c->esp + 4);
+    if (glass_log_on()) fprintf(stderr, "[glass] builder: file %d page %08x fmt %x" "\n", g_file, MR32(c->esp + 8), MR32(c->esp + 12));
     sub_00443f60_orig(c);
     g_file = outer;
     g_serial++;
@@ -131,13 +291,29 @@ void sub_00444130(CPU *restrict c){
     uint32_t a[7];
     for (int i = 0; i < 7; i++) a[i] = MR32(c->esp + 4 + 4u * (uint32_t)i);
     sub_00444130_orig(c);
+    /* the glass pages: tpage5 "glass", tpage6 "intglass" (global, the tinted side windows). In the menus (4444 pages, 115C) file 3
+     * is no window: it is the showroom floor's spotlight decal (alpha 68 with clear cut-outs, drawn from the platform to the
+     * screen's bottom), and the glass pass made it shine like a mirror. File 4 there (the menus' intglass "glai") is the texture of
+     * the garage's wall panes too (the same upload): the pass darkened them as the camera turned. The car shown in the menus has
+     * its own 32-bit pages (fmt 20), which stay glass. */
+    if ((g_file == 3 || g_file == 4) && a[3] != 0x115Cu && glass_on()){
+        const uint32_t eax = c->eax, ecx = c->ecx, edx = c->edx;
+        glass_blit(c, a[0], a[1], a[2], a[3], (int)a[5], (int)a[6]);
+        c->eax = eax; c->ecx = ecx; c->edx = edx;
+        return;
+    }
     if (g_file != 0) return;            /* the exterior page only ([car_paint] files=1) */
     const uint32_t eax = c->eax, ecx = c->ecx, edx = c->edx;
     record(c, a[0], a[1], a[2], a[3], a[4], (int)a[5], (int)a[6]);
     c->eax = eax; c->ecx = ecx; c->edx = edx;
 }
-/* r_web.c r_tupdate: the paint map of an upload (w x h, two bytes a texel) or 0 */
+static int paint_map_page(uint32_t data, int w, int h, int fmt, uint8_t *rg);
+/* r_web.c r_tupdate: the map of an upload (w x h, two bytes a texel): 1 a paint page, 2 a glass page, 0 none */
 int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
+    if (paint_map_page(data, w, h, fmt, rg)) return 1;
+    return glass_on() && glass_map(data, w, h, fmt, rg) ? 2 : 0;
+}
+static int paint_map_page(uint32_t data, int w, int h, int fmt, uint8_t *rg){
     if (fmt != 3 && fmt != 6 && fmt != 7) return 0;
     Page *page = NULL;
     for (int i = 0; i < PAGES && !page; i++){
@@ -175,16 +351,27 @@ int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
         peak[b] = 255; uint32_t most = 0;
         for (int v = 24; v < 256; v++) if (hist[b][v] > most){ most = hist[b][v]; peak[b] = v; }
     }
-    memset(rg, 0, (size_t)w * h * 2);
+    /* G: 128 neutral (full gloss, no damage; also off the paint, so a filtered edge reads nothing); 128..255 paint darker than
+     * its band's peak (the seams: matte by the shader's dark power); 128..0 damage strength (darker and duller) */
+    for (size_t t = 0; t < (size_t)w * h; t++){ rg[t * 2] = 0; rg[t * 2 + 1] = 128; }
     for (size_t t = 0; t < n; t++){
         if (!live[t]) continue;
         const int pk = peak[page->band[t]];
-        rg[t * 2] = 255; rg[t * 2 + 1] = (uint8_t)(page->red[t] >= pk ? 255 : page->red[t] * 255 / pk);
+        const int keep = page->red[t] >= pk ? 255 : page->red[t] * 255 / pk;
+        rg[t * 2] = 255; rg[t * 2 + 1] = (uint8_t)(128 + (255 - keep) / 2);
     }
     /* paint texels drawn over after the tint (the scrapes a damaged car's page is built with, numbers, plates) stay paint, matte
      * with their own colour: off the paint they took the game's sphere-map reflection pass (glinting like the glass) */
     uint32_t over = 0;
-    for (size_t t = 0; t < n; t++) if (page->band[t] && !live[t]){ rg[t * 2] = 255; rg[t * 2 + 1] = 0; over++; }
+    /* the damage: its strength from how far the texel strays from the paint it covers (at least a little); the shader darkens
+     * it by that and takes the gloss off as much (the stock look: scrapes darker and dull) */
+    for (size_t t = 0; t < n; t++) if (page->band[t] && !live[t]){
+        const uint32_t a = texel_argb(fmt, raw_at(g_mem + data, f16, t)), b = texel_argb(page->fmt, page->expect[t]);
+        int dmax = 0;
+        for (int k = 0; k < 24; k += 8){ const int dd = (int)((a >> k) & 255) - (int)((b >> k) & 255); if (dd > dmax) dmax = dd; if (-dd > dmax) dmax = -dd; }
+        int s = 20 + dmax * 108 / 160; if (s > 128) s = 128;      /* 0..128: 0.15 .. 1 */
+        rg[t * 2] = 255; rg[t * 2 + 1] = (uint8_t)(128 - s); over++;
+    }
     /* untinted texels with paint all round (a 5 x 5 window at least 70 % live paint): the damage scrapes are drawn untinted, and
      * off the paint they took the game's sphere-map reflection pass (the sun's glint, as on the glass); glass, lamps and plates are
      * larger than that. They shade as matte paint with their own colour. */
@@ -199,11 +386,11 @@ int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
             }
             for (int y = 0; y < H; y++) for (int x = 0; x < W; x++){
                 const size_t t = (size_t)y * W + x;
-                if (live[t]) continue;
+                if (live[t] || page->band[t]) continue;     /* the paint, and the damage marked above */
                 const int x0 = x - 2 < 0 ? 0 : x - 2, y0 = y - 2 < 0 ? 0 : y - 2, x1 = x + 3 > W ? W : x + 3, y1 = y + 3 > H ? H : y + 3;
                 const uint32_t cnt = sum[(size_t)y1 * (W + 1) + x1] - sum[(size_t)y0 * (W + 1) + x1] - sum[(size_t)y1 * (W + 1) + x0] + sum[(size_t)y0 * (W + 1) + x0];
                 const uint32_t area = (uint32_t)((x1 - x0) * (y1 - y0));
-                if (cnt * 10 >= area * 7){ rg[t * 2] = 255; rg[t * 2 + 1] = 0; absorbed++; }
+                if (cnt * 10 >= area * 7){ rg[t * 2] = 255; rg[t * 2 + 1] = 128 - 77; absorbed++; }   /* damage 0.6 */
             }
             free(sum);
         }

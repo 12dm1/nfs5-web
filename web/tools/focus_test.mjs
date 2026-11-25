@@ -33,10 +33,16 @@ page=readFocusPage(memory);
 assert.equal(page.items.at(-1).command,'GOBACK','enabled bottom bar button exposes its callback');
 put(back+0x10c,0x10); assert.equal(readFocusPage(memory).items.length,2,'disabled bottom bar button is excluded');
 const combo=0x21000, slider=0x50000;
-put(combo,0x5b5c24); put(combo+0x10c,0x40); put(combo+0x1b8,slider); put(combo+0x1c4,160); put(slider,0x5b6a64);
+put(combo,0x5b5c24); put(combo+0x10c,0x40); put(combo+0x1b8,slider); put(combo+0x1c4,160); put(slider,0x5b6a64); view.setUint8(combo+0x1dc,1);
 for (const [offset,value] of [[0x11c,472],[0x120,212],[0x124,16],[0x128,13],[0x12c,472],[0x130,65],[0x134,16],[0x138,13]]) put(slider+offset,value);
 page=readFocusPage(memory);
 assert.deepEqual(page.items[1].scrollDown,{x:472,y:212,width:16,height:13},'expanded combo exposes its scrollbar arrow');
+{ const c=page.items[1], w=c.width;
+  assert.equal(c.valueX,undefined,'a combo without a label width has no value area');
+  put(combo+0x1f0,Math.round(w*0.6)); const v=readFocusPage(memory).items[1];
+  assert.equal(v.valueX,v.x+Math.round(w*0.6),'a combo caption wider than half the box moves the value area');
+  assert.equal(focusActivationPoint(readFocusPage(memory),v).x,(v.valueX+v.x+w)/2,'a combo is clicked in its value area, right of the caption');
+  put(combo+0x1f0,w+10); assert.equal(readFocusPage(memory).items[1].valueX,undefined,'a label wider than the box is ignored'); put(combo+0x1f0,0); }
 put(slider,0); assert.equal(readFocusPage(memory).items[1].scrollDown,undefined,'unknown slider class is rejected');
 put(slider,0x5b6a64); put(combo,0x5b5ba8); view.setUint8(0x65b710,1);
 for (const [base,rect] of [[0x224,[107,110,257,205]],[0x234,[107,95,222,103]],[0x274,[106,211,258,221]],[0x254,[106,226,179,244]],[0x264,[185,226,258,244]]]) rect.forEach((v,n)=>put(combo+base+n*4,v));
@@ -73,7 +79,41 @@ assert.equal(race.items[0].command,'GOBACK');
 put(racePage,0x5b2b0c); put(racePage+0x120,0); put(racePage+0x128,raceButton);
 assert.equal(readRaceFocusPage(memory).items[0].command,'GOBACK','race exit dialog maps its cancel button');
 put(racePage,0x5b2d54); put(racePage+0x120,raceButton); put(racePage+0x128,0);
-put(raceVector+4,raceEntry+16); assert.equal(readRaceFocusPage(memory),null,'unknown race page stacks are rejected'); put(raceVector+4,raceEntry+8);
+// KB2: the controller (00425EF0) asks the first page of the stack; a second one (the pause's yes/no) does not hide it
+put(raceVector+4,raceEntry+16); assert.equal(readRaceFocusPage(memory).items[0].id,raceButton,'the first page of a stack is read'); put(raceVector+4,raceEntry+8);
+// result pages (HRaceSummary) have no buttons: Space closes them; under them and after them the replay bar's 7 slots
+const replay=0x5c000;
+put(racePage,0x5b2e60); put(racePage+0x120,0);
+let results=readRaceFocusPage(memory); assert.equal(results.spaceCloses,true,'result pages close on Space'); assert.equal(results.items.length,0);
+put(0x60ca58,replay); put(0x657424,2); put(0x5b2ef0,21); put(0x5b2ef4,18);
+for(let k=0;k<7;k++){put(replay+0x12c+8*k,314+51*k); put(replay+0x130+8*k,686);}
+results=readRaceFocusPage(memory); assert.equal(results.items.length,7,'the replay bar is reachable under the results');
+assert.deepEqual([results.items[0].x,results.items[0].y,results.items[0].width,results.items[0].height],[157,343,10.5,9]);
+put(raceVector+4,raceEntry); results=readRaceFocusPage(memory);
+assert.equal(results.window,replay,'the replay bar alone after the results'); assert.equal(results.items.length,7);
+put(0x657424,0); assert.equal(readRaceFocusPage(memory),null,'no page and no race end: nothing'); put(raceVector+4,raceEntry+8);
+// the network race's leave notice (HInfo, game type 3): two buttons of the focus layer's own, Space back, Esc out
+put(racePage,0x5b2bfc); put(0x6573e8,3);
+const notice=readRaceFocusPage(memory);
+assert.deepEqual(notice.items.map(x=>x.key),['Space','Escape'],'the leave notice gets back and leave buttons');
+assert.equal(notice.padBack,'Space','the pad B goes back to the race there');
+assert.ok(notice.items.every(x=>x.label&&x.x>=0&&x.x+x.width<=640&&x.y>=0&&x.y+x.height<=480));
+put(0x6573e8,0); assert.equal(readRaceFocusPage(memory).items.length,0,'single-player info pages keep the game keys');
+put(racePage,0x5b2d54); put(racePage+0x120,raceButton); put(0x60ca58,0);
+// the frontend's message box (FEDialog list [0069A05C]) wins over the layer under it; its second button goes back
+put(vector+4,children+12);
+const dialogs=0x5d000, dialog=0x5d100, dlgChildren=0x5d400, yes=0x5d500, no=0x5d600;
+put(0x69a05c,dialogs); put(dialogs,dialogs+0x10); put(dialogs+4,dialogs+0x14); put(dialogs+0x10,dialog);
+put(dialog+0xd4,dlgChildren); put(dlgChildren,dlgChildren+0x10); put(dlgChildren+4,dlgChildren+0x18); put(dlgChildren+0x10,yes); put(dlgChildren+0x14,no);
+for(const [b,dy] of [[yes,34],[no,55]]){put(b,0x5ba108); put(b+0xd4,120); put(b+0xd8,dy); put(b+0xdc,160); put(b+0xe0,202); view.setFloat32(b+0xe4,80,true); view.setFloat32(b+0xe8,18,true);}
+assert.equal(readFocusPage(memory).window,win,'a hidden dialog leaves the page alone');
+view.setUint8(dialog+0xd8,1); put(dialog+0xdc,0xff);
+const box=readFocusPage(memory);
+assert.equal(box.window,dialog,'an open dialog takes the focus'); assert.deepEqual(box.items.map(x=>[x.x,x.y,x.width,x.height,x.command]),[[280,236,80,18,undefined],[280,257,80,18,'GOBACK']]);
+put(yes+0xf0,0x2bf); put(no+0xf0,0x2be);
+assert.deepEqual(readFocusPage(memory).items.map(x=>x.command),['GOBACK',undefined],'the button captioned "no" (0x2BF) is the way out, wherever it is');
+put(yes+0xf0,0); put(no+0xf0,0);
+put(dialog+0xdc,0x80); assert.equal(readFocusPage(memory).window,win,'a dialog fading in is not up yet'); put(dialog+0xdc,0); view.setUint8(dialog+0xd8,0);
 console.log('focus snapshot and navigation checks passed');
 
 // Exercise actual input routing against a shared guest-memory fixture.
@@ -86,7 +126,10 @@ globalThis.window = globalThis;
 globalThis.addEventListener = (name, fn) => handlers.set(name, fn);
 globalThis.requestAnimationFrame = () => 1;
 globalThis.location = { search: '?focus=1' };
-globalThis.document = { createElement: () => overlay, body: { appendChild() {} }, hasFocus: () => true };
+// the first element is the focus outline; the rest (own buttons, the pad keyboard) are inert stand-ins
+const element = () => ({ style: {}, children: [], appendChild(c){ this.children.push(c); }, replaceChildren(...c){ this.children = c; }, addEventListener(){}, textContent: '' });
+let elements = 0;
+globalThis.document = { createElement: () => elements++ ? element() : overlay, body: { appendChild() {} }, hasFocus: () => true };
 const canvas = { style: {}, addEventListener(name,fn){ canvasHandlers.set(name,fn); }, getBoundingClientRect(){ return { left:0,top:0,width:640,height:480 }; }, focus(){} };
 const inputBundle = await esbuild.build({ entryPoints: [path.join(root,'web/src/input.ts')], bundle: true, format:'esm', platform:'node', write:false });
 const { attachInput } = await import('data:text/javascript;base64,' + Buffer.from(inputBundle.outputFiles[0].contents).toString('base64'));
@@ -104,6 +147,7 @@ key('ArrowDown'); // List, skipping the disabled button.
 assert.equal(overlay.style.top,'80px','focus moved onto the list');
 key('Enter');
 assert.equal(messageTypes().at(-1),0x200,'entering list moves the game cursor');
+await new Promise(resolve=>setTimeout(resolve,500)); // the row seek waits for the game (no game here: its time limit)
 sv.setUint8(0x22000+0x1a4,1); // The game reports a hovered row.
 key('Enter');
 await new Promise(resolve=>setTimeout(resolve,150));

@@ -74,6 +74,7 @@ const P_METAL = 0.2; const P_GRAZING = 0.5; const P_FLAKE_SCALE = 1200.0; const 
 const P_COAT = 1.0; const P_COAT_GLOSS = 0.0; const P_PEEL = 0.5; const P_PEEL_SCALE = 48.0; const P_ROUGH = 0.15; const P_METAL_MAP = 0.0;
 const P_SPEC = 20.0; const P_REFL = 1.0; const P_GLOW = 35.8; const P_GLOW_ANG = 15.0; const P_GLOW_SAT = 0.6;
 const P_VIEW_LIGHT = 1.2; const P_VIEW_DARK = 0.25; const P_ENV_DIFFUSE = 0.3; const P_ENV_GLOW = 0.0;
+const P_DMG_DARK = 0.55;
 const P_SUN_FOG = 150.0; const P_LIGHT_GAIN = 1.7; const P_DARK_MATTE = 1.0; const P_DARK_POWER = 4.0; const P_SUN_REFL = 0.1;
 const MAXMIP = 8.0;
 const SUN_COL = vec3f(1.0, 0.95, 0.85);
@@ -174,9 +175,14 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   let fw = length(fwidth(uv));
   let a = albedo.a * i.color.a;
   if (u.alphaRef > 0.0 && a < u.alphaRef) { discard; }
-  var keep = select(1.0, clamp(pk.g / pk.r, 0.0, 1.0), pk.r > 1e-3);
-  keep = pow(keep, P_DARK_POWER);
+  // runtime/pu_paint.c: G 0.5 neutral; above, paint darker than its band (seams: matte by the dark power); below, damage strength
+  let gv = pk.g * 255.0 - 127.5;
+  var keep = pow(1.0 - clamp(gv / 127.5, 0.0, 1.0), P_DARK_POWER);
   keep = clamp(1.0 - P_DARK_MATTE * (1.0 - keep), 0.0, 1.0);
+  // damage: darker by its strength, and the gloss goes as much
+  let dmg = clamp(-gv / 127.5, 0.0, 1.0);
+  keep = keep * (1.0 - dmg);
+  let base = albedo.rgb * (1.0 - P_DMG_DARK * dmg);
   let V = -normalize(P);
   var Ngeo = normalize(cross(p1, p2));
   if (dot(Ngeo, P) > 0.0) { Ngeo = -Ngeo; }
@@ -213,17 +219,57 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   // the light (sun lobe, view light, sky fill, gain) falls on every paint texel: it scales the texel's own colour, so seams stay
   // dark. Only the shine (sun spot, reflection, coat) follows the texel's darkness. Scaled by it too, a damage scrape (darker
   // paint texels) lost the light and showed as a grey hole in lit paint.
-  var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, albedo.rgb, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
+  var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, base, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
                       coat_c, rough_coat, P_GLOW, P_VIEW_LIGHT, env_irr, env_glow, P_ENV_DIFFUSE, P_ENV_GLOW,
                       P_LIGHT_GAIN, textureSampleLevel(tx, sm, uv, 3.0).rgb);
   rgb = mix(albedo.rgb * i.color.rgb, rgb, pk.r);   // texels the game does not paint keep the stock look
   return vec4f(fog(rgb, i.uvq.z), a);
 }
+// ---- intact car glass (GLASS1; PC car editor's Glass material: roughness 0.02, specular 20, reflection 1, grazing 1, no env
+// diffuse): the R1 cube's reflection by a strong Fresnel, the sun's spot as on the paint. A second pass over the glass page's draw,
+// after the view's opaque part (runtime/web/r_web.c glass_defer), premultiplied: what is under it (the game's own glass, its tint
+// and alpha, and what is seen through) keeps (1 - F), the reflection adds. paintTx.g = 1: intact see-through glass
+// (runtime/pu_paint.c glass_map); elsewhere (seals, frame, broken glass) nothing is drawn.
+const G_ROUGH = 0.02; const G_SPEC = 20.0; const G_REFL = 1.0; const G_F0 = 0.04;
+@fragment fn fs_glass(i: VO) -> @location(0) vec4f {
+  let uv = i.uvq.xy / i.uvq.z;
+  let g = textureSample(paintTx, sm, uv).g * select(0.0, 1.0, u.camR.w > 0.5);
+  let d = 1.0 / max(i.uvq.z, 1e-6);
+  let P = i.ray * d;
+  var N = normalize(cross(dpdx(P), dpdy(P)));
+  if (dot(N, P) > 0.0) { N = -N; }
+  let V = -normalize(P);
+  if (i.nrm.w > 0.5) {
+    var ns = i.nrm.xyz; let l2 = dot(ns, ns);
+    if (l2 > 1e-24) {
+      ns = ns * inverseSqrt(l2);
+      if (dot(ns, N) < 0.0) { ns = -ns; }
+      let nv = dot(ns, V);
+      if (nv < 0.05) { ns = normalize(ns + V * (0.05 - nv)); }
+      N = ns;
+    }
+  }
+  if (g < 0.5) { discard; }
+  let L = u.sun.xyz; let H = normalize(V + L);
+  let NdotV = max(dot(N, V), 0.001); let NdotL = max(dot(N, L), 0.0); let NdotH = max(dot(N, H), 0.0); let VdotH = max(dot(V, H), 0.0);
+  let t = 1.0 - NdotV; let t2 = t * t;
+  let F = G_F0 + (1.0 - G_F0) * t2 * t2 * t;
+  let vis = sunVisibility();
+  let sun = SUN_COL * P_SUN_REFL * vis;
+  let env = envGain(envK(N, V, G_ROUGH * MAXMIP, P_SUN_REFL * vis), u.x0.x);
+  let spec = sun * G_SPEC * lum(i.color.rgb) * (D_GGX(NdotH, G_ROUGH) * G_Smith(NdotV, NdotL, G_ROUGH) * fresnel(vec3f(G_F0), VdotH)) / (4.0 * NdotV * NdotL + 0.001) * NdotL;
+  let refl = env * F * G_REFL + spec;
+  // the fog hides the reflection as it hides the glass under it (that one is fogged already)
+  let clear = fog(vec3f(1.0), i.uvq.z).r - fog(vec3f(0.0), i.uvq.z).r;   // 1 - the fog's share
+  let out_ = vec4f(refl * clear, F * clear);
+  return out_;
+}
 // the game's reflection pass over a car page: off the paint, which has its own
 @fragment fn fs_mask(i: VO) -> @location(0) vec4f {
-  let pk = textureSample(paintTx, sm2, i.aux.xy / max(i.aux.z, 1e-6)).r;
+  let pk = textureSample(paintTx, sm2, i.aux.xy / max(i.aux.z, 1e-6)).rg;
   var r = shade(i);
-  return vec4f(r.rgb, r.a * (1.0 - pk));
+  // the intact glass (g) has the cube's reflection too: off it when the cube is there
+  return vec4f(r.rgb, r.a * (1.0 - max(pk.r, select(select(0.0, 0.75, abs(pk.g - 100.0 / 255.0) < 0.03), 1.0, pk.g > 0.9) * select(0.0, 1.0, u.camR.w > 0.5))));
 }
 // a cube face (PC dx11_shaders.h EmissiveGain, SunMaskOutput): em = gain, threshold, power (below 0: full-bright vertices only), sun sprite
 @fragment fn fs_cap(i: VO) -> @location(0) vec4f {
@@ -247,6 +293,8 @@ struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 }
 @fragment fn fs(i: VO) -> @location(0) vec4f { return textureSampleLevel(tx, sm, i.uv, 0.0); }`;
 
+// GLASS1: the glass pass is premultiplied (its colour is the reflection, its alpha the share of what is under it that goes)
+const GLASS_BLEND: GPUBlendState = { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } };
 const BLEND: (GPUBlendState | undefined)[] = [
   { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } },
   { color: { srcFactor: 'src-alpha', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } },
@@ -322,6 +370,11 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   // ?peel=<0..2>: the orange peel's strength for a look (0 = off)
   const peelQ = Number(new URLSearchParams(location.search).get('peel') ?? NaN);
   let code = PDBG ? SHADER.replace('return vec4f(fog(rgb, i.uvq.z), a);', `return vec4f(${PDBG}, 1.0);`) : SHADER;
+  // ?glassdbg=1: the glass shader's intact glass in magenta (2: its reflection alone), for counts in a test shot
+  const glassDbg = Number(new URLSearchParams(location.search).get('glassdbg') ?? 0);
+  if (glassDbg === 1) code = code.replace('  return out_;', '  return vec4f(1.0, 0.0, 1.0, 1.0);');
+  if (glassDbg === 2) code = code.replace('  return out_;', '  return vec4f(refl, 1.0);');
+  if (glassDbg === 3) code = code.replace('  if (g < 0.5) { discard; }', '').replace('  return out_;', '  return vec4f(1.0, 0.0, 1.0, 1.0);');
   if (peelQ >= 0 && peelQ <= 2) code = code.replace('const P_PEEL = 0.5;', `const P_PEEL = ${peelQ.toFixed(3)};`);
   const module = device.createShaderModule({ code });
   void module.getCompilationInfo().then(ci => { for (const m of ci.messages) log(`[gpu] shader ${m.type} line ${m.lineNum}: ${m.message}`); });
@@ -358,14 +411,14 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     let p = pipes.get(key);
     if (p) return p;
     const cap = (key >> 12) & 1;
-    const blend = cap ? capBlend(key) : BLEND[key & 7], zcmp = (key >> 3) & 7, zwrite = (key >> 6) & 1, cull = (key >> 7) & 3, topo = (key >> 9) & 3, cw = (key >> 11) & 1;
+    const blend = cap ? capBlend(key) : key & (1 << 17) ? GLASS_BLEND : BLEND[key & 7], zcmp = (key >> 3) & 7, zwrite = (key >> 6) & 1, cull = (key >> 7) & 3, topo = (key >> 9) & 3, cw = (key >> 11) & 1;
     p = device.createRenderPipeline({
       layout: pipeLayout,
       vertex: { module, entryPoint: 'vs', buffers: [{ arrayStride: VSIZE, attributes: [
         { shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x2' },
         { shaderLocation: 2, offset: 24, format: 'unorm8x4' }, { shaderLocation: 3, offset: 28, format: 'unorm8x4' },
         { shaderLocation: 4, offset: 32, format: 'float32x4' }] }] },
-      fragment: { module, entryPoint: cap ? 'fs_cap' : key & (1 << 15) ? 'fs_car' : key & (1 << 16) ? 'fs_mask' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
+      fragment: { module, entryPoint: cap ? 'fs_cap' : key & (1 << 15) ? 'fs_car' : key & (1 << 16) ? 'fs_mask' : key & (1 << 17) ? 'fs_glass' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
       primitive: { topology: TOPO[topo], cullMode: topo === 0 ? CULL[cull] : 'none', frontFace: 'cw' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: !!zwrite, depthCompare: DEPTH[zcmp] },
       multisample: { count: cap ? 1 : SAMPLES },

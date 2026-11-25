@@ -2,7 +2,8 @@
 // Layout (bytes): magic 0, msg_head 4, msg_tail 8, key_head 12, key_tail 16, mx 20, my 24, msgs 28 (256 * 12),
 // keys 3100 (256 * 16), dik 7196, vk 7452, then the pad: on 7708, buttons 7712, lx, rt, lt (floats) 7716; mode 7728 (from the
 // game: 0 frontend, 1 race menu, 2 driving), rumble seq 7732, low, high (floats) 7736, ms 7744.
-import { readFocusPage, readRaceFocusPage, moveFocus, focusActivationPoint, type FocusItem } from './focus-page';
+import { readFocusPage, readRaceFocusPage, readRows, moveFocus, focusActivationPoint, type FocusItem } from './focus-page';
+import { createPadKeyboard, type PadKeyboard } from './padkb';
 import { nextFocus, type FocusDirection } from './focus-geometry';
 
 const WM = { KEYDOWN: 0x100, KEYUP: 0x101, CHAR: 0x102, SYSKEYDOWN: 0x104, SYSKEYUP: 0x105, MOVE: 0x200, WHEEL: 0x20A };
@@ -60,10 +61,11 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     Atomics.store(i32, 4, tail + 1);
   };
   let focusId = 0, focusWindow = 0, editing = false, clickTimer = 0, consumedEscape = false;
-  let popupId = 0, popupX = 0, popupY = 0;
-  let listId = 0, listX = 0, listY = 0;
+  let popupId = 0;
+  let listId = 0;
   let colorId = 0, colorRegion = 0, colorEditing = false, colorX = 0, colorY = 0;
   let sliderId = 0;
+  let padkb: PadKeyboard | null = null;
   const outline = document.createElement('div');
   Object.assign(outline.style, { position: 'fixed', pointerEvents: 'none', zIndex: '10', border: '2px solid #fff36a', boxSizing: 'border-box', display: 'none' });
   document.body.appendChild(outline);
@@ -72,7 +74,35 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     const r = el.getBoundingClientRect();
     Object.assign(outline.style, { display: 'block', borderColor: colorEditing || sliderId ? '#66ffff' : '#fff36a', left: `${r.left + item.x * r.width / 640}px`, top: `${r.top + item.y * r.height / 480}px`, width: `${item.width * r.width / 640}px`, height: `${item.height * r.height / 480}px` });
   };
+  // KB2: buttons of the focus layer's own (FocusItem.label: the network race's leave notice has none of the game's), drawn over
+  // the game; a click, a tap or the focus's Enter sends their key
+  const own = document.createElement('div');
+  Object.assign(own.style, { position: 'fixed', left: '0', top: '0', width: '0', height: '0', zIndex: '9' });
+  document.body.appendChild(own);
+  let ownState = '';
+  const refreshOwn = () => {
+    const page = focusEnabled && Atomics.load(i32, 7728 >> 2) === 1 ? readRaceFocusPage(memory.buffer) : null;
+    const items = page?.items.filter(x => x.label && x.key) ?? [];
+    const r = el.getBoundingClientRect();
+    const state = items.length ? items.map(x => `${x.id} ${x.x} ${x.y} ${x.label}`).join('|') + ` @${r.left} ${r.top} ${r.width} ${r.height}` : '';
+    if (state === ownState) return;
+    ownState = state;
+    own.replaceChildren(...items.map(item => {
+      const b = document.createElement('button');
+      b.textContent = item.label ?? '';
+      Object.assign(b.style, { position: 'fixed', left: `${r.left + item.x * r.width / 640}px`, top: `${r.top + item.y * r.height / 480}px`,
+        width: `${item.width * r.width / 640}px`, height: `${item.height * r.height / 480}px`, font: `${Math.max(10, Math.round(r.height * 11 / 480))}px sans-serif`,
+        color: '#fff', background: 'rgba(0, 0, 0, 0.7)', border: '1px solid rgba(255, 255, 255, 0.6)', padding: '0', cursor: 'pointer', touchAction: 'none' });
+      const stop = (e: Event) => { e.stopPropagation(); e.preventDefault(); };
+      b.addEventListener('pointerdown', stop);
+      b.addEventListener('pointerup', e => { stop(e); if (item.key) sendKey(item.key); });
+      b.addEventListener('mousedown', stop);
+      b.addEventListener('mouseup', stop);
+      return b;
+    }));
+  };
   const refreshFocus = () => {
+    refreshOwn();
     if (focusId) {
       const page = activeFocusPage();
       const item = page?.window === focusWindow ? page.items.find(x => x.id === focusId) : undefined;
@@ -81,11 +111,18 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
         showFocus(rect ? { ...item, ...rect } : item);
       } else clearFocus();
     }
+    if (padkb?.open && !focusId) padkb.hide();             // its text field went (the page changed)
     requestAnimationFrame(refreshFocus);
   };
   requestAnimationFrame(refreshFocus);
+  // tests (web/tools/focus_drive.mjs, focus_walk.mjs): the focus layer's view of the screen and its own state
+  (globalThis as unknown as Record<string, unknown>).nfs5Focus = () => ({
+    mode: Atomics.load(i32, 7728 >> 2), page: activeFocusPage(), focusId, focusWindow, popupId, listId, sliderId, editing, colorId, colorEditing,
+    seeking: seeking || seekQueued !== 0, padKeyboard: !!padkb?.open,
+  });
   const clickFocus = (item: FocusItem, windowId: number) => {
     if (clickTimer) return;
+    if (item.key) { sendKey(item.key); return; }          // a button of the page's own
     const page = activeFocusPage(), point = page?.window === windowId ? focusActivationPoint(page, item) : { x: item.x + item.width / 2, y: item.y + item.height / 2 };
     const x = Math.floor(point.x * 65536 / 640), y = Math.floor(point.y * 65536 / 480);
     const p = (x | y << 16) >>> 0;
@@ -105,7 +142,38 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     Atomics.store(i32, 5, x16); Atomics.store(i32, 6, y16);
     msg(WM.MOVE, 0, (x16 | y16 << 16) >>> 0);
   };
+  // FEHorizontalSlider (the chronicle's year): a click on the track beside the thumb jumps there, one on the thumb drags it, so a
+  // step is a drag of the thumb by one cell and a half (its width is not known: the cell is guessed from where the thumb is,
+  // then the value says whether to drag again)
+  let dragging = false;
+  const dragSlider = async (item: FocusItem, windowId: number, direction: number) => {
+    if (dragging || item.thumbX === undefined || item.sliderCount === undefined || item.sliderValue === undefined) return;
+    dragging = true;
+    try {
+      const want = Math.max(0, Math.min(item.sliderCount - 1, item.sliderValue + direction));
+      if (want === item.sliderValue) return;
+      const offset = item.thumbX - item.x;
+      const thumbWidth = item.sliderValue > 0 ? Math.max(4, item.width - offset * (item.sliderCount - 1) / item.sliderValue) : item.width * 0.155;
+      const cell = Math.max(1, (item.width - thumbWidth) / (item.sliderCount - 1));
+      const y = item.y + item.height / 2;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const now = readFocusPage(memory.buffer)?.items.find(t => t.id === item.id);
+        if (!now || now.thumbX === undefined || now.sliderValue === undefined || readFocusPage(memory.buffer)?.window !== windowId) return;
+        const left = want - now.sliderValue;
+        if (!left) return;
+        // the game truncates the dragged distance in cells: half a cell more lands on the cell asked for
+        const x0 = now.thumbX + Math.min(4, thumbWidth / 2), x1 = x0 + (left + Math.sign(left) * 0.5) * cell;
+        const p0 = (Math.floor(x0 * 65536 / 640) | Math.floor(y * 65536 / 480) << 16) >>> 0;
+        const p1 = (Math.floor(x1 * 65536 / 640) | Math.floor(y * 65536 / 480) << 16) >>> 0;
+        moveCursor(x0, y); await settle();
+        msg(0x201, 1, p0); await settle();
+        msg(WM.MOVE, 1, p1); await settle();
+        msg(0x202, 0, p1); await settle();
+      }
+    } finally { dragging = false; }
+  };
   const changeSlider = (item: FocusItem, windowId: number, direction: number) => {
+    if (item.thumbX !== undefined) { void dragSlider(item, windowId, direction); return; }
     if (clickTimer || item.sliderCount === undefined || item.sliderValue === undefined) return;
     const value = Math.max(0, Math.min(item.sliderCount - 1, item.sliderValue + direction));
     if (value === item.sliderValue) return;
@@ -119,24 +187,94 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
       clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
     }, 80);
   };
-  const scrollPopup = (item: FocusItem, windowId: number, down: boolean) => {
-    const arrow = down ? item.scrollDown : item.scrollUp;
-    if (!arrow || clickTimer) return;
-    const x = Math.floor((arrow.x + arrow.width / 2) * 65536 / 640);
-    const y = Math.floor((arrow.y + arrow.height / 2) * 65536 / 480);
-    const p = (x | y << 16) >>> 0;
-    moveCursor(arrow.x + arrow.width / 2, arrow.y + arrow.height / 2);
-    clickTimer = window.setTimeout(() => {
-      const current = readFocusPage(memory.buffer);
-      if (current?.window !== windowId || !current.items.some(x => x.id === item.id && x.expanded)) { clickTimer = 0; return; }
-      msg(0x201, 1, p);
-      clickTimer = window.setTimeout(() => {
-        msg(0x202, 0, p);
-        clickTimer = 0;
-        const after = readFocusPage(memory.buffer);
-        if (after?.window === windowId && after.items.some(x => x.id === item.id && x.expanded)) moveCursor(popupX, popupY);
-      }, 120);
-    }, 80);
+  // ---- KB2: the rows of an open combo or of a list box (focus-page.ts readRows). The cursor goes from row to row and the
+  // game's own answer (the row under the mouse) decides: rows are 14 px for most lists, other heights or per row for some
+  // (the car lists), and a list scrolls only through the arrows of a scroll bar it shows (+0x1DC; a hidden one still has
+  // rectangles, and a click there closed a short combo).
+  let seeking = false, seekQueued = 0, seekGen = 0;
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  const gameFrames = () => (globalThis as unknown as { stats?: { frames: number } }).stats?.frames;
+  /** until the game took the mailbox's messages and drew two more frames (at most 400 ms) */
+  const settle = async () => {
+    const tail = Atomics.load(i32, 2), t0 = performance.now();
+    while (Atomics.load(i32, 1) - tail < 0 && performance.now() - t0 < 400) await sleep(8);
+    const f0 = gameFrames();
+    if (f0 === undefined) { await sleep(40); return; }
+    while ((gameFrames() ?? f0) - f0 < 2 && performance.now() - t0 < 400) await sleep(8);
+  };
+  const clickAt = async (x: number, y: number) => {
+    moveCursor(x, y);
+    await settle();
+    const p = (Math.floor(x * 65536 / 640) | Math.floor(y * 65536 / 480) << 16) >>> 0;
+    msg(0x201, 1, p);
+    await sleep(120);
+    msg(0x202, 0, p);
+    await settle();
+  };
+  const rowsOf = (itemId: number, windowId: number) => {
+    const page = readFocusPage(memory.buffer);
+    const item = page?.window === windowId ? page.items.find(x => x.id === itemId) : undefined;
+    const rows = item ? readRows(memory.buffer, item) : null;
+    return item && rows ? { item, rows } : null;
+  };
+  /** dir 0: onto the selected row when it shows, else the first one shown; +1 / -1: the next / previous row */
+  const stepRow = async (itemId: number, windowId: number, dir: number, scrolls = true): Promise<void> => {
+    let s = rowsOf(itemId, windowId);
+    if (!s) return;
+    const x = s.item.valueX !== undefined ? (s.item.valueX + s.item.x + s.item.width) / 2 : s.item.x + s.item.width * 0.4;
+    let r = s.rows;
+    const h = r.rowHeight || 14, lo = r.top + 1, hi = r.top + r.height - 1;
+    const clampY = (y: number) => Math.max(lo, Math.min(hi, y));
+    let y = cursorY * 480;
+    const inside = Math.abs(cursorX * 640 - x) < 1 && y >= r.top && y < r.top + r.height;
+    if (!dir || !r.hovered || !inside) {
+      const shown = r.rowHeight ? Math.floor(r.height / r.rowHeight) : 1;
+      const at = r.selected >= r.first && r.selected < r.first + shown ? r.selected - r.first : 0;
+      moveCursor(x, clampY(r.top + at * h + h / 2));
+      await settle();
+      // rows of other heights (the car lists): on from the first one shown to the selected one, as long as it shows
+      for (let k = 0; k < 16 && !dir; k++) {
+        const now = rowsOf(itemId, windowId)?.rows;
+        if (!now?.hovered || now.selected <= now.hoverIndex) break;
+        const before = now.hoverIndex;
+        await stepRow(itemId, windowId, 1, false);
+        if (rowsOf(itemId, windowId)?.rows.hoverIndex === before) break;
+      }
+      return;
+    }
+    const target = r.hoverIndex + dir;
+    if (target < 0 || (r.count >= 0 && target >= r.count)) return;
+    y += dir * h;
+    for (let k = 0; k < 12; k++) {
+      if (y < lo || y > hi) {
+        const arrow = scrolls ? dir > 0 ? r.scrollDown : r.scrollUp : undefined;
+        if (!arrow) return;                                  // the end of a list without a scroll bar
+        const back = clampY(cursorY * 480);
+        await clickAt(arrow.x + arrow.width / 2, arrow.y + arrow.height / 2);
+        moveCursor(x, back);
+        y = back;
+      } else moveCursor(x, y);
+      await settle();
+      s = rowsOf(itemId, windowId);
+      if (!s || !s.rows.hovered) return;
+      r = s.rows;
+      if (r.hoverIndex === target) return;
+      // between rows of other heights: a third of a row more (or back after one too far)
+      const step = Math.max(2, Math.round(h / 3));
+      y = cursorY * 480 + ((r.hoverIndex - target) * dir < 0 ? dir * step : -dir * step);
+    }
+  };
+  // presses while a step runs add up (at most 10 rows ahead); a held key's repeats only keep one waiting
+  const seekRow = (itemId: number, windowId: number, dir: number, repeat = false) => {
+    if (seeking) { seekQueued = repeat ? seekQueued || dir : Math.max(-10, Math.min(10, seekQueued + dir)); return; }
+    seeking = true;
+    const gen = ++seekGen;
+    void (async () => {
+      try {
+        await stepRow(itemId, windowId, dir);
+        while (seekQueued && gen === seekGen) { const d = Math.sign(seekQueued); seekQueued -= d; await stepRow(itemId, windowId, d); }
+      } finally { seeking = false; seekQueued = 0; }
+    })();
   };
   const colorClick = (item: FocusItem, windowId: number, x: number, y: number, drag: boolean) => {
     if (clickTimer) return;
@@ -213,30 +351,30 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
       }
       colorId = 0; colorEditing = false;
       if ((popup.kind !== 'combo' && popup.kind !== 'color') || !popup.popupHeight || popup.popupHeight > 480) return false;
-      if (popupId !== popup.id) { popupId = popup.id; popupX = popup.x + popup.width / 2; popupY = popup.y + popup.height + 8; }
+      if (popupId !== popup.id) { popupId = popup.id; seekGen++; }
+      const close = () => { seekGen++; seekQueued = 0; clickFocus(popup, page.window); };
       if (e.code === 'Escape') {
-        if (down && !e.repeat) clickFocus(popup, page.window);
+        if (down && !e.repeat) close();
         return true;
       }
       if (e.code === 'ArrowDown' || e.code === 'ArrowUp') {
-        if (down) {
-          const y = popupY + (e.code === 'ArrowDown' ? 16 : -16);
-          if (y >= popup.y + popup.height && y < Math.min(480, popup.y + popup.popupHeight)) {
-            popupY = y;
-            moveCursor(popupX, popupY);
-          } else scrollPopup(popup, page.window, e.code === 'ArrowDown');
-        }
+        if (down) seekRow(popup.id, page.window, e.code === 'ArrowDown' ? 1 : -1, e.repeat);
         return true;
       }
       if (e.code === 'Enter' || e.code === 'NumpadEnter') {
-        if (down && !e.repeat && popup.hovered && !clickTimer) {
-          const p = (Math.floor(popupX * 65536 / 640) | Math.floor(popupY * 65536 / 480) << 16) >>> 0;
-          msg(0x201, 1, p);
-          clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
+        if (down && !e.repeat && !clickTimer && !seeking) {
+          // a row under the cursor is picked; without one (nothing chosen yet) Enter closes the list as it was
+          const r = readRows(memory.buffer, popup), y = cursorY * 480;
+          if (r?.hovered && y >= r.top && y < r.top + r.height) {
+            const p = (Math.floor(cursorX * 65536) | Math.floor(cursorY * 65536) << 16) >>> 0;
+            msg(0x201, 1, p);
+            clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
+          } else close();
         }
         return true;
       }
-      return false;
+      // the other keys would reach the game's own handling of the page under the open list
+      return e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'Tab';
     }
     popupId = 0;
     if (sliderId && (!item || item.id !== sliderId || item.kind !== 'slider')) sliderId = 0;
@@ -256,27 +394,42 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     if (listId && !list) listId = 0;
     if (list) {
       if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-        if (down) {
-          listY = Math.max(list.y + 1, Math.min(list.y + list.height - 1, listY + (e.code === 'ArrowDown' ? 16 : -16)));
-          moveCursor(listX, listY);
-        }
+        if (down) seekRow(list.id, page.window, e.code === 'ArrowDown' ? 1 : -1, e.repeat);
         return true;
       }
-      if (e.code === 'Escape') { if (down) listId = 0; return true; }
+      if (e.code === 'Escape' || e.code === 'Tab') { if (down) { listId = 0; seekGen++; } return true; }
       if (e.code === 'Enter' || e.code === 'NumpadEnter') {
-        if (down && !e.repeat && list.hovered && !clickTimer) {
-          const p = (Math.floor(listX * 65536 / 640) | Math.floor(listY * 65536 / 480) << 16) >>> 0;
-          msg(0x201, 1, p);
-          clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
+        if (down && !e.repeat && !clickTimer && !seeking) {
+          const r = readRows(memory.buffer, list), y = cursorY * 480;
+          if (r?.hovered && y >= r.top && y < r.top + r.height) {
+            const p = (Math.floor(cursorX * 65536) | Math.floor(cursorY * 65536) << 16) >>> 0;
+            msg(0x201, 1, p);
+            clickTimer = window.setTimeout(() => { msg(0x202, 0, p); clickTimer = 0; }, 120);
+          }
           listId = 0;
         }
         return true;
       }
-      return false;
+      return e.code === 'ArrowLeft' || e.code === 'ArrowRight';
+    }
+    // the pad's B and Start on a page that says which key goes back (the network race's leave notice: Esc there leaves)
+    if (e.code === 'Escape' && page.padBack && (e as KeyboardEvent & { pad?: boolean }).pad) {
+      if (down && !e.repeat) sendKey(page.padBack);
+      return true;
+    }
+    // Enter (the pad's A) with nothing focused on a race page that Space closes (results, records, standings)
+    if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !item && page.spaceCloses) {
+      if (down && !e.repeat) sendKey('Space');
+      return true;
     }
     if (e.code === 'Escape') {
       if (!down && consumedEscape) { consumedEscape = false; return true; }
-      const back = page.items.find(x => x.command === 'GOBACK' || x.command === 'GOBACKMINUSONE' || x.command === 'CANCELCREATEPLAYER');
+      // the profile page has no Back: its "choose" (SETNAMETHENBACK) returns with the highlighted profile, the one in use;
+      // a message with a single button and nothing else (the factory driver's welcome, a modal layer over a hidden bottom bar):
+      // its button is the way on
+      const back = page.items.find(x => x.command === 'GOBACK' || x.command === 'GOBACKMINUSONE' || x.command === 'CANCELCREATEPLAYER')
+        ?? page.items.find(x => x.command === 'SETNAMETHENBACK')
+        ?? (page.items.length === 1 && page.items[0].kind === 'button' && Atomics.load(i32, 7728 >> 2) === 0 ? page.items[0] : undefined);
       if (down && back) {
         consumedEscape = true;
         if (!e.repeat) { editing = false; clickFocus(back, page.window); }
@@ -305,11 +458,12 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
         if (item.kind === 'slider') {
           sliderId = item.id; showFocus(item);
         } else if (item.kind === 'list') {
-          listId = item.id; listX = item.x + item.width / 2; listY = item.y + 8;
-          moveCursor(listX, listY);
+          listId = item.id;
+          seekRow(item.id, page.window, 0);
         } else {
-          clickFocus(item, page.window);
+          if (!(item.kind === 'input' && item.key === '')) clickFocus(item, page.window);   // key '': a race text entry, no click
           editing = item.kind === 'input';
+          if (editing && (e as KeyboardEvent & { pad?: boolean }).pad) padkb?.show();
         }
       }
       return true;
@@ -322,7 +476,18 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     // the browser's own keys stay with the browser
     if (e.ctrlKey && (e.code === 'KeyR' || e.code === 'KeyW' || e.code === 'KeyT' || e.code === 'KeyN' || e.code === 'KeyL')) return;
     e.preventDefault();
-    if (focusKey(e, down)) return;
+    if (padkb?.key(e.code, down)) return;
+    if (focusKey(e, down)) {
+      // a key the game saw go down (it opened the page the focus layer now has) also goes up there, or its next press is no press
+      if (!down && dik[k[0]]) gameKey(e, false);
+      return;
+    }
+    gameKey(e, down);
+  };
+  /** the key to the game: DirectInput (buffered + state) and the window's messages */
+  const gameKey = (e: KeyboardEvent, down: boolean) => {
+    const k = K[e.code];
+    if (!k) return;
     const [sc, v] = k;
     const ext = (sc & 0x80) !== 0, scan = sc & 0x7F;
     const alt = e.altKey && e.code !== 'AltLeft' && e.code !== 'AltRight';
@@ -338,6 +503,12 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     else if (down && e.code === 'Escape') msg(WM.CHAR, 27, l);
     else if (down && e.code === 'Tab') msg(WM.CHAR, 9, l);
   };
+  /** a key for the game's own handling, held long enough for a game that polls the keyboard's state once a frame */
+  const sendKey = (code: string) => {
+    const ev = { code, key: code === 'Space' ? ' ' : '', altKey: false, ctrlKey: false, repeat: false, preventDefault() { } } as unknown as KeyboardEvent;
+    gameKey(ev, true);
+    window.setTimeout(() => gameKey(ev, false), 150);
+  };
   const tap = (code: string, ch: string) => {
     const ev = (down: boolean) => key({ code, key: ch, altKey: false, ctrlKey: false, repeat: false, preventDefault() { } } as unknown as KeyboardEvent, down);
     ev(true); ev(false);
@@ -345,13 +516,20 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   textInput.key = code => tap(code, '');
   // a letter, digit or space as its key (down + up, the character with it); anything else only as WM_CHAR (the game's
   // text is 8-bit: other characters are dropped)
-  textInput.char = c => {
+  const typeChar = (c: string, press: (code: string, ch: string) => void) => {
     const u = c.toUpperCase();
-    if (u >= 'A' && u <= 'Z' && u.length === 1) tap('Key' + u, c);
-    else if (c >= '0' && c <= '9') tap('Digit' + c, c);
-    else if (c === ' ') tap('Space', c);
+    if (u >= 'A' && u <= 'Z' && u.length === 1) press('Key' + u, c);
+    else if (c >= '0' && c <= '9') press('Digit' + c, c);
+    else if (c === ' ') press('Space', c);
     else if (c.charCodeAt(0) < 256) msg(WM.CHAR, c.charCodeAt(0), 1);
   };
+  textInput.char = c => typeChar(c, tap);
+  // the pad's on-screen keyboard (padkb.ts) types straight to the game, past the focus layer
+  const gameTap = (code: string, ch: string) => {
+    const ev = { code, key: ch, altKey: false, ctrlKey: false, repeat: false, preventDefault() { } } as unknown as KeyboardEvent;
+    gameKey(ev, true); gameKey(ev, false);
+  };
+  padkb = createPadKeyboard({ char: c => typeChar(c, gameTap), key: code => gameTap(code, '') }, () => { editing = false; });
   window.addEventListener('keydown', e => key(e, true));
   window.addEventListener('keyup', e => key(e, false));
   window.addEventListener('blur', () => {
@@ -416,10 +594,10 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   // Escape and the rest goes to the game's packet (pu_pad_input in runtime/pu_ext.c).
   const f32 = new Float32Array(sab, ptr, 4096 / 4 + 2048);
   const PAD_ON = 7708 >> 2, PAD_BUTTONS = PAD_ON + 1, PAD_LX = PAD_ON + 2, PAD_RT = PAD_ON + 3, PAD_LT = PAD_ON + 4, PAD_MODE = PAD_ON + 5, RUMBLE_SEQ = PAD_ON + 6;
-  const B = { A: 0, B: 1, LT: 6, RT: 7, START: 9, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 };
+  const B = { A: 0, B: 1, X: 2, LT: 6, RT: 7, START: 9, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 };
   const REPEAT_DELAY = 400, REPEAT_PERIOD = 80, CURSOR_SPEED = 1.2, CURSOR_CURVE = 1.8, WHEEL_NOTCHES = 8, STICK_DEAD = 0.10, TRIGGER_DEAD = 0.05;
   const press = (code: string, down: boolean, repeat = false) =>
-    key({ code, key: '', altKey: false, ctrlKey: false, repeat, preventDefault() { } } as unknown as KeyboardEvent, down);
+    key({ code, key: '', altKey: false, ctrlKey: false, repeat, pad: true, preventDefault() { } } as unknown as KeyboardEvent, down);
   const padKeys: Record<string, { down: boolean, next: number }> = {};
   const setKey = (code: string, down: boolean, now: number) => {
     const st = padKeys[code] ??= { down: false, next: 0 };
@@ -494,8 +672,9 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     setKey('ArrowDown', menu && is(B.DOWN), now);
     setKey('ArrowLeft', menu && is(B.LEFT), now);
     setKey('ArrowRight', menu && is(B.RIGHT), now);
+    setKey('Backspace', menu && !!padkb?.open && is(B.X), now);     // X deletes on the pad keyboard
     if (!is(B.A)) padFocusA = false;
-    else if (menu && focusId) padFocusA = true;
+    else if (menu && (focusId || (mode === 1 && !padMouse && activeFocusPage()?.spaceCloses))) padFocusA = true;
     setKey('Enter', menu && padFocusA && is(B.A), now);
     if (menu) {
       const m = Math.min(1, Math.hypot(lx, ly));
