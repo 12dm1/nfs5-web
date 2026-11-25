@@ -424,7 +424,9 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     }
     if (e.code === 'Escape') {
       if (!down && consumedEscape) { consumedEscape = false; return true; }
-      const back = page.items.find(x => x.command === 'GOBACK' || x.command === 'GOBACKMINUSONE' || x.command === 'CANCELCREATEPLAYER');
+      // the profile page has no Back: its "choose" (SETNAMETHENBACK) returns with the highlighted profile, the one in use
+      const back = page.items.find(x => x.command === 'GOBACK' || x.command === 'GOBACKMINUSONE' || x.command === 'CANCELCREATEPLAYER')
+        ?? page.items.find(x => x.command === 'SETNAMETHENBACK');
       if (down && back) {
         consumedEscape = true;
         if (!e.repeat) { editing = false; clickFocus(back, page.window); }

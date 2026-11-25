@@ -104,6 +104,9 @@ assert.equal(readFocusPage(memory).window,win,'a hidden dialog leaves the page a
 view.setUint8(dialog+0xd8,1); put(dialog+0xdc,0xff);
 const box=readFocusPage(memory);
 assert.equal(box.window,dialog,'an open dialog takes the focus'); assert.deepEqual(box.items.map(x=>[x.x,x.y,x.width,x.height,x.command]),[[280,236,80,18,undefined],[280,257,80,18,'GOBACK']]);
+put(yes+0xf0,0x2bf); put(no+0xf0,0x2be);
+assert.deepEqual(readFocusPage(memory).items.map(x=>x.command),['GOBACK',undefined],'the button captioned "no" (0x2BF) is the way out, wherever it is');
+put(yes+0xf0,0); put(no+0xf0,0);
 put(dialog+0xdc,0x80); assert.equal(readFocusPage(memory).window,win,'a dialog fading in is not up yet'); put(dialog+0xdc,0); view.setUint8(dialog+0xd8,0);
 console.log('focus snapshot and navigation checks passed');
 

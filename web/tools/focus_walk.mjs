@@ -25,7 +25,7 @@ const SEED = arg('seed', 'player.lst,5îïðïðî.sav,îïðïðî1.hud,îïð�
 const START = arg('start', '').split(',').filter(Boolean);
 // never pressed: they leave the menus, start a race, change or delete the profile, spend money
 const DENY = new RegExp(arg('deny', '^(QUIT|PLAYGAME|REMOVEPLAYER|CREATEPLAYERDONE|SETNAMETHENBACK|CREATEPLAYERENTER)$|BUY|SELL|DELETE|RESET|FORFEIT|PURCHASE|REPAIR|STARTRACE|RACENOW|ACCEPT|SAVE'));
-const BACK = new Set(['GOBACK', 'GOBACKMINUSONE', 'CANCELCREATEPLAYER']);
+const BACK = new Set(['GOBACK', 'GOBACKMINUSONE', 'CANCELCREATEPLAYER', 'SETNAMETHENBACK']);
 
 const fp = await esbuild.build({ entryPoints: [path.join(ROOT, 'web/src/focus-page.ts')], bundle: true, format: 'esm', platform: 'node', write: false });
 const { moveFocus } = await import('data:text/javascript;base64,' + Buffer.from(fp.outputFiles[0].contents).toString('base64'));
@@ -69,6 +69,15 @@ const changed = async (sig, ms = 9000) => {
     await sleep(300);
   }
   return await focus();
+};
+const BAR = new Set(['OPTIONS', 'QUIT', 'GOBACK', 'PLAYGAME']);
+/** a page with nothing but the bottom bar is a movie (the career's era intro, the factory driver's): Esc skips it */
+const skipMovie = async (f) => {
+  for (let k = 0; k < 2 && f?.mode === 0 && f.page && !f.page.items.some(it => !BAR.has(it.command ?? '')); k++) {
+    await press('Escape');
+    f = await changed(sigOf(f.page));
+  }
+  return f;
 };
 /** arrow-key paths from the focused item (or from "no focus": the first arrow press focuses the first item) to every item */
 const paths = (items, from = 0) => {
@@ -123,7 +132,7 @@ async function replay(route) {
     const it = findItem(f?.page, step);
     if (!it || !await focusOn(it)) throw new Error('replay: ' + step + ' not found');
     await press('Enter');
-    f = await changed(sigOf(f.page));
+    f = await skipMovie(await changed(sigOf(f.page)));
   }
   return f;
 }
@@ -197,7 +206,7 @@ async function visit(route, f, depth) {
     const now = findItem(cur.page, step);
     if (!now || !await focusOn(now)) { problem(where, `${step} not reachable by arrows`); continue; }
     await press('Enter');
-    const next = await changed(sig);
+    const next = await skipMovie(await changed(sig));
     if (next?.mode !== 0) { rec.children.push({ step, result: `mode ${next?.mode}` }); await replay(route); continue; }
     const nsig = sigOf(next.page);
     if (nsig === sig) { rec.children.push({ step, result: 'same page' }); continue; }

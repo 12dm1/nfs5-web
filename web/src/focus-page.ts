@@ -82,8 +82,8 @@ export function readRows(buffer: ArrayBufferLike, item: FocusItem): RowsInfo | n
  * one the game sends the input to (00512120) is the last whose +0x44 (005124E0) says it is up: +0xD8 shown and +0xDC (its fade)
  * 0xFF. Its children (vector at +0xD4) are FEDialogButton (0x005BA108, 0xF8 bytes): hit-tested (00515060) at the dialog's
  * corner +0xDC/+0xE0 plus the button's +0xD4/+0xD8, float size +0xE4/+0xE8; a click (00515130) needs the hover the mouse
- * move set. The last button of two is the negative one (FEDialogTwoItem 00513AD0: 0x2BE/0x2BF, "yes"/"no"); a single one
- * is also the way out. */
+ * move set. The negative button is the one whose caption is 0x2BF (FEDialogTwoItem 00513AD0: 0x2BE/0x2BF, "yes"/"no";
+ * FEDialogInputCancel lists it first), else the last of two; a single one is also the way out. */
 function readDialog(m: DataView): FocusPage | null {
   const ok = (p: number, n: number) => p >= 0x10000 && p <= m.byteLength - n;
   const u = (p: number) => ok(p, 4) ? m.getUint32(p, true) : 0;
@@ -98,15 +98,29 @@ function readDialog(m: DataView): FocusPage | null {
     const children = u(dialog + 0xd4), cb = u(children), ce = u(children + 4);
     if (!ok(children, 8) || ce < cb || ce - cb > 64 || (ce - cb) % 4 || (ce > cb && !ok(cb, ce - cb))) return null;
     const items: FocusItem[] = [];
+    let negative: FocusItem | undefined;
     for (let c = cb; c < ce; c += 4) {
       const b = u(c);
+      if (ok(b, 0xf4) && u(b) === 0x005ba23c) {
+        // FEDialogInput (FEDialogInputCancel's text, 005149A0): its text is centred at the corner + (+0xD4, +0xD8); it takes
+        // every typed character while the dialog is up, so no click (key '')
+        const cx = i(b + 0xdc) + i(b + 0xd4), cy = i(b + 0xe0) + i(b + 0xd8);
+        if (cx >= 100 && cx <= 540 && cy >= 0 && cy + 14 <= 480) items.push({ id: b, kind: 'input', x: cx - 100, y: cy, width: 200, height: 14, key: '' });
+        continue;
+      }
       if (!ok(b, 0xf8) || u(b) !== 0x005ba108) continue;
       const x = i(b + 0xdc) + i(b + 0xd4), y = i(b + 0xe0) + i(b + 0xd8);
       const width = m.getFloat32(b + 0xe4, true), height = m.getFloat32(b + 0xe8, true);
       if (!(width > 0 && height > 0 && width < 640 && height < 480) || x < 0 || y < 0 || x + width > 640 || y + height > 480) continue;
-      items.push({ id: b, kind: 'button', x, y, width, height });
+      const item: FocusItem = { id: b, kind: 'button', x, y, width, height };
+      // the caption's string: 0x2BF "no" / "cancel" (and 0x2BD of 00505B50's pair) is the way out
+      const text = i(b + 0xf0);
+      if (text === 0x2bf || text === 0x2bd) negative = item;
+      items.push(item);
     }
-    if (items.length === 1 || items.length === 2) items[items.length - 1].command = 'GOBACK';
+    const buttons = items.filter(x => x.kind === 'button');
+    if (!negative && (buttons.length === 1 || buttons.length === 2)) negative = buttons[buttons.length - 1];
+    if (negative) negative.command = 'GOBACK';
     return { window: dialog, items };
   }
   return null;
