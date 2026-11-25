@@ -1347,10 +1347,12 @@ void r_reshape(int nw){
     g_lw = nw; g_s_video = 0; g_clipvalid = 0;
 }
 /* The race's reflection cube: faces drawn a frame (runtime/pu_cube.c), by the frame rate. One face a frame refreshes the cube
- * 10 times a second at 60 fps; a fast PC has room for more. Every second the mean frame interval is measured; one more face
- * stays while the rate keeps within 8 % of the best of late, else it goes and no more is tried for 20 s; a heavier scene
- * (15 % under the best, or under 50 fps) drops one. ?env=CUBE_FACES=<1..6> fixes the count, CUBELOG=1 logs the changes. */
-static int g_cube_n = 1, g_cube_fixed = -1, g_cube_seen;
+ * 10 times a second at 60 fps; a fast PC has room for more. The target is the display's rate, measured all the time (the menus
+ * hold it): the best half-second mean frame interval, let go slowly. In a race, after 3 s of settling, one more face is tried
+ * while 2 s in a row keep within 8 % of it; a try that costs more goes back (no retry for 30 s); 20 % under it for 1 s (or
+ * under 50 fps) drops one (no retry for 15 s). Frames over 50 ms (loads, hitches) are left out. The count carries over to the next race.
+ * ?env=CUBE_FACES=<1..6> fixes it, CUBELOG=1 logs the changes. */
+static int g_cube_n = 2, g_cube_fixed = -1, g_cube_seen;
 int r_cube_faces_per_frame(void){ g_cube_seen = 1; return g_cube_n; }   /* the race only: pu_cube.c */
 static void cube_adapt(void){
     if (g_cube_fixed < 0){
@@ -1360,27 +1362,34 @@ static void cube_adapt(void){
         if (g_cube_fixed) g_cube_n = g_cube_fixed;
     }
     if (g_cube_fixed) return;
-    static double last, win0, sum, best, block;
-    static int cnt, raised, lg = -1;
+    static double last, win0, sum, period, settle, block;
+    static int cnt, race_frames, good, bad, raised, lg = -1;
     if (lg < 0){ const char *e = getenv("CUBELOG"); lg = e && *e && *e != '0'; }
     const double t = pf_now(), dt = t - last;
     last = t;
     const int seen = g_cube_seen; g_cube_seen = 0;
-    if (!seen || dt <= 0.0 || dt > 250.0){ win0 = t; sum = 0; cnt = 0; raised = 0; return; }   /* no race view, a load or a pause */
+    if (seen && race_frames == 0) settle = t + 3000.0;      /* a race view begins: shaders, uploads */
+    race_frames = seen ? race_frames + 1 : 0;
+    if (dt <= 0.0 || dt > 50.0) return;                      /* a load or a hitch */
     sum += dt; cnt++;
-    if (t - win0 < 1000.0 || cnt < 20) return;
+    if (t - win0 < 500.0) return;
     const double a = sum / cnt;
+    const int n = cnt;
     win0 = t; sum = 0; cnt = 0;
-    best = best > 0.0 ? best * 1.003 : a;          /* the best of late, let go slowly: the scene changes */
+    if (n < 10) return;
+    period = period > 0.0 ? period * 1.001 : a;
+    if (a < period) period = a;
+    if (!seen || t < settle) { good = bad = raised = 0; return; }
     const int was = g_cube_n;
+    good = a <= period * 1.08 ? good + 1 : 0;
+    bad = a > period * 1.2 || a > 20.0 ? bad + 1 : 0;
     if (raised){
         raised = 0;
-        if (a > best * 1.08){ g_cube_n--; block = t + 20000.0; }
+        if (a > period * 1.08){ g_cube_n--; block = t + 30000.0; good = 0; }
     }
-    else if (g_cube_n > 1 && (a > best * 1.15 || a > 20.0)){ g_cube_n--; block = t + 10000.0; }
-    else if (g_cube_n < 6 && t >= block && a < 20.0){ g_cube_n++; raised = 1; }
-    if (a < best) best = a;
-    if (lg && g_cube_n != was) fprintf(stderr, "[cube] %d faces a frame (%.1f fps, best %.1f)\n", g_cube_n, 1000.0 / a, 1000.0 / best);
+    else if (bad >= 2 && g_cube_n > 1){ g_cube_n--; block = t + 15000.0; bad = good = 0; }
+    else if (good >= 4 && g_cube_n < 6 && t >= block){ g_cube_n++; raised = 1; good = 0; }
+    if (lg && g_cube_n != was) fprintf(stderr, "[cube] %d faces a frame (%.1f fps, display %.1f)\n", g_cube_n, 1000.0 / a, 1000.0 / period);
 }
 void r_pageflip(void){
     glass_flush();
