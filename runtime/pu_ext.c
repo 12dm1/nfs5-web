@@ -226,11 +226,38 @@ static int part_row(uint32_t article, uint32_t ident){
     return 0;
 }
 /* 0043A3B0, mov [esi+2C0h], ebx: esi = R3DCar, ebx = the clamped index */
-/* CARLOD=0 (web/src/quality.ts, phones): the game's own tiers; the garage model costs a third of a race frame's work */
+/* CARLOD=0 (web/src/quality.ts, phones): the game's own tiers; the garage model costs a third of a race frame's work.
+ * PERF2: in a race only a car within CARLOD_NEAR metres of the camera (default 25) draws the garage model: the game's top race
+ * tier holds out to 120 m and more, so all the cars drew the garage model across the whole track (Coastal 8 cars at 4K:
+ * ~63 fps with all of them, ~115 fps with none; CARLOD_NEAR=0: every car, as before).  Camera: the engine's view
+ * ([00628130]+10h) at +B8h+54h; the car's position: R3DCar +3C4h. */
+static float car_cam_dist(uint32_t car){
+    const uint32_t engine = MR32(0x00628130u), view = engine ? MR32(engine + 0x10) : 0;
+    if (!view) return 0.0f;
+    float cam[3], p[3];
+    memcpy(cam, g_mem + view + 0xB8 + 0x54, 12); memcpy(p, g_mem + car + 0x3C4, 12);
+    const float dx = p[0] - cam[0], dy = p[1] - cam[1], dz = p[2] - cam[2], d2 = dx * dx + dy * dy + dz * dz;
+    return d2 == d2 ? sqrtf(d2) : 0.0f;
+}
 void pu_car_lod(CPU *c){
-    static int on = -1;
-    if (on < 0){ const char *e = getenv("CARLOD"); on = !(e && *e == '0'); }
+    static int on = -1; static float near_m = 25.0f;
+    if (on < 0){ const char *e = getenv("CARLOD"); on = !(e && *e == '0');
+                 const char *n = getenv("CARLOD_NEAR"); if (n && *n) near_m = (float)atof(n); }
+    { static int lg = -1; static long n;
+      if (lg < 0){ const char *e = getenv("LODLOG"); lg = e && *e == '1'; }
+      if (lg && (++n % 97) == 0){
+          const uint32_t inf = MR32(c->esi + 0xF4);
+          fprintf(stderr, "[lodlog] car %08x index %d detail %d state %d flags %x dist %.1f\n", c->esi, (int)c->ebx, (int)MR32(0x006197C4u),
+                  (int)MR32(0x00657424u), inf ? MR32(inf + 0x52C) : 0xFFFFu, car_cam_dist(c->esi));
+      } }
+    extern int g_cam_capture;
     if (!on) return;
+    if (g_cam_capture){                                        /* a cube face: CUBE_CARLOD tiers coarser than the game's (default 2), */
+        static int step = -1;                                  /* the 7 opponents in every face were most of its cost; eax = the */
+        if (step < 0){ const char *e = getenv("CUBE_CARLOD"); step = e && *e ? atoi(e) : 2; }    /* game's clamp, the last tier */
+        int idx = (int)c->ebx + step; if (idx > (int)c->eax) idx = (int)c->eax; if (idx < (int)c->ebx) idx = (int)c->ebx;
+        c->ebx = (uint32_t)idx; return;
+    }
     const int index = (int)c->ebx, detail = (int)MR32(0x006197C4u), state = (int)MR32(0x00657424u);
     if (detail < 0 || detail > 2) return;
     const uint32_t info = MR32(c->esi + 0xF4);
@@ -242,6 +269,7 @@ void pu_car_lod(CPU *c){
         if (flags & 0x10) idx = index;                         /* its base is 0 already */
         else if ((flags & 8) && detail == 0 && index == (int)MR32(0x005CD5B8u) + 1) idx = 0;    /* AI: base + 1 */
     }
+    if (idx == 0 && idx != index && near_m > 0.0f && MR32(0x0065B928u) == 0 && car_cam_dist(c->esi) > near_m) idx = index;
     c->ebx = (uint32_t)idx;
 }
 /* L3: vertex-animated parts (the 911 rear spoiler grille) have only frame 0 right in LOD 1: the garage never moves them, the raise

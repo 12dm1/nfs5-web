@@ -182,14 +182,34 @@ static int thrash_call_locked(CPU *c, const char *name, uint32_t *r);
  * keep running), and another guest thread may call THRASH meanwhile.  A
  * caller that has to wait releases the guest lock too (no deadlock with the
  * presenting thread, which wants it back). */
-static pthread_mutex_t g_rmx = PTHREAD_MUTEX_INITIALIZER;
 void guest_wait_begin(void); void guest_wait_end(void);
+#ifdef __wasm__
+/* PERF2: a futex lock (0 free, 1 taken, 2 taken with waiters) in place of the pthread mutex: a race makes ~400 k THRASH calls a
+ * second and wasi-libc's uncontended lock + unlock cost ~2 % of the game thread */
+static int32_t g_rlk;
+static void rlock(void){
+    int32_t v = 0;
+    if (__atomic_compare_exchange_n(&g_rlk, &v, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+    guest_wait_begin();
+    if (v != 2) v = __atomic_exchange_n(&g_rlk, 2, __ATOMIC_ACQUIRE);
+    while (v != 0){ __builtin_wasm_memory_atomic_wait32(&g_rlk, 2, -1); v = __atomic_exchange_n(&g_rlk, 2, __ATOMIC_ACQUIRE); }
+    guest_wait_end();
+}
+static void runlock(void){
+    if (__atomic_exchange_n(&g_rlk, 0, __ATOMIC_RELEASE) == 2) __builtin_wasm_memory_atomic_notify(&g_rlk, 1);
+}
+#else
+static pthread_mutex_t g_rmx = PTHREAD_MUTEX_INITIALIZER;
+static void rlock(void){ if (pthread_mutex_trylock(&g_rmx) != 0){ guest_wait_begin(); pthread_mutex_lock(&g_rmx); guest_wait_end(); } }
+static void runlock(void){ pthread_mutex_unlock(&g_rmx); }
+#endif
 int thrash_call(CPU *c, const char *name, uint32_t *r){
     if (strncmp(name, "_THRASH_", 8)) return 0;
-    { void guest_yield_if_long(double); guest_yield_if_long(4.0); }
-    if (pthread_mutex_trylock(&g_rmx) != 0){ guest_wait_begin(); pthread_mutex_lock(&g_rmx); guest_wait_end(); }
+    /* a long run of THRASH calls (texture uploads) hands the guest lock over; the clock is a JS call, so every 8th call only */
+    { static _Thread_local unsigned k; if ((++k & 7u) == 0){ void guest_yield_if_long(double); guest_yield_if_long(4.0); } }
+    rlock();
     int k = thrash_call_locked(c, name, r);
-    pthread_mutex_unlock(&g_rmx);
+    runlock();
     return k;
 }
 static int thrash_call_locked(CPU *c, const char *name, uint32_t *r){
@@ -198,6 +218,8 @@ static int thrash_call_locked(CPU *c, const char *name, uint32_t *r){
     g_calls++;
     *r = 0;
     if (!strncmp(n, "draw", 4)){ g_draws++; if (g_rend) r_draw(n, (const uint32_t *)(g_mem + c->esp)); return 1; }
+    /* the next most frequent calls first (the chain below is ~20 strcmp deep for them) */
+    if (g_rend && !strcmp(n, "settexture@4")){ r_settexture(ARG(0)); return 1; }
     if      (!strcmp(n, "about@0")){ *r = about(); fprintf(stderr, "[thrash] about -> 0x%08x\n", *r); }
     else if (!strcmp(n, "init@0")){
         state_init(); if (!getenv("NO_FMTPATCH")) patch_format_table(); *r = 1;
@@ -237,6 +259,8 @@ static int thrash_call_locked(CPU *c, const char *name, uint32_t *r){
     else if (!strcmp(n, "pageflip@0")){
         g_frames++;
         { void watchdog_on_present(void); watchdog_on_present(); }
+        { static int gr = -1; if (gr < 0){ const char *e = getenv("GILREP"); gr = e && *e == '1'; }
+          if (gr && g_frames % 1500 == 0){ void win32_gil_report(void); fprintf(stderr, "[gilrep] frame %ld\n", g_frames); win32_gil_report(); } }
         if (g_rend) r_pageflip(); else pace();
         if (g_frames <= 3 || g_frames % 300 == 0)
             fprintf(stderr, "[thrash] frame %ld: %llu draws, %u textures, %llu uploads, %ux%u\n", g_frames,
