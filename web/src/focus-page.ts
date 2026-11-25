@@ -26,6 +26,7 @@ const kinds = new Map<number, FocusItem['kind']>([
   [0x005b5ed0, 'tab'],          // overlapping graphical tabs
   [0x005b667c, 'control'],      // radio item
   [0x005b5798, 'control'],      // camera selection
+  [0x005b5808, 'button'],       // FECameraPicture: the options' camera pictures (its click: 004BF920)
   [0x005b5970, 'control'],      // car setting button
   [0x005b5e60, 'slider'],       // changeable indicator bar
   [0x005bac84, 'binding'],      // controller binding
@@ -35,7 +36,7 @@ const kinds = new Map<number, FocusItem['kind']>([
   [0x005b7e0c, 'control'],      // FEKnockoutTrackListControl (its click: 004FA470)
 ]);
 /** controls of their own class that are clicked like buttons but have no goto command attribute at +0x148 */
-const OWN_CLICK = new Set([0x005b8ce4, 0x005b6278, 0x005b7e0c]);
+const OWN_CLICK = new Set([0x005b8ce4, 0x005b6278, 0x005b7e0c, 0x005b5808]);
 
 /** The rows of an open combo (FEComboBox) or of a list box (FEListBox derives from it, same fields), as the game's own hover
  * test (004C6F60) sees them: rows from the first visible one down, each as high as the accessor's row height (+0x68 of the

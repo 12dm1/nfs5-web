@@ -65,7 +65,13 @@ const changed = async (sig, ms = 9000) => {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
     const f = await focus();
-    if (f?.mode !== 0 || sigOf(f?.page) !== sig) return await settled();
+    if (f?.mode !== 0 || sigOf(f?.page) !== sig) {
+      // the bottom bar and the page's own controls animate in at their own pace: settle twice
+      const a = await settled();
+      await sleep(800);
+      const b = await settled();
+      return sigOf(b?.page) === sigOf(a?.page) ? a : b;
+    }
     await sleep(300);
   }
   return await focus();
@@ -133,8 +139,16 @@ async function replay(route) {
     // pages that build in steps (an overlay layer over a page that is still coming up)
     for (let t = 0; t < 8 && !it; t++) { await sleep(1500); f = await settled(3000); it = findItem(f?.page, step); }
     if (!it || !await focusOn(it)) throw new Error('replay: ' + step + ' not found in ' + (f?.page?.items ?? []).map(label).join(' '));
+    const before = sigOf(f.page);
     await press('Enter');
-    f = await skipMovie(await changed(sigOf(f.page)));
+    f = await skipMovie(await changed(before));
+    // a button still animating in takes no click: once more
+    for (let k = 0; k < 2 && sigOf(f?.page) === before; k++) {
+      const again = findItem(f?.page, step);
+      if (!again || !await focusOn(again)) break;
+      await press('Enter');
+      f = await skipMovie(await changed(before));
+    }
   }
   return f;
 }
@@ -158,17 +172,28 @@ async function checkRows(where, f, it) {
   // a combo opens on Enter; a list box takes the arrows after Enter
   if (!await focusOn(it)) { problem(where, `${label(it)} not reachable by arrows`); return null; }
   await press('Enter');
-  await sleep(700);
-  let g = await focus();
-  const open = g.page?.items.find(x => x.id === it.id);
+  // a long list (the merged car list: 87 rows) takes a while to drop down
+  let g, open;
+  for (let t = 0; t < 12; t++) {
+    await sleep(t ? 250 : 700);
+    g = await focus();
+    open = g.page?.items.find(x => x.id === it.id);
+    if (it.kind !== 'combo' || open?.expanded) break;
+  }
   if (it.kind === 'combo' && !open?.expanded) { problem(where, `combo ${label(it)} did not open on Enter`); return null; }
   // ArrowDown many times (the stepper queues them), then the hovered row should be the last
-  await press('ArrowDown', 40);
-  for (let t = 0; t < 120; t++) { await sleep(250); g = await focus(); if (!g?.seeking) break; }
-  const info = await page.evaluate(`(() => { const m = new DataView(game.memory.buffer); const o = ${it.id};
+  const read = () => page.evaluate(`(() => { const m = new DataView(game.memory.buffer); const o = ${it.id};
     const acc = m.getUint32(o + 0x144, true); return { hover: m.getInt32(o + 0x1a8, true), hovered: m.getUint8(o + 0x1a4),
     count: m.getUint32(acc, true) && m.getUint32(m.getUint32(acc, true) + 0x24, true) === 0x4bc4a0 ? m.getInt32(acc + 0x14, true) : -1,
     selected: m.getUint32(m.getUint32(acc, true) + 0x28, true) === 0x4bc4b0 ? m.getInt32(acc + 0x18, true) : -1 }; })()`);
+  let info;
+  // 40 presses, then as many more as the list says are left (the merged car list has 87 rows)
+  for (let round = 0, n = 40; round < 4 && n > 0; round++) {
+    await press('ArrowDown', n);
+    for (let t = 0; t < 120; t++) { await sleep(250); g = await focus(); if (!g?.seeking) break; }
+    info = await read();
+    n = info.count > 0 && info.hovered ? Math.min(120, info.count - 1 - info.hover) : 0;
+  }
   await press('Escape');
   await sleep(600);
   g = await focus();
