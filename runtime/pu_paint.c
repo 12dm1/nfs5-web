@@ -455,8 +455,12 @@ void sub_00446530(CPU *restrict c){
     }
     const uint8_t *nb = g_mem + normals, *ib = indices ? g_mem + indices : NULL;
     uint8_t *out = g_mem + eagl + 0x448u;
+    /* byte indices: at most 256 normals a batch, shared by several vertices (seams): each one's code once a call */
+    uint32_t memo[256]; uint8_t have[256];
+    if (ib) memset(have, 0, sizeof have);
     for (int j = 0; j < count; j++, out += stride){
         const uint32_t src = ib ? ib[j] : (uint32_t)j;
+        if (ib && have[src]){ memcpy(out, &memo[src], 4); continue; }
         float n[3];
         memcpy(n, nb + src * 16u, 12);
         const float c0 = C[0][0] * n[0] + C[0][1] * n[1] + C[0][2] * n[2];
@@ -469,6 +473,7 @@ void sub_00446530(CPU *restrict c){
             code = byte_of(c0 * k) | byte_of(c1 * k) << 8 | byte_of(c2 * k) << 16;
         }
         memcpy(out, &code, 4);
+        if (ib){ memo[src] = code; have[src] = 1; }
     }
 }
 #else
