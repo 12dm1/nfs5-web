@@ -1127,18 +1127,15 @@ static void race_wait_tick(void){
 #endif
 }
 
+#ifdef __wasm__
 /* ---- In the browser the page owns the controls (web/src/input.ts: keyboard, the Gamepad API, touch.ts on a touch screen) and
  * puts the pad straight into the race's input packet (pu_pad_input), so the game's own controller setup has nothing to set up
  * there: the Options screen loses its Controllers tab. A read of FEData/Layouts/optiontabs.lay gets "state=hidden" (same length)
  * in the section of the tab whose panel is ID_controllers_panel; the game knows that state (carsetup.lay uses it).
- * ?env=CONTROLS_TAB=1 keeps the tab. Called by ReadFile (fileio.c) after every read. ---- */
-void pu_patch_read(const char *path, uint32_t buf, long got){
-#ifdef __wasm__
+ * ?env=CONTROLS_TAB=1 keeps the tab. ---- */
+static void patch_option_tabs(char *p, long len){
     static int keep = -1; if (keep < 0){ const char *e = getenv("CONTROLS_TAB"); keep = e && *e && *e != '0'; }
-    if (keep || got <= 0) return;
-    const size_t n = strlen(path);
-    if (n < 14 || strcasecmp(path + n - 14, "optiontabs.lay")) return;
-    char *p = (char *)g_mem + buf; const long len = got;
+    if (keep) return;
     static const char panel[] = "panel=ID_controllers_panel", state[] = "state=normal", sect[] = "[section.";
     for (long i = 0; i + (long)sizeof panel - 1 <= len; i++){
         if (strncasecmp(p + i, panel, sizeof panel - 1)) continue;
@@ -1152,6 +1149,88 @@ void pu_patch_read(const char *path, uint32_t buf, long got){
         }
         return;
     }
+}
+/* ---- RES1: the browser picks the race's resolution (the window's size, web/src/adaptive-res.ts; the race mode is forced in
+ * pu_hooks.c race_mode), so the graphics options lose their Resolution row: in FEData/Layouts/graphicsettings.lay the
+ * row of the Graphics.Resolutions combo box (the box, its label and the row's two rectangles: the sections at its height)
+ * gets "state=hidden", and the rows under it move up a row, so the list has no hole (the panel's last line stays empty). Same-length edits
+ * of the file as it is read. The hidden box is not drawn, not clicked and not in the page's keyboard / pad focus
+ * (web/src/focus-page.ts skips hidden controls). ?env=RES_OPTION=1 keeps the row. ---- */
+typedef struct { long at, end, pos; int x, y; char acc[40]; } LaySection;
+static int lay_sections(char *p, long len, LaySection *out, int max){
+    int n = 0;
+    for (long i = 0; i + 9 <= len && n < max; i++){
+        if (strncmp(p + i, "[section.", 9) || (i > 0 && p[i - 1] != '\n')) continue;
+        if (n) out[n - 1].end = i;
+        LaySection *s = &out[n++];
+        memset(s, 0, sizeof *s); s->at = i; s->end = len; s->pos = -1; s->y = -1;
+    }
+    for (int k = 0; k < n; k++){
+        LaySection *s = &out[k];
+        for (long i = s->at; i < s->end; i++){
+            if (p[i] != '\n' || i + 1 >= s->end) continue;
+            const char *l = p + i + 1;
+            if (!strncmp(l, "pos=", 4)){ s->pos = i + 1 + 4; s->x = atoi(l + 4); const char *cm = memchr(l, ',', (size_t)(s->end - (i + 1))); if (cm) s->y = atoi(cm + 1); }
+            else if (!strncmp(l, "accessor=", 9)){
+                int m = 0; while (m < 39 && i + 1 + 9 + m < s->end && l[9 + m] != '\r' && l[9 + m] != '\n'){ s->acc[m] = l[9 + m]; m++; }
+                s->acc[m] = 0;
+            }
+        }
+    }
+    return n;
+}
+static int lay_state(char *p, const LaySection *s, const char *to){
+    for (long i = s->at; i + 12 <= s->end; i++) if (!strncmp(p + i, "state=normal", 12)){ memcpy(p + i + 6, to, 6); return 1; }
+    return 0;
+}
+static int lay_move_y(char *p, const LaySection *s, int from, int to){
+    if (s->pos < 0) return 0;
+    char *cm = memchr(p + s->pos, ',', 8);
+    if (!cm) return 0;
+    char a[8], b[8];
+    snprintf(a, sizeof a, "%d", from); snprintf(b, sizeof b, "%d", to);
+    if (strlen(a) != strlen(b) || strncmp(cm + 1, a, strlen(a))) return 0;
+    memcpy(cm + 1, b, strlen(b));
+    return 1;
+}
+static void patch_graphics_settings(char *p, long len){
+    static int keep = -1; if (keep < 0){ const char *e = getenv("RES_OPTION"); keep = e && *e && *e != '0'; }
+    if (keep) return;
+    LaySection sec[64];
+    const int n = lay_sections(p, len, sec, 64);
+    int res = -1, last = -1, next = -1;
+    for (int k = 0; k < n; k++){
+        if (!strcmp(sec[k].acc, "Graphics.Resolutions")) res = k;
+        if (!strcmp(sec[k].acc, "Graphics.ViewDistance")) last = k;
+    }
+    if (res < 0 || last < 0 || sec[res].y < 0 || sec[last].y <= sec[res].y){ fprintf(stderr, "[options] graphicsettings.lay: rows not as expected, left alone\n"); return; }
+    const int ry = sec[res].y, ly = sec[last].y;
+    for (int k = 0; k < n; k++)       /* the next row's box: the row step */
+        if (sec[k].acc[0] && sec[k].y > ry && (next < 0 || sec[k].y < next)) next = sec[k].y;
+    const int step = next - ry;
+    int hidden = 0, moved = 0;
+    /* the rows' column (left of x 300): the combo box at y, its label at y+2, the two rectangles at y */
+    for (int k = 0; k < n; k++){
+        const int y = sec[k].y;
+        if (y < 0 || sec[k].x >= 300) continue;
+        if (y == ry || y == ry + 2) hidden += lay_state(p, &sec[k], "hidden");
+        else if (y > ry + 2 && y <= ly + 2) moved += lay_move_y(p, &sec[k], y, y - step);
+    }
+    fprintf(stderr, "[options] graphics options: the Resolution row hidden (%d controls), the rows under it moved up %d (%d controls)\n", hidden, step, moved);
+}
+#endif
+static int path_is(const char *path, size_t n, const char *name){     /* the file's name, any folder */
+    const size_t k = strlen(name);
+    return n >= k && !strcasecmp(path + n - k, name) && (n == k || path[n - k - 1] == '\\' || path[n - k - 1] == '/');
+}
+/* Called by ReadFile (fileio.c) after every read: same-length edits of a few menu layouts as they are read. */
+void pu_patch_read(const char *path, uint32_t buf, long got){
+#ifdef __wasm__
+    if (got <= 0) return;
+    const size_t n = strlen(path);
+    char *p = (char *)g_mem + buf;
+    if (path_is(path, n, "optiontabs.lay")) patch_option_tabs(p, got);
+    else if (path_is(path, n, "graphicsettings.lay")) patch_graphics_settings(p, got);
 #else
     (void)path; (void)buf; (void)got;
 #endif
