@@ -412,11 +412,19 @@ static void flush_verts(DV *v, int n, int topo){
     }
     if (g_gov_n && v[0].w == 1.0f && (n < 2 || v[1].w == 1.0f) && (n < 3 || v[2].w == 1.0f)) glass_flush();   /* 2D: the view is over */
     DrawState d; game_state(&d, topo);
+    /* the intglass page is a global texture: the showroom's wall windows are drawn with it too (a band across the screen; the
+     * reflection darkened them at grazing angles). A car's vertices carry its normals in the specular dword (pu_paint.c), a
+     * room's do not. */
+    if (d.paint == 3){
+        int car = 0;     /* any vertex: a clipped corner can lack its normal */
+        for (int i = 0; i < n && !car; i++) car = (v[i].specular & 0xFFu) != 0;
+        if (!car){ d.paint = 0; d.paint_tex = 0; }
+    }
     { static int lg = -1; if (lg < 0){ const char *e = getenv("GOVLOG"); lg = e && *e && *e != '0'; }
-      if (lg && g_frames % 600 == 300 && (g_gov_n || d.paint == 3)){
-          float y0 = v[0].y, y1 = v[0].y; for (int i = 1; i < n; i++){ y0 = v[i].y < y0 ? v[i].y : y0; y1 = v[i].y > y1 ? v[i].y : y1; }
-          fprintf(stderr, "[govlog] frame %ld %s tex %d paint %d blend %d zw %d zcmp %d cull %d n %d y %.0f..%.0f w %.3f pending %d va %02x\n", g_frames,
-                  d.paint == 3 ? "GLASS" : "after", d.tex, d.paint, g_blend, g_zwrite, d.zcmp, d.cull, n, y0, y1, v[0].w, g_gov_n, v[0].color >> 24); } }
+      if (lg && g_frames % 60 == 30 && (g_gov_n || d.paint == 3)){
+          float y0 = v[0].y, y1 = v[0].y, x0 = v[0].x, x1 = v[0].x; for (int i = 1; i < n; i++){ y0 = v[i].y < y0 ? v[i].y : y0; y1 = v[i].y > y1 ? v[i].y : y1; x0 = v[i].x < x0 ? v[i].x : x0; x1 = v[i].x > x1 ? v[i].x : x1; }
+          fprintf(stderr, "[govlog] frame %ld %s tex %d paint %d blend %d zw %d zcmp %d cull %d n %d x %.0f..%.0f y %.0f..%.0f w %.3f pending %d va %02x sp %08x\n", g_frames,
+                  d.paint == 3 ? "GLASS" : "after", d.tex, d.paint, g_blend, g_zwrite, d.zcmp, d.cull, n, x0, x1, y0, y1, v[0].w, g_gov_n, v[0].color >> 24, v[0].specular); } }
     /* the glass pass waits only for the car's own interior (drawn with depth writes after some windows); a draw without depth
      * writes (the menus' see-through arcs and panels, smoke, decals) comes after it, or the reflection covered them where a
      * window passed behind (the quick race screen's side panels blinked as the car turned) */
