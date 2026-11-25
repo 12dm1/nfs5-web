@@ -221,7 +221,7 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   const stepRow = async (itemId: number, windowId: number, dir: number, scrolls = true): Promise<void> => {
     let s = rowsOf(itemId, windowId);
     if (!s) return;
-    const x = s.item.x + s.item.width * 0.4;
+    const x = s.item.valueX !== undefined ? (s.item.valueX + s.item.x + s.item.width) / 2 : s.item.x + s.item.width * 0.4;
     let r = s.rows;
     const h = r.rowHeight || 14, lo = r.top + 1, hi = r.top + r.height - 1;
     const clampY = (y: number) => Math.max(lo, Math.min(hi, y));

@@ -5,7 +5,9 @@ export interface FocusItem extends FocusRect { id: number; kind: 'button' | 'con
   /** a button of the page's own (no game object): the key it sends to the game, its caption */
   key?: string; label?: string;
   /** a slider moved by dragging its thumb (FEHorizontalSlider): the thumb's left edge */
-  thumbX?: number; }
+  thumbX?: number;
+  /** a combo's caption takes no clicks: it opens (and its rows hover) right of x + its label width (+0x1F0, 004C6AF0) */
+  valueX?: number; }
 /** spaceCloses: a race page that Space closes (Enter / pad A without a focused item send Space); padBack: the key pad B
  * and Start send instead of Escape */
 export interface FocusPage { window: number; items: FocusItem[]; spaceCloses?: boolean; padBack?: string; }
@@ -190,6 +192,8 @@ export function readFocusPage(buffer: ArrayBufferLike): FocusPage | null {
         command = Array.from({ length: stop - start }, (_, n) => String.fromCharCode(m.getUint8(start + n))).join('');
       }
     }
+    const label = kind === 'combo' && inRange(obj, 0x1f4) ? i(obj + 0x1f0) : 0;
+    const valueX = label > 0 && label < width - 4 ? x + label : undefined;
     const expanded = (kind === 'combo' || kind === 'color') && !!(u(obj + 0x10c) & 0x40);
     const selector = kind === 'combo' || kind === 'color';
     const popupHeight = selector && inRange(obj, 0x1c8) ? i(obj + 0x1c4) : 0;
@@ -220,7 +224,7 @@ export function readFocusPage(buffer: ArrayBufferLike): FocusPage | null {
     }
     const capturing = kind === 'binding' && !!(flags & 0x40);
     items.push({ id: obj, kind, x, y, width, height, command, expanded, capturing, popupHeight, hovered, customEditor, customRects, customHsv, scrollUp, scrollDown, sliderValue, sliderCount,
-      thumbX: thumbX === undefined ? undefined : x + thumbX });
+      thumbX: thumbX === undefined ? undefined : x + thumbX, valueX });
   }
   return true;
   };
@@ -239,6 +243,7 @@ export function moveFocus(page: FocusPage, current: number, direction: FocusDire
 /** Pick a point not covered by an earlier tab in the game's hit-test order. */
 export function focusActivationPoint(page: FocusPage, item: FocusItem): { x: number; y: number } {
   const center = { x: item.x + item.width / 2, y: item.y + item.height / 2 };
+  if (item.valueX !== undefined) return { x: (item.valueX + item.x + item.width) / 2, y: center.y };
   if (item.kind !== 'tab') return center;
   const index = page.items.findIndex(x => x.id === item.id);
   if (index < 0) return center;

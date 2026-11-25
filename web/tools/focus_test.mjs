@@ -37,6 +37,12 @@ put(combo,0x5b5c24); put(combo+0x10c,0x40); put(combo+0x1b8,slider); put(combo+0
 for (const [offset,value] of [[0x11c,472],[0x120,212],[0x124,16],[0x128,13],[0x12c,472],[0x130,65],[0x134,16],[0x138,13]]) put(slider+offset,value);
 page=readFocusPage(memory);
 assert.deepEqual(page.items[1].scrollDown,{x:472,y:212,width:16,height:13},'expanded combo exposes its scrollbar arrow');
+{ const c=page.items[1], w=c.width;
+  assert.equal(c.valueX,undefined,'a combo without a label width has no value area');
+  put(combo+0x1f0,Math.round(w*0.6)); const v=readFocusPage(memory).items[1];
+  assert.equal(v.valueX,v.x+Math.round(w*0.6),'a combo caption wider than half the box moves the value area');
+  assert.equal(focusActivationPoint(readFocusPage(memory),v).x,(v.valueX+v.x+w)/2,'a combo is clicked in its value area, right of the caption');
+  put(combo+0x1f0,w+10); assert.equal(readFocusPage(memory).items[1].valueX,undefined,'a label wider than the box is ignored'); put(combo+0x1f0,0); }
 put(slider,0); assert.equal(readFocusPage(memory).items[1].scrollDown,undefined,'unknown slider class is rejected');
 put(slider,0x5b6a64); put(combo,0x5b5ba8); view.setUint8(0x65b710,1);
 for (const [base,rect] of [[0x224,[107,110,257,205]],[0x234,[107,95,222,103]],[0x274,[106,211,258,221]],[0x254,[106,226,179,244]],[0x264,[185,226,258,244]]]) rect.forEach((v,n)=>put(combo+base+n*4,v));
