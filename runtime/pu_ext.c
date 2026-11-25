@@ -327,6 +327,7 @@ void sub_004152e0(CPU *restrict c){      /* the race loop: its screens are the r
     g_race_depth++;
     sub_004152e0_orig(c);
     g_race_depth--;
+    { void pu_race_camera_end(CPU *c); pu_race_camera_end(c); }
 }
 /* 0 frontend, 1 race menu (pause, results, options), 2 driving */
 int pu_pad_mode(void){
@@ -438,6 +439,76 @@ static uint32_t guest_string(const char *text){
     const uint32_t a = gheap_alloc(1, (uint32_t)n, 1);
     memcpy(g_mem + a, text, n);
     return a;
+}
+/* ---- CAM1: the race camera the player picks with the camera key becomes the profile's camera, so the next race and the
+ * next session start with it.  The options' cameras page (cameras.lay, FECameraSelect 004BF2A0) holds the cycle the camera
+ * key steps through: "Camera 1".."Camera 4" (accessors Camera.1..4, a camera position each: 0 bumper, 1 bumper 2, 2 chase
+ * near, 3 chase far; the defaults 0..3), Camera.Current is only the page's selected slot.  The race setup sends the four to
+ * the player's car (004EEDA0, setup field 148h) and the race starts with slot 1; view 0 starts with carInfo[0].CAMERA
+ * (00462F30 -> 00465790) and the key changes view 0's camera (00413960 -> 00465790(0, camera)).
+ * So a pick turns the cycle round until the picked position is Camera 1, the order kept (pick 2 of 0,1,2,3 -> 2,3,0,1), the
+ * same values the page writes.  The profile's accessors are gone during the race (004B7AB0 finds none), so the pick waits for
+ * the frontend's first tick after the race (004D2B80), is written there through the accessors' own set (vfn 2Ch) and the
+ * profile saved as the game saves it (00510AF0 -> 004DEDA0 "Saving for %s"); the cloud sync sends that save like any other.
+ * Only view 0 inside the race loop (004152E0) counts, and only a change after the race's first camera (a key press, not
+ * the start): the intro (14), the finish camera (10) and the network spectator camera (10) are not 0..3, and a replay (its
+ * own pass of the race loop, mode 2) is skipped.  carInfo[0].CAMERA follows the pick (a restart keeps it), not in a network
+ * race.  CAMERA_KEEP=0 turns it off, CAMLOG=1 logs. ---- */
+#define CAM_VIEW0      0x00627F3Cu     /* view 0's camera, 16 bit (0x10C per view) */
+#define CAM_SLOT1      0x005D7AD8u     /* "Camera.1"; "Camera.2" .. "Camera.4" at -0Ch steps */
+#define CAM_VTABLE     0x005B52E4u     /* their class: the list accessor of 004BC1F0 (rows +14h, row +18h, set vfn 2Ch) */
+#define FIND_ACCESSOR  0x004B7AB0u
+#define SAVE_PROFILE   0x00510AF0u     /* the current player's profile (.sav) */
+#define CAR_CAMERA     (CARS_INFO + 0x208u)  /* carInfo .CAMERA (16 bit) */
+#define LOOP_MODE      0x005E99F4u     /* the race loop's mode, copied from 00657424 by 00413CF0: 2 = a replay */
+static int g_cam_prev = -1, g_cam_pick = -1;
+static int cam_on(void){ static int on = -1; if (on < 0){ const char *e = getenv("CAMERA_KEEP"); on = !(e && *e == '0'); } return on; }
+static int cam_log(void){ static int on = -1; if (on < 0){ const char *e = getenv("CAMLOG"); on = e && *e && *e != '0'; } return on; }
+void pu_race_camera(CPU *c){
+    (void)c;
+    if (!cam_on() || g_race_depth <= 0 || MR32(LOOP_MODE) == 2u) return;      /* 2: a replay (00413CF0 loads replay.rpl) */
+    const int cur = (int16_t)MR16(CAM_VIEW0);
+    if (cur < 0 || cur > 3 || cur == g_cam_prev) return;
+    if (g_cam_prev >= 0){
+        g_cam_pick = cur;
+        if (MR32(0x006573E8u) != 3u) MR16(CAR_CAMERA) = (uint16_t)cur;
+        if (cam_log()) fprintf(stderr, "[camera] race camera %d picked (was %d)\n", cur, g_cam_prev);
+    } else if (cam_log()) fprintf(stderr, "[camera] race starts with camera %d (carInfo %d)\n", cur, (int16_t)MR16(CAR_CAMERA));
+    g_cam_prev = cur;
+}
+void pu_race_camera_end(CPU *c){
+    (void)c;
+    if (cam_log()) fprintf(stderr, "[camera] race loop left, pick %d" "\n", g_cam_pick);
+    g_cam_prev = -1;
+}
+/* the frontend's tick (004D2B80, a thiscall entry: eax and edx are free) */
+void pu_race_camera_fe(CPU *c){
+    if (g_cam_pick < 0 || g_race_depth > 0) return;
+    uint32_t acc[4];
+    for (int i = 0; i < 4; i++){
+        const uint32_t name = CAM_SLOT1 - 0x0Cu * (uint32_t)i;
+        acc[i] = guest_call(c, FIND_ACCESSOR, 0, &name, 1);
+        if (!acc[i]) return;                                  /* not yet: the profile's accessors come with the frontend */
+    }
+    const int pick = g_cam_pick;
+    g_cam_pick = -1;
+    int had[4], k = -1;
+    for (int i = 0; i < 4; i++){
+        if (MR32(acc[i]) != CAM_VTABLE || MR32(acc[i] + 0x14) != 4u){ fprintf(stderr, "[camera] Camera.%d is not the 4-row list (vtable %08x): not written\n", i + 1, MR32(acc[i])); return; }
+        had[i] = (int)MR32(acc[i] + 0x18);
+        if (k < 0 && had[i] == pick) k = i;
+    }
+    if (k == 0){ if (cam_log()) fprintf(stderr, "[camera] the profile's Camera 1 is already %d\n", pick); return; }
+    int want[4];
+    for (int i = 0; i < 4; i++) want[i] = k > 0 ? had[(i + k) & 3] : i == 0 ? pick : had[i];
+    for (int i = 0; i < 4; i++){
+        const uint32_t v = (uint32_t)want[i];
+        if (had[i] != want[i]) guest_call(c, MR32(CAM_VTABLE + 0x2C), acc[i], &v, 1);
+        if ((int)MR32(acc[i] + 0x18) != want[i]){ fprintf(stderr, "[camera] Camera.%d did not take %d: not saved\n", i + 1, want[i]); return; }
+    }
+    guest_call(c, SAVE_PROFILE, 0, NULL, 0);
+    fprintf(stderr, "[camera] picked in the race: camera %d; the profile's cameras %d,%d,%d,%d -> %d,%d,%d,%d, profile saved\n",
+            pick, had[0], had[1], had[2], had[3], want[0], want[1], want[2], want[3]);
 }
 typedef struct { CPU *c; uint32_t self; } OppCtx;
 static void opp_set_slot(void *ctx, int slot, const uint8_t *rec, uint32_t ext, uint32_t stripe, uint32_t trim, uint32_t extra, int package, int number){
