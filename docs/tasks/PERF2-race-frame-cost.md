@@ -8,6 +8,10 @@ A 2000 game on an RTX 3060 runs at 37-70 fps in a race in the browser (the user'
 hold the display's rate (147 Hz) with room to spare. Custom mid-poly car models make it much worse (the user: "huge
 stalls"), so the cost grows with the vertex count, not only with the track.
 
+**The stalls with mid-poly models are the original game's own**: the user sees them in the stock PC game too (no
+wrapper, no browser). So the root is in the game's code (its per-vertex CPU work on cars), which the browser port
+inherits and makes slower (lifted x86 in wasm); our own additions only add to it.
+
 The user's run (local dev server, `?log=1`, one cube face a frame):
 
 - canvas 3840x1906, display ~147 Hz, race 37-70 fps (`[fps]` every 2 s), 800-2100 draws and 25-125 k vertices a
@@ -30,13 +34,15 @@ layer `00446530`, the clipper appending corners past the model's vertices), all 
 
 ## Suspects to measure first
 
-1. **Our own per-vertex work on car draws** (runtime/web/r_web.c): `car_clip_normals` looks up every clipped corner
+1. **The game's CPU T&L on cars** (`0043C830` and below): per-vertex transform / light / clip in the game's own code,
+   which stalls on mid-poly models even in the stock PC game. Find the hot functions (a sampling profile of the game
+   worker; count calls and vertices per function), then decide: a C override of the hot loop (the per-vertex math
+   written for wasm SIMD), or let the GPU do it (send the model-space vertices and the matrix instead of the game's
+   screen-space ones).
+2. **Our own per-vertex work on car draws** (runtime/web/r_web.c): `car_clip_normals` looks up every clipped corner
    in all the model's vertices (`for j < orig`), O(clipped x vertices) per draw: harmless at 186 vertices, quadratic
-   on a mid-poly model. `pv_same`, `cs_page` / `cs_apply`, the `g_pv_uv` / `g_pv_xy` copies, `conv` per vertex,
+   on a mid-poly model (it adds to the game's own cost, it is not the root). `pv_same`, `cs_page` / `cs_apply`, the `g_pv_uv` / `g_pv_xy` copies, `conv` per vertex,
    `glass_log` / `GDUMP` checks per draw. pu_paint.c `sub_00446530` (the normals into the specular dword) per vertex.
-2. **The game's CPU T&L** on cars (`0043C830` and below): per-vertex transform/light/clip in lifted code. Find the
-   hot functions (a sampling profile of the game worker), then decide: an override in C, or let the GPU do it (send
-   the model-space vertices and the matrix instead of the game's screen-space ones).
 3. **Draw-call and state cost**: one `C_DRAW` per game primitive batch; `emit_state` builds a 64-float uniform block
    and compares it on every draw; `paint_uniform` reads the camera on every painted draw.
 4. **GPU at 4K**: `fs_car` (flakes, clear coat, cube), MSAA 4x, the glass pass. Compare the same race at 640x480
