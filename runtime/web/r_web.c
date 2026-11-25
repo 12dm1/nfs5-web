@@ -417,6 +417,10 @@ static void flush_verts(DV *v, int n, int topo){
           float y0 = v[0].y, y1 = v[0].y; for (int i = 1; i < n; i++){ y0 = v[i].y < y0 ? v[i].y : y0; y1 = v[i].y > y1 ? v[i].y : y1; }
           fprintf(stderr, "[govlog] frame %ld %s tex %d paint %d blend %d zw %d zcmp %d cull %d n %d y %.0f..%.0f w %.3f pending %d va %02x\n", g_frames,
                   d.paint == 3 ? "GLASS" : "after", d.tex, d.paint, g_blend, g_zwrite, d.zcmp, d.cull, n, y0, y1, v[0].w, g_gov_n, v[0].color >> 24); } }
+    /* the glass pass waits only for the car's own interior (drawn with depth writes after some windows); a draw without depth
+     * writes (the menus' see-through arcs and panels, smoke, decals) comes after it, or the reflection covered them where a
+     * window passed behind (the quick race screen's side panels blinked as the car turned) */
+    if (g_gov_n && !g_zwrite && d.paint != 3) glass_flush();
     /* HZ6: a keyed cutout in the sorted queue goes hard only while every vertex is opaque */
     if (d.hard && !g_zwrite)
         for (int i = 0; i < n; i++) if ((v[i].color >> 24) < 0xF8){ d.hard = 0; break; }

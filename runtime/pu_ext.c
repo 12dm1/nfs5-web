@@ -467,21 +467,41 @@ static int cam_on(void){ static int on = -1; if (on < 0){ const char *e = getenv
 static int cam_log(void){ static int on = -1; if (on < 0){ const char *e = getenv("CAMLOG"); on = e && *e && *e != '0'; } return on; }
 void pu_race_camera(CPU *c){
     (void)c;
+    { static int lastv = -99;
+      const int v0 = (int16_t)MR16(CAM_VIEW0);
+      if (cam_log() && v0 != lastv){ lastv = v0; fprintf(stderr, "[camera] view 0 camera %d, the car's cycle %d,%d,%d,%d\n", v0,
+          (int)MR32(CAR_CAMERA), (int)MR32(CAR_CAMERA + 4u), (int)MR32(CAR_CAMERA + 8u), (int)MR32(CAR_CAMERA + 12u)); } }
     if (!cam_on() || g_race_depth <= 0 || MR32(LOOP_MODE) == 2u) return;      /* 2: a replay (00413CF0 loads replay.rpl) */
     const int cur = (int16_t)MR16(CAM_VIEW0);
-    if (cur < 0 || cur > 3 || cur == g_cam_prev) return;
+    if (cur == g_cam_prev) return;
+    /* only a camera of the car's cycle (the intro 14, the finish and spectator 10 are not in it); nothing is written in the
+     * race: the cycle is carInfo +208h..+214h (4 x int32, the race starts with the first) and the key steps through it */
+    int in = 0;
+    for (int i = 0; i < 4; i++) in |= (int)MR32(CAR_CAMERA + 4u * (uint32_t)i) == cur;
+    if (!in) return;
     if (g_cam_prev >= 0){
         g_cam_pick = cur;
-        if (MR32(0x006573E8u) != 3u) MR16(CAR_CAMERA) = (uint16_t)cur;
         if (cam_log()) fprintf(stderr, "[camera] race camera %d picked (was %d)\n", cur, g_cam_prev);
-    } else if (cam_log()) fprintf(stderr, "[camera] race starts with camera %d (carInfo %d)\n", cur, (int16_t)MR16(CAR_CAMERA));
+    } else if (cam_log()) fprintf(stderr, "[camera] race starts with camera %d\n", cur);
     g_cam_prev = cur;
 }
+/* the race loop is left (the end, a restart): a restart starts with the car's cycle as it is, so in a local race the cycle turns
+ * round to the pick there, the order kept */
 void pu_race_camera_end(CPU *c){
     (void)c;
     if (cam_log()) fprintf(stderr, "[camera] race loop left, pick %d" "\n", g_cam_pick);
+    if (g_cam_pick >= 0 && MR32(0x006573E8u) != 3u && MR32(LOOP_MODE) != 2u){
+        int cyc[4], k = -1;
+        for (int i = 0; i < 4; i++){ cyc[i] = (int)MR32(CAR_CAMERA + 4u * (uint32_t)i); if (k < 0 && cyc[i] == g_cam_pick) k = i; }
+        if (k > 0){
+            for (int i = 0; i < 4; i++) MR32(CAR_CAMERA + 4u * (uint32_t)i) = (uint32_t)cyc[(i + k) & 3];
+            if (cam_log()) fprintf(stderr, "[camera] the car's cycle %d,%d,%d,%d turned to start with %d\n", cyc[0], cyc[1], cyc[2], cyc[3], g_cam_pick);
+        }
+    }
     g_cam_prev = -1;
 }
+/* the options' rows (Camera.1..4: 0 bumper, 1 cockpit, 2 chase near, 3 chase far) and the race's cameras: row 3 is camera 7 */
+static int cam_row(int camera){ return camera == 7 ? 3 : camera >= 0 && camera <= 2 ? camera : -1; }
 /* the frontend's tick (004D2B80, a thiscall entry: eax and edx are free) */
 void pu_race_camera_fe(CPU *c){
     if (g_cam_pick < 0 || g_race_depth > 0) return;
@@ -491,8 +511,9 @@ void pu_race_camera_fe(CPU *c){
         acc[i] = guest_call(c, FIND_ACCESSOR, 0, &name, 1);
         if (!acc[i]) return;                                  /* not yet: the profile's accessors come with the frontend */
     }
-    const int pick = g_cam_pick;
+    const int pick = cam_row(g_cam_pick);
     g_cam_pick = -1;
+    if (pick < 0){ fprintf(stderr, "[camera] the picked camera has no options row: not saved\n"); return; }
     int had[4], k = -1;
     for (int i = 0; i < 4; i++){
         if (MR32(acc[i]) != CAM_VTABLE || MR32(acc[i] + 0x14) != 4u){ fprintf(stderr, "[camera] Camera.%d is not the 4-row list (vtable %08x): not written\n", i + 1, MR32(acc[i])); return; }
