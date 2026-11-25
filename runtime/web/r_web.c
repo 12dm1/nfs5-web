@@ -1346,14 +1346,17 @@ void r_reshape(int nw){
     thrash_screen_width(nw);
     g_lw = nw; g_s_video = 0; g_clipvalid = 0;
 }
-/* The race's reflection cube: faces drawn a frame (runtime/pu_cube.c), by the frame rate. One face a frame refreshes the cube
- * 10 times a second at 60 fps; a fast PC has room for more. The target is the display's rate, measured all the time (the menus
- * hold it): the best half-second mean frame interval, let go slowly. In a race, after 3 s of settling, one more face is tried
- * while 2 s in a row keep within 8 % of it; a try that costs more goes back (no retry for 30 s); 20 % under it for 1 s (or
- * under 50 fps) drops one (no retry for 15 s). Frames over 50 ms (loads, hitches) are left out. The count carries over to the next race.
- * ?env=CUBE_FACES=<1..6> fixes it, CUBELOG=1 logs the changes. */
+/* The race's reflection cube: faces drawn a frame (runtime/pu_cube.c), by the game thread's spare time. One face a frame
+ * refreshes the cube 7 times a second at 45 fps. A face is drawn on the game thread (the scene's traversal once more, into
+ * 256x256), so its cost is the thread's time; the thread's spare time is its wait for the page's present (the display's rate
+ * or the GPU at 4K). Every half second: one more face while the wait covers 1.5 faces for 2 s; a raise that costs over 10 % of
+ * the frame rate goes back (no retry for 30 s); no wait (the thread is the limit) with the rate under the display's drops one.
+ * Never under ~15 cubes a second (up to 3 faces for it). The first 3 s of a race view are left alone, frames over 50 ms left out; the count carries over to the next race.
+ * ?env=CUBE_FACES=<1..6> fixes it, CUBELOG=1 logs every 2 s. */
 static int g_cube_n = 2, g_cube_fixed = -1, g_cube_seen;
+static double g_cube_face_ms, g_cube_wait_ms;
 int r_cube_faces_per_frame(void){ g_cube_seen = 1; return g_cube_n; }   /* the race only: pu_cube.c */
+void r_cube_face_cost(double ms){ g_cube_face_ms = g_cube_face_ms > 0.0 ? g_cube_face_ms * 0.9 + ms * 0.1 : ms; }
 static void cube_adapt(void){
     if (g_cube_fixed < 0){
         const char *e = getenv("CUBE_FACES"); g_cube_fixed = e && *e ? atoi(e) : 0;
@@ -1361,35 +1364,39 @@ static void cube_adapt(void){
         e = getenv("CUBE_EVERY"); if (e && atoi(e) > 1) g_cube_fixed = 1;      /* the phones' light profile */
         if (g_cube_fixed) g_cube_n = g_cube_fixed;
     }
-    if (g_cube_fixed) return;
-    static double last, win0, sum, period, settle, block;
+    static double last, win0, sum, wsum, period, settle, block, before, logt;
     static int cnt, race_frames, good, bad, raised, lg = -1;
     if (lg < 0){ const char *e = getenv("CUBELOG"); lg = e && *e && *e != '0'; }
-    const double t = pf_now(), dt = t - last;
+    const double t = pf_now(), dt = t - last, wait = g_cube_wait_ms;
     last = t;
     const int seen = g_cube_seen; g_cube_seen = 0;
     if (seen && race_frames == 0) settle = t + 3000.0;      /* a race view begins: shaders, uploads */
     race_frames = seen ? race_frames + 1 : 0;
     if (dt <= 0.0 || dt > 50.0) return;                      /* a load or a hitch */
-    sum += dt; cnt++;
+    sum += dt; wsum += wait; cnt++;
     if (t - win0 < 500.0) return;
-    const double a = sum / cnt;
+    const double a = sum / cnt, w = wsum / cnt;
     const int n = cnt;
-    win0 = t; sum = 0; cnt = 0;
+    win0 = t; sum = 0; wsum = 0; cnt = 0;
     if (n < 10) return;
-    period = period > 0.0 ? period * 1.001 : a;
+    period = period > 0.0 ? period * 1.001 : a;              /* the display's rate: the best of late */
     if (a < period) period = a;
-    if (!seen || t < settle) { good = bad = raised = 0; return; }
+    if (lg && seen && t - logt >= 2000.0){ logt = t; fprintf(stderr, "[cube] %d faces: %.1f fps (display %.1f), wait %.2f ms a frame, a face %.2f ms\n", g_cube_n, 1000.0 / a, 1000.0 / period, w, g_cube_face_ms); }
+    if (g_cube_fixed || !seen || t < settle){ good = bad = raised = 0; return; }
     const int was = g_cube_n;
-    good = a <= period * 1.08 ? good + 1 : 0;
-    bad = a > period * 1.2 || a > 20.0 ? bad + 1 : 0;
+    const double face = g_cube_face_ms > 0.0 ? g_cube_face_ms : 1.0;
+    good = w > face * 1.5 + 0.3 ? good + 1 : 0;
+    bad = w < 0.2 && a > period * 1.1 ? bad + 1 : 0;
     if (raised){
         raised = 0;
-        if (a > period * 1.08){ g_cube_n--; block = t + 30000.0; good = 0; }
+        if (a > before * 1.10){ g_cube_n--; block = t + 30000.0; good = 0; }
     }
     else if (bad >= 2 && g_cube_n > 1){ g_cube_n--; block = t + 15000.0; bad = good = 0; }
-    else if (good >= 4 && g_cube_n < 6 && t >= block){ g_cube_n++; raised = 1; good = 0; }
-    if (lg && g_cube_n != was) fprintf(stderr, "[cube] %d faces a frame (%.1f fps, display %.1f)\n", g_cube_n, 1000.0 / a, 1000.0 / period);
+    else if (good >= 4 && g_cube_n < 6 && t >= block){ g_cube_n++; raised = 1; good = 0; before = a; }
+    /* at least ~15 whole cubes a second (90 faces), at most 3 faces for it: a slow frame rate does not freeze the reflection */
+    int lo = (int)(a * 0.09 + 0.95); lo = lo < 1 ? 1 : lo > 3 ? 3 : lo;
+    if (g_cube_n < lo) g_cube_n = lo;
+    if (lg && g_cube_n != was) fprintf(stderr, "[cube] -> %d faces a frame (%.1f fps, wait %.2f ms, a face %.2f ms)\n", g_cube_n, 1000.0 / a, w, face);
 }
 void r_pageflip(void){
     glass_flush();
@@ -1403,13 +1410,14 @@ void r_pageflip(void){
     int pub = __atomic_load_n(&g_ring.presents_pub, __ATOMIC_ACQUIRE);
     int done = __atomic_load_n(&g_ring.presents_done, __ATOMIC_ACQUIRE);
     if (g_pf_on < 0){ const char *e = getenv("PERFSTAT"); g_pf_on = e && *e && *e != '0'; }
-    const double w0 = g_pf_on > 0 ? pf_now() : 0;
+    const double w0 = g_pf_on > 0 ? pf_now() : 0, w1 = pf_now();
     if (pub - done > 1){
         guest_wait_begin();
         while (pub - (done = __atomic_load_n(&g_ring.presents_done, __ATOMIC_ACQUIRE)) > 1)
             __builtin_wasm_memory_atomic_wait32((int32_t *)&g_ring.presents_done, done, 100000000LL);
         guest_wait_end();
     }
+    g_cube_wait_ms = pf_now() - w1;
     cube_adapt();
     if (g_pf_on > 0){
         const double t = pf_now(), wp = t - w0;

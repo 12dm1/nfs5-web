@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "cpu.h"
 #include "decls.h"
 
@@ -32,11 +33,16 @@ static const float k_rot[6][9] = {
 };
 
 int r_cube_faces_per_frame(void);
+void r_cube_face_cost(double ms);
 static void cube_face(CPU *c);
 /* at 00468AA6, after the mirror pass: edi = the race renderer; r_web.c picks how many faces (1..6) by the frame rate */
 void pu_cube_capture(CPU *c){
     const int n = r_cube_faces_per_frame();
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int i = 0; i < n; i++) cube_face(c);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    r_cube_face_cost(((t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6) / n);
 }
 static void cube_face(CPU *c){
     static int on = -1, face, every = 1, skip;
