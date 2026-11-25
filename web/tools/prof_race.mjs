@@ -18,7 +18,11 @@ const logFile = arg('log', '') ? fs.createWriteStream(arg('log', '')) : null;
 const GREP = new RegExp(arg('grep', 'TRAP|pageerror|\\[perf game\\]|\\[fps\\]|\\[cube\\]'));
 const t0 = Date.now();
 const NOPROF = process.argv.includes('--noprof'), JSFLAGS = arg('jsflags', '');
-const onLine = (line) => { logFile?.write(line + '\n'); if (GREP.test(line)) console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}] ${line.slice(0, 220)}`); };
+// --at <regex> [--delay s]: the window starts <delay> s after the first log line that matches (the race's start, a
+// repeatable spot) instead of --warm s after the page opened; --at-timeout s (default 300): give up
+const AT = arg('at', '') ? new RegExp(arg('at', '')) : null, DELAY = +arg('delay', 5);
+let atSeen = () => {}; const atPromise = new Promise(r => { atSeen = r; });
+const onLine = (line) => { if (AT && AT.test(line)) atSeen(); logFile?.write(line + '\n'); if (GREP.test(line)) console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}] ${line.slice(0, 220)}`); };
 
 const srv = spawn(process.execPath, [path.join(HERE, '../server.mjs'), '--port', String(PORT)], { stdio: ['ignore', 'pipe', 'pipe'] });
 let buf = '';
@@ -80,7 +84,11 @@ try {
   }
   await page.goto(`http://127.0.0.1:${PORT}${URLPATH}`);
   const tStart = Date.now();
-  await page.waitForTimeout((WARM + SECONDS) * 1000);
+  if (AT) {
+    const ok = await Promise.race([atPromise.then(() => true), new Promise(r => setTimeout(() => r(false), +arg('at-timeout', 300) * 1000))]);
+    if (!ok) throw new Error('--at never matched');
+    await page.waitForTimeout((DELAY + SECONDS) * 1000);
+  } else await page.waitForTimeout((WARM + SECONDS) * 1000);
   const workers = [...sessions].filter(([, t]) => t.type === 'worker' || t.type === 'shared_worker');
   console.log(`[prof] ${workers.length} workers`);
   if (NOPROF) throw new Error('noprof: done');

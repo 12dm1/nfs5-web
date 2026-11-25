@@ -427,7 +427,12 @@ static void qr_tick(CPU *c, uint32_t fe, uint32_t vt){
                     for (; t[k] && k < 127; k++) low[k] = (char)tolower((unsigned char)t[k]); low[k] = 0;
                     if (strstr(low, eq + 1)){ hit = i; LOG("quickrace: %s row %d/%d '%.40s'", it, i, n, t); }
                 }
-                if (hit >= 0) set_index(c, acc, hit); else LOG("quickrace: %s has no '%s' in %d rows", it, eq + 1, n);
+                if (hit >= 0) set_index(c, acc, hit);
+                else {
+                    LOG("quickrace: %s has no '%s' in %d rows:", it, eq + 1, n);
+                    for (int i = 0; i < n && i < 64; i++){ uint32_t ia = (uint32_t)i, sp = thiscall(c, acc, vfn(acc, 0x30), 1, &ia);
+                                                           if (sp) LOG("  row %d '%.40s'", i, (const char*)g_mem + sp); }
+                }
             }
         }
         command(c, fe, "PLAYGAME"); LOG("quickrace: PLAYGAME"); st = 4; break; }
@@ -475,7 +480,26 @@ static void fe_tick(CPU *c){
  * From the race's input hook 0x413800. */
 void nettest_race(CPU *c){
     static uint32_t finished_at, last_tick; static int left;
-    if (g_role == 3){ if (getenv("NETTEST_AI")) MR32(CARINFO + CI_AIDRIVE) = 1; return; }   /* quickrace: AI drives the player */
+    if (g_role == 3){                                                                         /* quickrace: AI drives the player */
+        if (getenv("NETTEST_AI")) MR32(CARINFO + CI_AIDRIVE) = 1;
+        /* NETTEST_TRACE=1 (PERF2, A/B of builds): every 10 s of race time each racer's progress (+B54), speed (+35C) and finish
+         * state (+B50) */
+        static int tr = -1; static uint32_t last;
+        if (tr < 0){ const char *e = getenv("NETTEST_TRACE"); tr = e && *e == '1'; }
+        const uint32_t tick = MR32(SIMTICK);
+        if (tr && tick / 640u != last / 640u){
+            char line[600]; int k = snprintf(line, sizeof line, "trace tick %u:", tick);
+            const int n = (int)MR32(0x005E8AE8u);
+            for (int i = 0; i < n && i < 16 && k < (int)sizeof line - 40; i++){
+                const uint32_t car = MR32(CARS_L_RACER + 4u * (uint32_t)i); if (!car) continue;
+                float v; memcpy(&v, g_mem + car + 0x35C, 4);
+                k += snprintf(line + k, sizeof line - (size_t)k, " %d/%.0f/%d", (int)MR32(car + 0xB54), v, (int)MR32(car + 0xB50));
+            }
+            LOG("%s", line);
+        }
+        last = tick;
+        return;
+    }
     if (MR32(0x006573E8u) != 3u || !comms()) return;
     const uint32_t tick = MR32(SIMTICK);
     if (tick < last_tick){ finished_at = 0; left = 0; }

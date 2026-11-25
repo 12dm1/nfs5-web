@@ -3,7 +3,7 @@
 # usage: web/tools/perf_prof.sh <tag> [extra env, comma list] [port]
 cd "$(dirname "$0")/../.."
 S=$(node -e "console.log(encodeURIComponent('player.lst,5îïðïðî.sav,îïðïðî1.hud,îïðïðî2.hud'))")
-ENV="PERFSTAT=1,NETTEST=quickrace,NETTEST_AI=1,NETTEST_OPP=${OPP:-7},NETTEST_PICK=Track1.Track%3D${TRACK:-coastal}${2:+,$2}"
+ENV="PERFSTAT=1,NETTEST=quickrace,NETTEST_AI=1,NETTEST_OPP=${OPP:-7},NETTEST_PICK=Track1.Track%3D${TRACK:-azur}${2:+,$2}"
 timeout 400 node web/tools/prof_race.mjs --port ${3:-8190} --width ${W:-3840} --height ${H:-1906} --url "/?log=1&seed=$S&env=$ENV" \
   --at "interp\] measured" --delay 4 --seconds ${SECS:-12} --interval ${IV:-250}  --top ${TOP:-0} ${FOCUS:+--focus $FOCUS} ${CALLERS:+--callers $CALLERS} --out out/bench_$1.json --log out/bench_$1.log > out/bench_$1.txt 2>&1
 node -e "

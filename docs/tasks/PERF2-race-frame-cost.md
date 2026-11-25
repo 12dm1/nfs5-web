@@ -4,7 +4,7 @@ Opened 2026-11-25. Branch `release` (worktree `nfs5-web-release`). In progress (
 
 ## Results, round 1 (2026-11-25, headless, no user runs)
 
-Bench: Quick Race Coastal, 8 cars, AI drives the player, canvas 3840x1906, `PERFSTAT=1` work ms a frame over 25 s from
+Bench: Quick Race Côte d'Azur (Coastal; `NETTEST_PICK` matches "azur"), 8 cars, AI drives the player, canvas 3840x1906, `PERFSTAT=1` work ms a frame over 25 s from
 4 s after the race's start (`web/tools/perf_fps_pcores.sh <tag> [env]`, pinned to the P-cores; the numbers below are
 game-thread work per frame).
 
@@ -15,6 +15,13 @@ game-thread work per frame).
 | + cube faces draw cars 2 tiers coarser (`CUBE_CARLOD`, face 1.35 -> 1.1 ms) | ~7.7 | |
 | + THRASH calls: futex lock instead of the pthread mutex, clock check every 8th call, settexture fast path | ~6.9 | |
 | normals into the specular dword (`sub_00446530` hook) as one 3x3, no double normalisation | own cost 1.7x -> 0.1x the game's light layer | |
+| + lifter `X87OPT=1` (gen.sh default now: x87 stack slots as constant-index locals within a block) | ~6.1-6.3 (A/B 3 rounds: 6.6 -> 6.1) | |
+
+`X87OPT` was checked with AI races (3 laps Côte d'Azur, 8 cars, `NETTEST_TRACE=1`: every racer's progress / speed /
+finish state every 10 s): 3 races each build, mean progress at 110 s 3112-3240 (old) vs 3216-3278 (X87OPT), no
+traps; the race is not deterministic run to run, so this is a sanity check, not a bit-exact one. **Every worktree has to
+regenerate its lifted C** (`./gen.sh`, or `X87OPT=1 GENOUT=gen/all python tools/genall.py ...` with gen.sh's
+environment) to get it; `web/build.sh` takes `GEN=<dir> WEBOUT=<dir>` for side-by-side builds.
 
 Findings:
 

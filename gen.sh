@@ -10,6 +10,9 @@ SRC="${1:-$NFS5_EXE}"
 [ -f "$SRC" ] || { echo "usage: ./gen.sh path/to/Porsche.exe (v3.5, English) or nfspu_v35.zip"; exit 1; }
 PY="${PY:-python}"
 export JTSWITCH="${JTSWITCH:-1}"
+# PERF2: x87 register allocation within a block (tools/lift.py X87Region): ST(n) become constant-index locals instead of
+# c->st[(c->top+n)&7]; the race's frame ~7 % cheaper, same results (AI races traced against X87OPT=0, 2026-11-25)
+export X87OPT="${X87OPT:-1}"
 # instruction hooks served by runtime/pu_hooks.c
 export HOOKS="${HOOKS:-0x5725A5,0x4D2FEA,0x4D3091,0x468AA6,0x45D6F6,0x45D6FB,0x45D25C,0x45D261,0x415C7F,0x4D2B80,0x4D3D00,0x41562E,0x4B6CB9,0x40B6FD,0x40BA91,0x40BAF0,0x40C865,0x40C8DA,0x41041E,0x43A3B0,0x43C431,0x413800,0x40F740,0x44E324,0x44EC58,0x4CBBDE,0x4CBBF9,0x41A495,0x41A4AE,0x46700C,0x467011,0x467162,0x467167,0x539133,0x47FB6F,0x47FB74,0x47F642,0x45B3BE,0x45BD7E,0x45B3C3,0x45BD83,0x415C6E,0x4B4DBB,0x4B6AC3,0x413E8B,0x414002,0x414699,0x413DD1,0x414E1C}"   # guest_hook sites (runtime/pu_hooks.c): network autotest only; loops yield by themselves (GUEST_BACKEDGE)
 # lifted functions replaced in runtime/pu_ext.c (the original stays as sub_x_orig)
