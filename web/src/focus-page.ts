@@ -3,7 +3,9 @@ import { nextFocus, type FocusDirection, type FocusRect } from './focus-geometry
 /** A snapshot, never a retained guest pointer: the guest can replace windows on any frame. */
 export interface FocusItem extends FocusRect { id: number; kind: 'button' | 'control' | 'tab' | 'input' | 'portrait' | 'combo' | 'color' | 'list' | 'slider' | 'binding'; command?: string; expanded?: boolean; capturing?: boolean; popupHeight?: number; hovered?: boolean; customEditor?: boolean; customRects?: FocusRect[]; customHsv?: number[]; scrollUp?: FocusRect; scrollDown?: FocusRect; sliderValue?: number; sliderCount?: number;
   /** a button of the page's own (no game object): the key it sends to the game, its caption */
-  key?: string; label?: string; }
+  key?: string; label?: string;
+  /** a slider moved by dragging its thumb (FEHorizontalSlider): the thumb's left edge */
+  thumbX?: number; }
 /** spaceCloses: a race page that Space closes (Enter / pad A without a focused item send Space); padBack: the key pad B
  * and Start send instead of Escape */
 export interface FocusPage { window: number; items: FocusItem[]; spaceCloses?: boolean; padBack?: string; }
@@ -25,6 +27,10 @@ const kinds = new Map<number, FocusItem['kind']>([
   [0x005b5970, 'control'],      // car setting button
   [0x005b5e60, 'slider'],       // changeable indicator bar
   [0x005bac84, 'binding'],      // controller binding
+  [0x005b5fc4, 'slider'],       // FEHorizontalSlider (the chronicle's year): its thumb is dragged
+  [0x005b8ce4, 'button'],       // FEChroniclePictureIconControl (its click: 005089C0)
+  [0x005b6278, 'button'],       // FEMovieControlButton (its click: 004CE760)
+  [0x005b7e0c, 'control'],      // FEKnockoutTrackListControl (its click: 004FA470)
 ]);
 
 /** The rows of an open combo (FEComboBox) or of a list box (FEListBox derives from it, same fields), as the game's own hover
@@ -143,7 +149,15 @@ export function readFocusPage(buffer: ArrayBufferLike): FocusPage | null {
     }
     if (!kind) continue;
     let sliderValue: number | undefined, sliderCount: number | undefined;
-    if (kind === 'slider') {
+    let thumbX: number | undefined;
+    if (kind === 'slider' && vt === 0x005b5fc4) {
+      // FEHorizontalSlider: FESlider_MainFunctionality at +0x144, its accessor +0xD8, the thumb's PointAttribute +0xEC (x +0x38)
+      const main = u(obj + 0x144), accessor = u(main + 0xd8), thumb = u(main + 0xec);
+      if (!inRange(main, 0x110) || u(main) !== 0x005b6764 || !inRange(accessor, 0x1e) || u(accessor) !== 0x005b502c || m.getUint8(accessor + 0x1d)) continue;
+      if (!inRange(thumb, 0x40) || u(thumb) !== 0x005bb0ac) continue;
+      sliderCount = i(accessor + 0x14); sliderValue = i(accessor + 0x18); thumbX = i(thumb + 0x38);
+      if (sliderCount < 2 || sliderCount > 4096 || sliderValue < 0 || sliderValue >= sliderCount) continue;
+    } else if (kind === 'slider') {
       if (!inRange(obj, 0x158) || !u(obj + 0x150)) continue;
       const accessor = u(obj + 0x154);
       if (!inRange(accessor, 0x1e) || u(accessor) !== 0x005b502c || m.getUint8(accessor + 0x1d)) continue;
@@ -189,7 +203,8 @@ export function readFocusPage(buffer: ArrayBufferLike): FocusPage | null {
       scrollUp = arrow(0x12c); scrollDown = arrow(0x11c);
     }
     const capturing = kind === 'binding' && !!(flags & 0x40);
-    items.push({ id: obj, kind, x, y, width, height, command, expanded, capturing, popupHeight, hovered, customEditor, customRects, customHsv, scrollUp, scrollDown, sliderValue, sliderCount });
+    items.push({ id: obj, kind, x, y, width, height, command, expanded, capturing, popupHeight, hovered, customEditor, customRects, customHsv, scrollUp, scrollDown, sliderValue, sliderCount,
+      thumbX: thumbX === undefined ? undefined : x + thumbX });
   }
   return true;
   };
@@ -224,7 +239,7 @@ export function focusActivationPoint(page: FocusPage, item: FocusItem): { x: num
 
 /** Race page classes (vtables) whose generic input handler 0042A3D0 closes them on Space (code 0x19): results, info. */
 const SPACE_PAGES = new Set([0x005b2a40 /* HCongrats */, 0x005b2e60 /* HRaceSummary */, 0x005b32b0 /* HTrackRecords */,
-  0x005b3210 /* HTournamentStandings */, 0x005b2bfc /* HInfo */]);
+  0x005b3210 /* HTournamentStandings */, 0x005b2bfc /* HInfo */, 0x005b2c88 /* HMissionSummary (its Continue: 00429390) */]);
 /** The replay bar (HReplay at [0060CA58]): 7 hit slots of [005B2EF0]x[005B2EF4] at +0x12C.. (x, y pairs; 0042D880); the
  * game asks it while the race is over ([00657424] == 2, the race page controller 00425EF0). */
 const REPLAY_SLOTS = [0x12c, 0x134, 0x13c, 0x144, 0x14c, 0x154, 0x15c];

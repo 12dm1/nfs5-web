@@ -118,6 +118,7 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   // tests (web/tools/focus_drive.mjs, focus_walk.mjs): the focus layer's view of the screen and its own state
   (globalThis as unknown as Record<string, unknown>).nfs5Focus = () => ({
     mode: Atomics.load(i32, 7728 >> 2), page: activeFocusPage(), focusId, focusWindow, popupId, listId, sliderId, editing, colorId, colorEditing,
+    seeking: seeking || seekQueued !== 0, padKeyboard: !!padkb?.open,
   });
   const clickFocus = (item: FocusItem, windowId: number) => {
     if (clickTimer) return;
@@ -141,7 +142,38 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     Atomics.store(i32, 5, x16); Atomics.store(i32, 6, y16);
     msg(WM.MOVE, 0, (x16 | y16 << 16) >>> 0);
   };
+  // FEHorizontalSlider (the chronicle's year): a click on the track beside the thumb jumps there, one on the thumb drags it, so a
+  // step is a drag of the thumb by one cell and a half (its width is not known: the cell is guessed from where the thumb is,
+  // then the value says whether to drag again)
+  let dragging = false;
+  const dragSlider = async (item: FocusItem, windowId: number, direction: number) => {
+    if (dragging || item.thumbX === undefined || item.sliderCount === undefined || item.sliderValue === undefined) return;
+    dragging = true;
+    try {
+      const want = Math.max(0, Math.min(item.sliderCount - 1, item.sliderValue + direction));
+      if (want === item.sliderValue) return;
+      const offset = item.thumbX - item.x;
+      const thumbWidth = item.sliderValue > 0 ? Math.max(4, item.width - offset * (item.sliderCount - 1) / item.sliderValue) : item.width * 0.155;
+      const cell = Math.max(1, (item.width - thumbWidth) / (item.sliderCount - 1));
+      const y = item.y + item.height / 2;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const now = readFocusPage(memory.buffer)?.items.find(t => t.id === item.id);
+        if (!now || now.thumbX === undefined || now.sliderValue === undefined || readFocusPage(memory.buffer)?.window !== windowId) return;
+        const left = want - now.sliderValue;
+        if (!left) return;
+        // the game truncates the dragged distance in cells: half a cell more lands on the cell asked for
+        const x0 = now.thumbX + Math.min(4, thumbWidth / 2), x1 = x0 + (left + Math.sign(left) * 0.5) * cell;
+        const p0 = (Math.floor(x0 * 65536 / 640) | Math.floor(y * 65536 / 480) << 16) >>> 0;
+        const p1 = (Math.floor(x1 * 65536 / 640) | Math.floor(y * 65536 / 480) << 16) >>> 0;
+        moveCursor(x0, y); await settle();
+        msg(0x201, 1, p0); await settle();
+        msg(WM.MOVE, 1, p1); await settle();
+        msg(0x202, 0, p1); await settle();
+      }
+    } finally { dragging = false; }
+  };
   const changeSlider = (item: FocusItem, windowId: number, direction: number) => {
+    if (item.thumbX !== undefined) { void dragSlider(item, windowId, direction); return; }
     if (clickTimer || item.sliderCount === undefined || item.sliderValue === undefined) return;
     const value = Math.max(0, Math.min(item.sliderCount - 1, item.sliderValue + direction));
     if (value === item.sliderValue) return;
