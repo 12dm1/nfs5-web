@@ -114,7 +114,7 @@ const focusOn = async (target) => {
 const findItem = (p, step) => p?.items.find(it => label(it) === step) ?? null;
 
 async function boot() {
-  await page.goto(`http://127.0.0.1:${PORT}/?log=0&seed=${encodeURIComponent(SEED)}`);
+  await page.goto(`http://127.0.0.1:${PORT}/?log=0&seed=${encodeURIComponent(SEED)}${process.env.WALK_QS || ""}`);
   const isMain = f => f?.page?.items.some(it => it.command === 'SETTYPECAREERMODE');
   for (let t = 0; t < 120; t++) {
     let f = await focus();
