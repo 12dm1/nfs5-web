@@ -557,7 +557,7 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
   // Escape and the rest goes to the game's packet (pu_pad_input in runtime/pu_ext.c).
   const f32 = new Float32Array(sab, ptr, 4096 / 4 + 2048);
   const PAD_ON = 7708 >> 2, PAD_BUTTONS = PAD_ON + 1, PAD_LX = PAD_ON + 2, PAD_RT = PAD_ON + 3, PAD_LT = PAD_ON + 4, PAD_MODE = PAD_ON + 5, RUMBLE_SEQ = PAD_ON + 6;
-  const B = { A: 0, B: 1, LT: 6, RT: 7, START: 9, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 };
+  const B = { A: 0, B: 1, X: 2, LT: 6, RT: 7, START: 9, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 };
   const REPEAT_DELAY = 400, REPEAT_PERIOD = 80, CURSOR_SPEED = 1.2, CURSOR_CURVE = 1.8, WHEEL_NOTCHES = 8, STICK_DEAD = 0.10, TRIGGER_DEAD = 0.05;
   const press = (code: string, down: boolean, repeat = false) =>
     key({ code, key: '', altKey: false, ctrlKey: false, repeat, pad: true, preventDefault() { } } as unknown as KeyboardEvent, down);
@@ -635,6 +635,7 @@ export function attachInput(memory: WebAssembly.Memory, ptr: number, el: HTMLEle
     setKey('ArrowDown', menu && is(B.DOWN), now);
     setKey('ArrowLeft', menu && is(B.LEFT), now);
     setKey('ArrowRight', menu && is(B.RIGHT), now);
+    setKey('Backspace', menu && !!padkb?.open && is(B.X), now);     // X deletes on the pad keyboard
     if (!is(B.A)) padFocusA = false;
     else if (menu && (focusId || (mode === 1 && !padMouse && activeFocusPage()?.spaceCloses))) padFocusA = true;
     setKey('Enter', menu && padFocusA && is(B.A), now);
