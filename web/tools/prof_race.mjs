@@ -135,6 +135,9 @@ try {
         if (k < 0) continue;
         // --callers <fn>: who calls that function inside the focus (its caller's name, by the time under it)
         const CAL = arg('callers', '');
+        // --kids <fn>: what that function calls inside the focus (the callee's name, by the time under it)
+        const KIDS = arg('kids', '');
+        if (KIDS) { const j = chain.lastIndexOf(KIDS); if (j > 0) { const nm = 'callee of ' + KIDS + ': ' + chain[j - 1] + (chain[j - 1] === 'dispatch_indirect' && j > 1 ? ' > ' + chain[j - 2] : ''); focusKids.set(nm, (focusKids.get(nm) || 0) + dt); } }
         if (CAL) { const j = chain.indexOf(CAL); if (j >= 0 && j + 1 < chain.length) { const nm = 'caller of ' + CAL + ': ' + chain[j + 1] + ' < ' + (chain[j + 2] || ''); focusKids.set(nm, (focusKids.get(nm) || 0) + dt); } }
         focusSelf.set(chain[0], (focusSelf.get(chain[0]) || 0) + dt);
         const kid = k > 0 ? chain[k - 1] : '(self)';

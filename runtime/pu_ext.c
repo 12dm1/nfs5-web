@@ -1387,3 +1387,93 @@ void sub_00488b50(CPU *restrict c){
     c->eax = (c->eax & 0xFFFFFF00u) | (uint32_t)hit;
     POP32(c->eip); c->esp += 12u;
 }
+
+/* ---- PERF2: 005B0730 in C (EAGL's vertex transform: every car / track vertex, ~7 % of a 4K race frame as lifted x87) ----
+ * cdecl(flags, count, src, dst): for count vertices (do-while), the matrix [005DEA58] (flags & 2: x,y,z + the translation
+ * row; else x,y,z,w by four rows) gives X, Y, Z (stored as floats at 5DFC9C..A4 and at dst +0..8), rhw = [5DFC90] / Z at
+ * dst+0Ch, and a clip code at [[69E0D0] + i * [5DEA6C]] from the per-vertex function 5DFB80[(flags >> 8) & 3]
+ * (005B05C0 or 005B0660, inlined here: bit logic on the float bits); strides [5DEA64] src, [5DEA68] dst.  The game sets the
+ * x87 to single precision here; the lifted code computes in double (X87PC=0) and so does this.  TRCHK=1 runs the lifted one
+ * and compares every output word (logs the first differences). */
+static uint32_t clip_05c0(uint32_t x, uint32_t y, uint32_t z){
+    const uint32_t a = ((x >> 29) & 4u) | ((y >> 30) & 2u) | (z >> 31);
+    const uint32_t ax = x & 0x7FFFFFFFu, ay = y & 0x7FFFFFFFu, az = z & 0x7FFFFFFFu;
+    const uint32_t b = (((az - ax) >> 27) & 0x10u) | (((az - ay) & 0x80000000u) >> 28);
+    const uint32_t nf = (((MR32(0x005DEA74u) - z) & ~z) & 0x80000000u) >> 30 | ((z - MR32(0x005DEA70u)) | z) >> 31;
+    return MR32(0x005DFB90u + 4u * (b | a)) | nf;
+}
+static uint32_t clip_0660(uint32_t x, uint32_t y, uint32_t z){
+    const uint32_t a = ((x >> 29) & 4u) | ((y >> 30) & 2u) | (z >> 31);
+    const uint32_t ax = x & 0x7FFFFFFFu, ay = y & 0x7FFFFFFFu, az = z & 0x7FFFFFFFu;
+    const uint32_t g = MR32(0x005DEA60u) + az;
+    const uint32_t b = (((az - ax) >> 27) & 0x10u) | (((az - ay) & 0x80000000u) >> 28);
+    const uint32_t gb = (((g - ax) >> 27) & 0x10u) | (((g - ay) & 0x80000000u) >> 28);
+    const uint32_t nf = (((MR32(0x005DEA74u) - z) & ~z) & 0x80000000u) >> 30 | ((z - MR32(0x005DEA70u)) | z) >> 31;
+    return (MR32(0x005DFC10u + 4u * (b | a)) << 8) | MR32(0x005DFC10u + 4u * (a | gb)) | nf;
+}
+/* the loop; out != NULL: the dst words and codes go to host arrays (TRCHK) instead of guest memory */
+static void xform_run(uint32_t flags, uint32_t count, uint32_t src, uint32_t dst, uint32_t code, uint32_t fn,
+                      uint32_t *out, uint32_t *outc, float last[3]){
+    const float *M = (const float *)(g_mem + MR32(0x005DEA58u));
+    const double K = (double)MRF32(0x005DFC90u);
+    const uint32_t ss = MR32(0x005DEA64u), ds = MR32(0x005DEA68u), cs = MR32(0x005DEA6Cu);
+    const int three = (flags & 2u) != 0;
+    uint32_t i = 0;
+    do {
+        const float *s = (const float *)(g_mem + src);
+        const double s0 = s[0], s1 = s[1], s2 = s[2];
+        double x = (s0 * (double)M[0] + s1 * (double)M[4]) + s2 * (double)M[8];
+        double y = (s0 * (double)M[1] + s1 * (double)M[5]) + s2 * (double)M[9];
+        double z = (s0 * (double)M[2] + s1 * (double)M[6]) + s2 * (double)M[10];
+        if (three){ x = x + (double)M[12]; y = y + (double)M[13]; z = z + (double)M[14]; }
+        else { const double s3 = s[3]; x = x + s3 * (double)M[12]; y = y + s3 * (double)M[13]; z = z + s3 * (double)M[14]; }
+        const float X = (float)x, Y = (float)y, Z = (float)z;
+        uint32_t xb, yb, zb; memcpy(&xb, &X, 4); memcpy(&yb, &Y, 4); memcpy(&zb, &Z, 4);
+        const float rhw = (float)(K / z);
+        const uint32_t cc = fn == 0x005B05C0u ? clip_05c0(xb, yb, zb) : clip_0660(xb, yb, zb);
+        if (out){ out[4 * i] = xb; out[4 * i + 1] = yb; out[4 * i + 2] = zb; memcpy(&out[4 * i + 3], &rhw, 4); outc[i] = cc; }
+        else { MR32(dst) = xb; MR32(dst + 4) = yb; MR32(dst + 8) = zb; MRF32(dst + 12) = rhw; MR32(code) = cc; }
+        last[0] = X; last[1] = Y; last[2] = Z;
+        src += ss; dst += ds; code += cs; i++;
+    } while (--count);
+}
+void sub_005b0730(CPU *restrict c){
+    const uint32_t flags = MR32(c->esp + 4), count = MR32(c->esp + 8), src = MR32(c->esp + 12), dst = MR32(c->esp + 16);
+    const uint32_t fn = MR32(0x005DFB80u + 4u * ((flags >> 8) & 3u));
+    static int chk = -1;
+    if (chk < 0){ const char *e = getenv("TRCHK"); chk = e && *e == '1'; }
+    if ((fn != 0x005B05C0u && fn != 0x005B0660u) || count == 0 || count > 65536){ sub_005b0730_orig(c); return; }
+    const uint32_t code = MR32(0x0069E0D0u);
+    if (chk){
+        static long calls, bad, verts; static uint32_t *o, *oc; static uint32_t cap;
+        const uint32_t ds = MR32(0x005DEA68u), ss = MR32(0x005DEA64u);
+        const int overlap = !(dst + ds * count <= src || src + ss * count <= dst);
+        sub_005b0730_orig(c);
+        if (overlap) return;
+        if (count > cap){ cap = count; o = realloc(o, cap * 16u); oc = realloc(oc, cap * 4u); }
+        float last[3];
+        xform_run(flags, count, src, dst, code, fn, o, oc, last);
+        calls++; verts += count;
+        const uint32_t cst = MR32(0x005DEA6Cu);
+        for (uint32_t i = 0; i < count; i++){
+            const uint32_t d = dst + i * ds;
+            const int ok = MR32(d) == o[4 * i] && MR32(d + 4) == o[4 * i + 1] && MR32(d + 8) == o[4 * i + 2] && MR32(d + 12) == o[4 * i + 3]
+                           && MR32(code + i * cst) == oc[i];
+            if (!ok){ if (++bad <= 20) fprintf(stderr, "[trchk] MISMATCH call %ld vertex %u/%u flags %x fn %x: lifted %08x %08x %08x %08x code %x, C %08x %08x %08x %08x code %x\n",
+                      calls, i, count, flags, fn, MR32(d), MR32(d + 4), MR32(d + 8), MR32(d + 12), MR32(code + i * cst), o[4 * i], o[4 * i + 1], o[4 * i + 2], o[4 * i + 3], oc[i]);
+                      break; }
+        }
+        if (calls % 100000 == 0) fprintf(stderr, "[trchk] %ld calls, %ld vertices, %ld mismatches\n", calls, verts, bad);
+        return;
+    }
+    MR32(0x005DFC94u) = fn;
+    MR16(0x005DFCA8u) = c->fcw; MR16(0x005DFCAAu) = (uint16_t)((c->fcw & 0xFCFFu) | 0x3Fu);
+    float last[3];
+    xform_run(flags, count, src, dst, code, fn, NULL, NULL, last);
+    const uint32_t ss = MR32(0x005DEA64u), ds = MR32(0x005DEA68u), cs = MR32(0x005DEA6Cu);
+    MRF32(0x005DFC9Cu) = last[0]; MRF32(0x005DFCA0u) = last[1]; MRF32(0x005DFCA4u) = last[2];
+    MR32(0x005DFC98u) = code + cs * count;
+    MR32(c->esp + 8) = 0; MR32(c->esp + 12) = src + ss * count; MR32(c->esp + 16) = dst + ds * count;
+    c->eax = src + ss * count; c->ecx = code + cs * (count - 1); c->edx = 0;
+    POP32(c->eip);
+}
