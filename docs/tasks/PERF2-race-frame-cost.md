@@ -17,6 +17,20 @@ game-thread work per frame).
 | normals into the specular dword (`sub_00446530` hook) as one 3x3, no double normalisation | own cost 1.7x -> 0.1x the game's light layer | |
 | + lifter `X87OPT=1` (gen.sh default now: x87 stack slots as constant-index locals within a block) | ~6.1-6.3 (A/B 3 rounds: 6.6 -> 6.1) | |
 
+| + `00488B50` (segment crossing test) in C, `SEGCHK=1` compares with the lifted one | ~6.0 | |
+| + THRASH lock lock-free on wasm (the renderer's 3 waits count in an atomic, guest threads only wait while it is non-zero); draw_any skips 9 strcmp on texture-manager draws | ~5.8 | |
+| + car shade pass (`cs_apply`) skipped when no car of the last frame is darkened | ~5.65 | |
+| + EAGL vertex transform `005B0730` in C with the clip-code functions inlined (`TRCHK=1`: every output word against the lifted one, Côte d'Azur 37 M + Hometown 56 M vertices, 0 differences) | ~5.35 | |
+| + normals hook: each indexed normal once a batch | ~5.25 | 15-20 (noisy, see below) |
+
+Round 2 (2026-11-26): P-cores ~8.9 -> ~5.25 ms over both rounds (-41 %). E-core runs are bimodal run to run (15-28 ms for
+the same build, the round-1 build measured worse in the same session: 19-28), so only P-core numbers are used for A/B.
+Cube split (`CUBE_NOCARS=1` test knob): a face 0.75 ms, of which cars 0.21; the rest is the track traversal
+(`00467290` 35 % of the cube, `0047FB40` 10 %). `prof_race.mjs --kids <fn>` lists the callees inside the focus.
+
+Left (2000 us profile): `00543AE0` (EAGL draw, 2287 lines, ~7 % self, one caller `0053F6xx`), `00449390`, `00489CC0`,
+the light layer `00446530_orig`, our `flush_verts`/`submit`, the cube's track traversal `00467290`.
+
 `X87OPT` was checked with AI races (3 laps Côte d'Azur, 8 cars, `NETTEST_TRACE=1`: every racer's progress / speed /
 finish state every 10 s): 3 races each build, mean progress at 110 s 3112-3240 (old) vs 3216-3278 (X87OPT), no
 traps; the race is not deterministic run to run, so this is a sanity check, not a bit-exact one. **Every worktree has to
