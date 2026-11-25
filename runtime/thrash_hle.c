@@ -184,31 +184,48 @@ static int thrash_call_locked(CPU *c, const char *name, uint32_t *r);
  * presenting thread, which wants it back). */
 void guest_wait_begin(void); void guest_wait_end(void);
 #ifdef __wasm__
-/* PERF2: a futex lock (0 free, 1 taken, 2 taken with waiters) in place of the pthread mutex: a race makes ~400 k THRASH calls a
- * second and wasi-libc's uncontended lock + unlock cost ~2 % of the game thread */
-static int32_t g_rlk;
-static void rlock(void){
-    int32_t v = 0;
-    if (__atomic_compare_exchange_n(&g_rlk, &v, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
-    guest_wait_begin();
-    if (v != 2) v = __atomic_exchange_n(&g_rlk, 2, __ATOMIC_ACQUIRE);
-    while (v != 0){ __builtin_wasm_memory_atomic_wait32(&g_rlk, 2, -1); v = __atomic_exchange_n(&g_rlk, 2, __ATOMIC_ACQUIRE); }
+/* PERF2: every THRASH call is made under the guest lock, and the renderer gives that lock up only in its three waits
+ * (r_web.c: a free segment, readrect, the present), so those waits mark themselves (thrash_wait_begin/end) and a call that
+ * finds the renderer inside one waits for it to come back; no lock of its own (the pthread mutex, then a futex, cost
+ * 2-3 % of the game thread at ~400 k calls a second). */
+static int32_t g_rbusy;                                 /* renderer waits in progress (changed under the guest lock only) */
+void thrash_wait_begin(void){ __atomic_add_fetch(&g_rbusy, 1, __ATOMIC_RELEASE); guest_wait_begin(); }
+void thrash_wait_end(void){
     guest_wait_end();
+    if (__atomic_sub_fetch(&g_rbusy, 1, __ATOMIC_RELEASE) == 0) __builtin_wasm_memory_atomic_notify(&g_rbusy, 0xFFFFFFFFu);
 }
-static void runlock(void){
-    if (__atomic_exchange_n(&g_rlk, 0, __ATOMIC_RELEASE) == 2) __builtin_wasm_memory_atomic_notify(&g_rlk, 1);
+static void rlock(void){
+    while (__builtin_expect(__atomic_load_n(&g_rbusy, __ATOMIC_ACQUIRE) != 0, 0)){
+        guest_wait_begin();
+        int32_t v;
+        while ((v = __atomic_load_n(&g_rbusy, __ATOMIC_ACQUIRE)) != 0) __builtin_wasm_memory_atomic_wait32(&g_rbusy, v, 1000000LL);
+        guest_wait_end();
+    }
 }
+static void runlock(void){}
 #else
 static pthread_mutex_t g_rmx = PTHREAD_MUTEX_INITIALIZER;
 static void rlock(void){ if (pthread_mutex_trylock(&g_rmx) != 0){ guest_wait_begin(); pthread_mutex_lock(&g_rmx); guest_wait_end(); } }
 static void runlock(void){ pthread_mutex_unlock(&g_rmx); }
 #endif
 int thrash_call(CPU *c, const char *name, uint32_t *r){
-    if (strncmp(name, "_THRASH_", 8)) return 0;
+    /* PERF2: what a name is (not THRASH / a draw / settexture / another call), cached by the import's name pointer */
+    static struct { const char *p; int kind; } cache[64];
+    const unsigned h = (unsigned)(((uintptr_t)name >> 3) & 63u);
+    int kind;
+    if (cache[h].p == name) kind = cache[h].kind;
+    else {
+        kind = strncmp(name, "_THRASH_", 8) ? 0 : !strncmp(name + 8, "draw", 4) ? 1 : !strcmp(name + 8, "settexture@4") ? 2 : 3;
+        cache[h].p = name; cache[h].kind = kind;
+    }
+    if (!kind) return 0;
     /* a long run of THRASH calls (texture uploads) hands the guest lock over; the clock is a JS call, so every 8th call only */
     { static _Thread_local unsigned k; if ((++k & 7u) == 0){ void guest_yield_if_long(double); guest_yield_if_long(4.0); } }
     rlock();
-    int k = thrash_call_locked(c, name, r);
+    int k = 1;
+    if (kind == 1){ g_calls++; g_draws++; *r = 0; if (g_rend) r_draw(name + 8, (const uint32_t *)(g_mem + c->esp)); }
+    else if (kind == 2 && g_rend){ g_calls++; *r = 0; r_settexture(ARG(0)); }
+    else k = thrash_call_locked(c, name, r);
     runlock();
     return k;
 }
