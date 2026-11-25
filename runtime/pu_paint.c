@@ -293,8 +293,10 @@ void sub_00444130(CPU *restrict c){
     sub_00444130_orig(c);
     /* the glass pages: tpage5 "glass", tpage6 "intglass" (global, the tinted side windows). In the menus (4444 pages, 115C) file 3
      * is no window: it is the showroom floor's spotlight decal (alpha 68 with clear cut-outs, drawn from the platform to the
-     * screen's bottom), and the glass pass made it shine like a mirror; the showroom car's windows are the intglass page. */
-    if ((g_file == 4 || (g_file == 3 && a[3] != 0x115Cu)) && glass_on()){
+     * screen's bottom), and the glass pass made it shine like a mirror. File 4 there (the menus' intglass "glai") is the texture of
+     * the garage's wall panes too (the same upload): the pass darkened them as the camera turned. The car shown in the menus has
+     * its own 32-bit pages (fmt 20), which stay glass. */
+    if ((g_file == 3 || g_file == 4) && a[3] != 0x115Cu && glass_on()){
         const uint32_t eax = c->eax, ecx = c->ecx, edx = c->edx;
         glass_blit(c, a[0], a[1], a[2], a[3], (int)a[5], (int)a[6]);
         c->eax = eax; c->ecx = ecx; c->edx = edx;

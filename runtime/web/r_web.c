@@ -693,10 +693,11 @@ static void draw_any(const char *n, const uint32_t *a){
         const int bound = tan_substitute(g_bound);
         const int paintable = (g_race || MR32(0x0065B928u)) && !g_cap;
         const int armed = g_refl_armed; g_refl_armed = 0;
-        const int again = armed && paintable && bound && !g_tex[bound - 1].paint && g_pv_slot && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && pv_same(o, nv);
-        if (paintable && bound && (g_tex[bound - 1].paint || again)) car_clip_normals(a[1], vb, ib, o, nv);
-        if (paintable && bound && g_tex[bound - 1].paint == 2) glass_log(bound, o, nv, 2);
-        if (paintable && bound && g_tex[bound - 1].paint){
+        const int bp = bound ? g_tex[bound - 1].paint : 0;
+        const int again = armed && paintable && bound && !bp && g_pv_slot && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && pv_same(o, nv);
+        if (paintable && bound && (bp || again)) car_clip_normals(a[1], vb, ib, o, nv);
+        if (paintable && bound && bp == 2) glass_log(bound, o, nv, 2);
+        if (paintable && bound && bp){
             g_pv_vb = a[1]; g_pv_ib = a[2]; g_pv_count = count; g_pv_slot = bound; g_pv_nv = nv;
             if (g_race){ cs_page(o, nv, bound); cs_apply(o, nv, bound); }
             for (int i = 0; i < nv; i++){ g_pv_uv[i * 2] = o[i].u; g_pv_uv[i * 2 + 1] = o[i].v; g_pv_xy[i * 2] = o[i].x; g_pv_xy[i * 2 + 1] = o[i].y; }
