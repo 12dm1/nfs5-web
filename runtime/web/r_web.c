@@ -530,6 +530,7 @@ void r_reflection_next(void){ g_refl_armed = 1; }
 typedef struct { int slot; float x0, y0, x1, y1, z0, z1; double n, dark; } CarShade;
 #define CAR_SHADES 48
 static CarShade g_cs_cur[CAR_SHADES], g_cs_prev[CAR_SHADES]; static int g_ncs_cur, g_ncs_prev;
+static int g_cs_dark;     /* PERF2: a record of the last frame darkens (cs_factor < 0.995): else cs_apply has nothing to do */
 static CarShade *cs_get(int slot){
     for (int i = 0; i < g_ncs_cur; i++) if (g_cs_cur[i].slot == slot) return &g_cs_cur[i];
     if (g_ncs_cur >= CAR_SHADES) return NULL;
@@ -559,6 +560,7 @@ static void cs_flip(void){
         g_cs_other = 0;
     }
     memcpy(g_cs_prev, g_cs_cur, sizeof g_cs_cur); g_ncs_prev = g_ncs_cur; g_ncs_cur = 0;
+    g_cs_dark = 0; for (int i = 0; i < g_ncs_prev; i++) if (cs_factor(&g_cs_prev[i]) < 0.995f) g_cs_dark = 1;
 }
 static void cs_box(const DV *o, int nv, float *b){
     for (int i = 0; i < nv; i++){
@@ -572,7 +574,7 @@ static void cs_box(const DV *o, int nv, float *b){
 }
 /* a car's own draw: its page's record, or a non-paint draw inside a shaded car's box and depth */
 static void cs_apply(DV *o, int nv, int page){
-    if (!g_ncs_prev || nv <= 0) return;
+    if (!g_ncs_prev || !g_cs_dark || nv <= 0) return;
     if (page){
         for (int i = 0; i < g_ncs_prev; i++) if (g_cs_prev[i].slot == page){ cs_scale(o, nv, cs_factor(&g_cs_prev[i])); return; }
         return;
