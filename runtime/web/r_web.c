@@ -100,7 +100,7 @@ static int g_filter = 1, g_clamp_s = 1, g_clamp_t = 1; static float g_lodbias;
 static int g_clip[4], g_clipvalid;
 /* textures */
 #define MAX_TEX 8192
-typedef struct { int used, w, h, fmt, levels, cutout, keyed, seg, paint; } Tex;
+typedef struct { int used, w, h, fmt, levels, cutout, keyed, seg, paint; } Tex;     /* paint: 1 a car's paint page, 2 its glass page (pu_paint.c) */
 static Tex g_tex[MAX_TEX];
 static int g_bound;             /* slot + 1, 0 none */
 #define LFB_SLOT (MAX_TEX - 1)
@@ -166,11 +166,12 @@ static void paint_uniform(float *u){
     const float l = sqrtf(sc[0] * sc[0] + sc[1] * sc[1] + sc[2] * sc[2]);
     if (l > 1e-6f) for (int k = 0; k < 3; k++) u[36 + k] = sc[k] / l;
 }
+static const float *g_pu_frozen;   /* GLASS1: a deferred glass pass keeps the camera it was drawn with */
 static void emit_state(const DrawState *d){
     /* a change of anything closes the running draw */
     uint32_t pipe = (uint32_t)d->blend | (uint32_t)d->zcmp << 3 | (uint32_t)d->zwrite << 6 | (uint32_t)d->cull << 7 |
                     (uint32_t)d->topo << 9 | (uint32_t)d->colorwrite << 11;
-    pipe |= (uint32_t)(d->paint == 1) << 15 | (uint32_t)(d->paint == 2) << 16;
+    pipe |= (uint32_t)(d->paint == 1) << 15 | (uint32_t)(d->paint == 2) << 16 | (uint32_t)(d->paint == 3) << 17;
     if (g_cap) pipe |= 1u << 12 | (uint32_t)(g_cap_clear && d->blend == 0) << 13 | (uint32_t)(g_cap_sun && d->blend == 1) << 14;
     uint32_t sam = (uint32_t)d->filter | (uint32_t)d->cs << 1 | (uint32_t)d->ct << 3 | (uint32_t)d->mips << 5;
     float u[UNI];
@@ -195,7 +196,7 @@ static void emit_state(const DrawState *d){
         }
         u[15] = g_cap_sun && d->blend == 1 ? 1.0f : 0.0f;
     }
-    if (d->paint) paint_uniform(u);
+    if (d->paint){ if (g_pu_frozen) memcpy(u + 16, g_pu_frozen + 16, (UNI - 16) * sizeof(float)); else paint_uniform(u); }
     int sc[4] = { 0, 0, g_lw, g_lh };
     if (g_clipvalid) memcpy(sc, g_clip, sizeof sc);
     int ch = pipe != g_s_pipe || sam != g_s_sampler || (uint32_t)d->tex != g_s_tex || !g_s_uni_ok || memcmp(u, g_s_uni, sizeof u) ||
@@ -225,6 +226,53 @@ static void submit(const DV *v, int n, const DrawState *d){
     if (!g_draw_open){ g_draw_first = g_nvtx / VSIZE; g_draw_open = 1; g_draw_count = 0; }
     memcpy(g_vtx + g_nvtx, v, (size_t)n * VSIZE);
     g_nvtx += (uint32_t)n * VSIZE; g_draw_count += (uint32_t)n;
+}
+
+/* ---- GLASS1: the intact car glass's reflection pass ----
+ * A glass page's draw goes as the game draws it (its tint and alpha test: the race's windows are mostly the clear intglass page,
+ * alpha 0, which draws nothing and writes no depth), then once more with the glass shader (fs_glass), premultiplied, depth tested,
+ * no depth write: the R1 cube's reflection by Fresnel over whatever ends up behind the window. That pass waits for the end of the
+ * view (the next clear, clip, target change, HUD pass, 2D draw or the frame's end): the car draws its interior after some of its
+ * windows, and drawn at once the pass would lie under it. */
+#define GOV_VERTS 8192
+#define GOV_DRAWS 128
+typedef struct { DrawState d; int first, n, clip[4], clipvalid; float pu[UNI]; } GlassPass;
+static DV g_gov_v[GOV_VERTS]; static int g_gov_nv, g_gov_n;
+static GlassPass g_gov[GOV_DRAWS];
+static void glass_flush(void){
+    if (!g_gov_n) return;
+    const int n = g_gov_n;
+    g_gov_n = 0;
+    int clip[4]; memcpy(clip, g_clip, sizeof clip);
+    const int cv = g_clipvalid;
+    { static long gd = -2; if (gd == -2){ const char *e = getenv("GDUMP"); gd = e ? atol(e) : -1; }
+      if (gd == g_frames) for (int i = 0; i < n; i++){
+          const GlassPass *q = &g_gov[i]; const DV *v = g_gov_v + q->first;
+          fprintf(stderr, "[gdump] glass pass %d/%d: tex %d n %d zcmp %d cull %d hard %d clip %d %d,%d..%d,%d xy %.0f,%.0f z %.4f w %.4f cube %.0f\n", i, n, q->d.tex, q->n,
+                  q->d.zcmp, q->d.cull, q->d.hard, q->clipvalid, q->clip[0], q->clip[1], q->clip[2], q->clip[3], v[0].x, v[0].y, v[0].z, v[0].w, q->pu[19]);
+      } }
+    for (int i = 0; i < n; i++){
+        memcpy(g_clip, g_gov[i].clip, sizeof clip); g_clipvalid = g_gov[i].clipvalid;
+        g_pu_frozen = g_gov[i].pu;
+        submit(g_gov_v + g_gov[i].first, g_gov[i].n, &g_gov[i].d);
+    }
+    g_pu_frozen = NULL;
+    memcpy(g_clip, clip, sizeof clip); g_clipvalid = cv;
+    g_gov_nv = 0;
+}
+static void glass_defer(const DV *v, int n, const DrawState *d){
+    if (n <= 0 || n > GOV_VERTS) return;
+    if (g_gov_n >= GOV_DRAWS || g_gov_nv + n > GOV_VERTS) glass_flush();
+    GlassPass *q = &g_gov[g_gov_n++];
+    q->d = *d;
+    q->d.zwrite = 0;
+    if (q->d.zcmp == 1) q->d.zcmp = 3;                 /* over the game's own glass at the same depth */
+    q->first = g_gov_nv; q->n = n;
+    memcpy(q->clip, g_clip, sizeof q->clip); q->clipvalid = g_clipvalid;
+    memset(q->pu, 0, sizeof q->pu);
+    paint_uniform(q->pu);
+    memcpy(g_gov_v + g_gov_nv, v, (size_t)n * sizeof(DV));
+    g_gov_nv += n;
 }
 
 /* ---- draws (dx11_draw.cpp) ---- */
@@ -282,7 +330,7 @@ static void game_state(DrawState *d, int topo){
     if (!(d->bias > -16.0f && d->bias < 16.0f)) d->bias = 0.0f;
     d->paint = 0; d->paint_tex = 0;
     if ((g_race || MR32(0x0065B928u)) && !g_cap && g_paint_on && topo == 0){
-        if (d->tex > 0 && g_tex[d->tex - 1].paint){ d->paint = 1; d->paint_tex = d->tex; }
+        if (d->tex > 0 && g_tex[d->tex - 1].paint){ d->paint = g_tex[d->tex - 1].paint == 2 ? 3 : 1; d->paint_tex = d->tex; }   /* 3: a glass page */
         else if (g_mask_slot){ d->paint = 2; d->paint_tex = g_mask_slot; }
     }
 }
@@ -296,7 +344,7 @@ static float g_hud_lo, g_hud_hi, g_hud_dx;
 #define HUD_PRIMS 8192
 static float g_hp_lo[HUD_PRIMS], g_hp_hi[HUD_PRIMS], g_hp_dx[HUD_PRIMS];
 static int g_hp_n, g_hp_at;
-void r_hud_draw(int w0){ g_hud_w0 = w0; }
+void r_hud_draw(int w0){ glass_flush(); g_hud_w0 = w0; }
 static float hud_side_dx(float lo, float hi){
     const float c = (lo + hi) * 0.5f / (float)g_hud_w0;
     const float side = c < 1.0f / 3.0f ? 0.0f : c > 2.0f / 3.0f ? 1.0f : 0.5f;
@@ -346,6 +394,7 @@ static void flush_verts(DV *v, int n, int topo){
         if (n <= 0) return;
         ui_rects(v, n);
     }
+    if (g_gov_n && v[0].w == 1.0f && (n < 2 || v[1].w == 1.0f) && (n < 3 || v[2].w == 1.0f)) glass_flush();   /* 2D: the view is over */
     DrawState d; game_state(&d, topo);
     /* HZ6: a keyed cutout in the sorted queue goes hard only while every vertex is opaque */
     if (d.hard && !g_zwrite)
@@ -364,6 +413,13 @@ static void flush_verts(DV *v, int n, int topo){
             }
             for (int i = 0; i < 3; i++){ q[i].rect[0] = lo0; q[i].rect[1] = lo1; q[i].rect[2] = hi0; q[i].rect[3] = hi1; }
         }
+    }
+    if (d.paint == 3){                                  /* a glass page: the game's draw now, the reflection pass later */
+        DrawState o = d;
+        d.paint = 0; d.paint_tex = 0;
+        submit(v, n, &d);
+        glass_defer(v, n, &o);
+        return;
     }
     submit(v, n, &d);
 }
@@ -606,6 +662,7 @@ static void draw_any(const char *n, const uint32_t *a){
         const int armed = g_refl_armed; g_refl_armed = 0;
         const int again = armed && paintable && bound && !g_tex[bound - 1].paint && g_pv_slot && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && pv_same(o, nv);
         if (paintable && bound && (g_tex[bound - 1].paint || again)) car_clip_normals(a[1], vb, ib, o, nv);
+        if (paintable && bound && g_tex[bound - 1].paint == 2) glass_log(bound, o, nv, 2);
         if (paintable && bound && g_tex[bound - 1].paint){
             g_pv_vb = a[1]; g_pv_ib = a[2]; g_pv_count = count; g_pv_slot = bound; g_pv_nv = nv;
             if (g_race){ cs_page(o, nv, bound); cs_apply(o, nv, bound); }
@@ -678,12 +735,14 @@ static void tex_destroy(int slot){
 void r_tfree(uint32_t t){
     if (!t || t >= LFB_SLOT + 1u) return;
     if ((int)t == g_bound) g_bound = 0;
+    glass_flush();
     close_draw();
     tan_free((int)t - 1);
     tex_destroy((int)t - 1);
 }
 void pu_text_reset(int free_handles);
 void r_treset(void){
+    glass_flush();
     close_draw();
     pu_text_reset(0);
     for (int i = 0; i < LFB_SLOT; i++) tex_destroy(i);
@@ -953,24 +1012,27 @@ static float tan_voffset(int bound){
 }
 int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg);
 static long g_frames;
-/* GLASSLOG=1 (debug): the game's reflection pass over the car pages, once a second: texture, its mean colour, states, vertex colour */
+/* GLASSLOG=1 (debug): the car glass pages' draws and the game's reflection pass over the car pages, each new kind once: texture,
+ * its mean colour, states, vertex colour, screen box */
 static void glass_log(int bound, const DV *o, int nv, int refl){
     static int on = -1; static long last;
     if (on < 0){ const char *e = getenv("GLASSLOG"); on = e && *e && *e != '0'; }
     if (!on || !g_race) return;
     /* each new kind of pass once: texture, blend, alpha reference */
-    static uint32_t seen[64]; static int nseen;
-    const uint32_t key = (uint32_t)bound << 8 | (uint32_t)g_blend << 4 | (uint32_t)refl << 1 | (g_alpharef > 0.0f);
+    static uint32_t seen[256]; static int nseen;
+    const uint32_t key = (uint32_t)bound << 8 | (uint32_t)g_blend << 4 | (uint32_t)refl << 1 | (g_alpharef > 0.0f) | (refl == 2 ? (uint32_t)(g_frames / 600) << 20 : 0u);
     for (int i = 0; i < nseen; i++) if (seen[i] == key) return;
-    if (nseen >= 64) return;
+    if (nseen >= 256) return;
     seen[nseen++] = key; (void)last;
     double r = 0, g = 0, b = 0, a = 0;
     for (int i = 0; i < nv; i++){ const uint32_t cl = o[i].color; a += cl >> 24; r += (cl >> 16) & 255; g += (cl >> 8) & 255; b += cl & 255; }
     if (nv){ r /= nv; g /= nv; b /= nv; a /= nv; }
     const uint32_t m = bound ? g_tex_mean[bound - 1] : 0;
-    fprintf(stderr, "[glass] %s frame %ld tick %u: tex %d %dx%d keyed %d mean %02x%02x%02x a%02x | blend %d zw %d aref %.2f hard %d fog %d | verts %d argb %.0f %.0f %.0f %.0f\n",
-            refl ? "reflection" : "other", g_frames, MR32(0x00606AC4u), bound, bound ? g_tex[bound - 1].w : 0, bound ? g_tex[bound - 1].h : 0, bound ? g_tex[bound - 1].keyed : 0,
-            (m >> 16) & 255, (m >> 8) & 255, m & 255, m >> 24, g_blend, g_zwrite, g_alpharef, hard_wanted(), g_fogon, nv, a, r, g, b);
+    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+    for (int i = 0; i < nv; i++){ x0 = fminf(x0, o[i].x); x1 = fmaxf(x1, o[i].x); y0 = fminf(y0, o[i].y); y1 = fmaxf(y1, o[i].y); }
+    fprintf(stderr, "[glass] %s frame %ld tick %u: tex %d %dx%d keyed %d mean %02x%02x%02x a%02x | blend %d zw %d aref %.2f hard %d fog %d cube %d | verts %d argb %.0f %.0f %.0f %.0f | box %.0f..%.0f x %.0f..%.0f\n",
+            refl == 2 ? "glass page" : refl ? "reflection" : "other", g_frames, MR32(0x00606AC4u), bound, bound ? g_tex[bound - 1].w : 0, bound ? g_tex[bound - 1].h : 0, bound ? g_tex[bound - 1].keyed : 0,
+            (m >> 16) & 255, (m >> 8) & 255, m & 255, m >> 24, g_blend, g_zwrite, g_alpharef, hard_wanted(), g_fogon, g_cube_faces, nv, a, r, g, b, x0, x1, y0, y1);
 }
 void r_tupdate(uint32_t t, uint32_t data, int palette){
     (void)palette;
@@ -1000,11 +1062,15 @@ void r_tupdate(uint32_t t, uint32_t data, int palette){
     upload_chain(slot, rgba);
     free(rgba);
     tan_upload(slot);
-    /* runtime/pu_paint.c: a car page's paint map, RG8 */
+    /* runtime/pu_paint.c: a car page's paint map or a glass page's glass map, RG8 */
     const uint32_t bytes = (uint32_t)n * 2u;
     uint8_t *rg = malloc(bytes);
     const int had = g_tex[slot].paint;
-    g_tex[slot].paint = rg && bytes <= UP_BYTES && paint_map(data, w, h, g_tex[slot].fmt, rg);
+    g_tex[slot].paint = rg && bytes <= UP_BYTES ? paint_map(data, w, h, g_tex[slot].fmt, rg) : 0;     /* 1 paint, 2 glass */
+    { static int gl = -1; if (gl < 0){ const char *e = getenv("GLASSLOG"); gl = e && *e && *e != '0'; }
+      if (gl && w <= 128 && w == h && (g_tex_mean[slot] >> 24) < 0xC0)
+          fprintf(stderr, "[glass] slot %d tex %08x %dx%d fmt %d mean %06x a%02x: paint %d\n", slot + 1, data, w, h, g_tex[slot].fmt,
+                  g_tex_mean[slot] & 0xFFFFFF, g_tex_mean[slot] >> 24, g_tex[slot].paint); }
     if (g_tex[slot].paint || had){
         if (g_tex[slot].seg == g_seg_serial || g_nup + bytes > UP_BYTES) seg_publish(0);
         cmd_room(6);
@@ -1118,16 +1184,20 @@ int r_init(int w, int h){
 }
 void r_restore(void){ close_draw(); seg_publish(0); }
 void r_setvideomode(int w, int h, int bpp){
+    glass_flush();
     pu_text_reset(1);
     g_race = bpp == 32 && w > 640;         /* the frontend is 640x480x32 too (patches), the race never (pu_hooks.c) */
     g_st[THRASH_STATE_SCREEN_WIDTH] = w; g_st[THRASH_STATE_SCREEN_HEIGHT] = h;
     if (w > 0 && h > 0 && (w != g_lw || h != g_lh)){ close_draw(); g_lw = w; g_lh = h; g_cube_faces = 0; g_s_video = 0; g_clipvalid = 0; }   /* the old clip is the old mode's: the loading screen comes before the next THRASH_clip */
 }
 void r_window(int idx){ if (idx >= 0 && idx <= 7) g_curwin = idx; }
-void r_clip(int x1, int y1, int x2, int y2){ g_clip[0] = x1; g_clip[1] = y1; g_clip[2] = x2; g_clip[3] = y2; g_clipvalid = 1; }
+void r_clip(int x1, int y1, int x2, int y2){
+    if (g_gov_n && (!g_clipvalid || g_clip[0] != x1 || g_clip[1] != y1 || g_clip[2] != x2 || g_clip[3] != y2)) glass_flush();
+    g_clip[0] = x1; g_clip[1] = y1; g_clip[2] = x2; g_clip[3] = y2; g_clipvalid = 1; }
 void r_flushwindow(void){ }
 /* a quad at the far plane through the clip, with its own state: the depth-only window (3) keeps the colour */
 void r_clearwindow(void){
+    glass_flush();
     DrawState d; memset(&d, 0, sizeof d);
     d.blend = 4; d.zcmp = 7; d.zwrite = 1; d.colorwrite = g_curwin != 3; d.filter = 1; d.cs = d.ct = 0;
     const float W = (float)g_lw, H = (float)g_lh;
@@ -1231,6 +1301,7 @@ int r_reshape_wanted(int *pw){
 }
 void thrash_screen_width(int w);
 void r_reshape(int nw){
+    glass_flush();
     fprintf(stderr, "[reshape] race screen %dx%d -> %dx%d\n", g_lw, g_lh, nw, g_lh);
     close_draw();
     g_st[THRASH_STATE_SCREEN_WIDTH] = nw;
@@ -1238,6 +1309,7 @@ void r_reshape(int nw){
     g_lw = nw; g_s_video = 0; g_clipvalid = 0;
 }
 void r_pageflip(void){
+    glass_flush();
     g_frames++;
     cs_flip();
     close_draw();
@@ -1279,6 +1351,7 @@ void r_pageflip(void){
 }
 long r_frames(void){ return g_frames; }
 void r_capture_target(int face){
+    glass_flush();
     close_draw();
     cmd_room(4);
     g_cmd[g_ncmd++] = C_TARGET; g_cmd[g_ncmd++] = (uint32_t)face;

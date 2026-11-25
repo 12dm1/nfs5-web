@@ -32,6 +32,8 @@ static void stuck_check(CPU *c){
 void pu_car_lod(CPU *c);
 void pu_car_lod_record(CPU *c);
 void pu_pad_input(void);
+void pu_race_camera(CPU *c);
+void pu_race_camera_fe(CPU *c);
 void pu_pad_impact(CPU *c);
 void pu_hud_mode(void);
 void pu_hud_preview(CPU *c, int height);
@@ -83,7 +85,7 @@ int pu_hook(CPU *c, uint32_t ip){
     case 0x4CBBF9u: pu_hud_preview(c, 1); return 1;
     case 0x41A495u: pu_hud_text_begin(c); return 1;
     case 0x41A4AEu: pu_hud_text_end(c); return 1;
-    case 0x413800u: pu_pad_input(); { void nettest_race(CPU *c); nettest_race(c); } return 1;
+    case 0x413800u: pu_pad_input(); { void nettest_race(CPU *c); nettest_race(c); } pu_race_camera(c); return 1;
     case 0x40F740u: pu_pad_impact(c); return 1;
     case 0x43A3B0u: pu_car_lod(c); return 1;
     case 0x43C431u: pu_car_lod_record(c); return 1;
@@ -93,7 +95,8 @@ int pu_hook(CPU *c, uint32_t ip){
     case 0x40C865u: hs_ai_guard(g_mem + c->esi, (float *)(g_mem + MR32(c->esp + 4)), (const float *)(g_mem + MR32(c->esp + 8))); return 1;
     case 0x40C8DAu: hs_ai_throttle(g_mem + c->esi); return 1;
     case 0x41041Eu: stuck_check(c); return 1;
-    case 0x4D2B80u: case 0x4D3D00u: nettest_hook(c, ip); return 1;
+    case 0x4D2B80u: pu_race_camera_fe(c); nettest_hook(c, ip); return 1;    /* the frontend's tick */
+    case 0x4D3D00u: nettest_hook(c, ip); return 1;
     case 0x41562Eu: case 0x4B6CB9u: race_mode(c); return 1;
     }
     return 0;
