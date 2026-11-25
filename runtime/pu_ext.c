@@ -499,9 +499,19 @@ void pu_race_camera_fe(CPU *c){
         had[i] = (int)MR32(acc[i] + 0x18);
         if (k < 0 && had[i] == pick) k = i;
     }
-    if (k == 0){ if (cam_log()) fprintf(stderr, "[camera] the profile's Camera 1 is already %d\n", pick); return; }
-    int want[4];
-    for (int i = 0; i < 4; i++) want[i] = k > 0 ? had[(i + k) & 3] : i == 0 ? pick : had[i];
+    /* the whole cycle turns round to the pick, the order kept; a camera already earlier in the cycle (a duplicate the
+     * profile had, or the pick when it was in no slot) gives its place to the first camera the cycle lacks, so the four
+     * slots always hold four different cameras */
+    int rot[4], want[4], n = 0;
+    for (int i = 0; i < 4; i++) rot[i] = k > 0 ? had[(i + k) & 3] : i == 0 ? pick : had[i];
+    for (int i = 0; i < 4; i++){
+        int dup = rot[i] < 0 || rot[i] > 3;
+        for (int j = 0; j < n && !dup; j++) dup = want[j] == rot[i];
+        want[n++] = dup ? -1 : rot[i];
+    }
+    for (int i = 0; i < 4; i++) if (want[i] < 0)
+        for (int m = 0; m < 4; m++){ int used = 0; for (int j = 0; j < 4; j++) used |= want[j] == m; if (!used){ want[i] = m; break; } }
+    if (!memcmp(want, had, sizeof want)){ if (cam_log()) fprintf(stderr, "[camera] the profile's Camera 1 is already %d\n", pick); return; }
     for (int i = 0; i < 4; i++){
         const uint32_t v = (uint32_t)want[i];
         if (had[i] != want[i]) guest_call(c, MR32(CAM_VTABLE + 0x2C), acc[i], &v, 1);

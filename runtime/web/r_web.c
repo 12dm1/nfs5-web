@@ -105,6 +105,7 @@ static Tex g_tex[MAX_TEX];
 static int g_bound;             /* slot + 1, 0 none */
 #define LFB_SLOT (MAX_TEX - 1)
 static uint32_t g_tex_mean[LFB_SLOT];   /* GLASSLOG debug */
+static uint16_t g_tex_bright[LFB_SLOT]; /* per mille of opaque texels brighter than the cube's emissive threshold (0.85) */
 #define SHADE_N 32
 static uint8_t *g_tex_shade[LFB_SLOT];  /* dark textures: SHADE_N x SHADE_N cells of alpha, luma (the car shadow layer) */
 static long g_frames;
@@ -192,7 +193,22 @@ static void emit_state(const DrawState *d){
                 const float al = 0.299f * amb[0] + 0.587f * amb[1] + 0.114f * amb[2];
                 if (al >= 0.0f && al < 16.0f){ dark = (0.5f - al) / 0.2f; dark = dark < 0.0f ? 0.0f : dark > 1.0f ? 1.0f : dark; }
             }
-            u[12] = 1.0f + 3.0f * dark; u[13] = 0.85f; u[14] = -4.0f;
+            /* Monaco at night: only small bright spots (lamp bulbs) go HDR there; a texture bright over a large part of it
+             * (a lit shop window) keeps its colour, or its reflection outshines the lamps. CAP_OPAQUE = the gain in the dark (4),
+             * CAP_AREA = the bright share (per mille) where the gain starts to fade, gone at twice that (60 on the Monaco
+             * tracks; given, it counts on every track). */
+            static float g_max = -1.0f, g_area = 0.0f;
+            if (g_max < 0.0f){ const char *e = getenv("CAP_OPAQUE"); g_max = e && *e ? (float)atof(e) : 4.0f; e = getenv("CAP_AREA"); if (e && *e){ g_area = (float)atof(e); if (g_area < 1.0f) g_area = 1.0f; } }
+            const float area = g_area > 0.0f ? g_area : !strncasecmp((const char *)(g_mem + 0x00628940u), "monaco", 6) ? 60.0f : 0.0f;
+            float wa = 1.0f;
+            if (area > 0.0f && d->tex > 0){ wa = (2.0f * area - (float)g_tex_bright[d->tex - 1]) / area; wa = wa < 0.0f ? 0.0f : wa > 1.0f ? 1.0f : wa; }
+            u[12] = 1.0f + (g_max - 1.0f) * dark * wa; u[13] = 0.85f; u[14] = -4.0f;
+            { static int lg = -1; if (lg < 0){ const char *e = getenv("CAPLOG"); lg = e && *e && *e != '0'; }
+              static long last = -1000;
+              if (lg && g_frames - last >= 300){ last = g_frames; fprintf(stderr, "[caplog] frame %ld opaque emissive gain %.2f (dark %.2f)\n", g_frames, u[12], dark); }
+              static uint8_t seen[LFB_SLOT];
+              if (lg && d->tex > 0 && !seen[d->tex - 1] && g_tex_bright[d->tex - 1] > 0){ seen[d->tex - 1] = 1; const uint32_t m = g_tex_mean[d->tex - 1];
+                  fprintf(stderr, "[caplog] opaque tex %d %dx%d bright %u/1000 mean %06x\n", d->tex, g_tex[d->tex - 1].w, g_tex[d->tex - 1].h, g_tex_bright[d->tex - 1], m & 0xFFFFFF); } }
         }
         u[15] = g_cap_sun && d->blend == 1 ? 1.0f : 0.0f;
     }
@@ -396,6 +412,11 @@ static void flush_verts(DV *v, int n, int topo){
     }
     if (g_gov_n && v[0].w == 1.0f && (n < 2 || v[1].w == 1.0f) && (n < 3 || v[2].w == 1.0f)) glass_flush();   /* 2D: the view is over */
     DrawState d; game_state(&d, topo);
+    { static int lg = -1; if (lg < 0){ const char *e = getenv("GOVLOG"); lg = e && *e && *e != '0'; }
+      if (lg && g_frames % 600 == 300 && (g_gov_n || d.paint == 3)){
+          float y0 = v[0].y, y1 = v[0].y; for (int i = 1; i < n; i++){ y0 = v[i].y < y0 ? v[i].y : y0; y1 = v[i].y > y1 ? v[i].y : y1; }
+          fprintf(stderr, "[govlog] frame %ld %s tex %d paint %d blend %d zw %d zcmp %d cull %d n %d y %.0f..%.0f w %.3f pending %d va %02x\n", g_frames,
+                  d.paint == 3 ? "GLASS" : "after", d.tex, d.paint, g_blend, g_zwrite, d.zcmp, d.cull, n, y0, y1, v[0].w, g_gov_n, v[0].color >> 24); } }
     /* HZ6: a keyed cutout in the sorted queue goes hard only while every vertex is opaque */
     if (d.hard && !g_zwrite)
         for (int i = 0; i < n; i++) if ((v[i].color >> 24) < 0xF8){ d.hard = 0; break; }
@@ -1049,6 +1070,10 @@ void r_tupdate(uint32_t t, uint32_t data, int palette){
     if (keyed) clear_border(rgba, w, h);
     { uint64_t sr = 0, sg = 0, sb = 0, sa = 0;
       for (int i = 0; i < n; i++){ const uint32_t px = rgba[i]; sr += px & 255; sg += (px >> 8) & 255; sb += (px >> 16) & 255; sa += px >> 24; }
+      { uint32_t nb = 0;
+        for (int i = 0; i < n; i++){ const uint32_t px = rgba[i], r = px & 255, g = (px >> 8) & 255, b = (px >> 16) & 255;
+            const uint32_t m = r > g ? (r > b ? r : b) : (g > b ? g : b); if ((px >> 24) >= 128 && m > 217) nb++; }
+        g_tex_bright[slot] = n ? (uint16_t)((uint64_t)nb * 1000 / (uint64_t)n) : 0; }
       if (n) g_tex_mean[slot] = (uint32_t)(sa / n) << 24 | (uint32_t)(sr / n) << 16 | (uint32_t)(sg / n) << 8 | (uint32_t)(sb / n);
       free(g_tex_shade[slot]); g_tex_shade[slot] = NULL;
       if (n && (sr + sg + sb) / 3 / (uint64_t)n < 0x40 && w >= SHADE_N && h >= SHADE_N && (g_tex_shade[slot] = calloc(SHADE_N * SHADE_N * 2, 1))){

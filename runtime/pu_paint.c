@@ -179,6 +179,20 @@ static void glass_blit(CPU *c, uint32_t page, uint32_t image, uint32_t tint, uin
     if (g->blits < 255) g->blits++;
     const int f16 = fmt16(g->fmt);
     uint32_t glass = 0, hist[16] = {0};
+    /* the glass page's window alpha (the most common one between the cut-outs and the seals: 128 in a 32-bit source, 68 on
+     * the 4444 showroom pages); the fainter texels round it are the edges by the seals, and with the reflection at full
+     * strength they lit the seals' outline */
+    int amin = 0x10;
+    if (g_file == 3){
+        uint32_t ah[256] = {0};
+        for (int j = 0; j < h; j++) for (int i = 0; i < w; i++){
+            const int tx = x0 + i;
+            if (tx >= 0 && tx < stride) ah[texel_alpha(g->fmt, raw_at(g_mem + bits, f16, (size_t)(y0 + j) * (size_t)stride + (size_t)tx))]++;
+        }
+        int mode = -1;
+        for (int a = 0x10; a <= 0xB0; a++) if (ah[a] && (mode < 0 || ah[a] > ah[mode])) mode = a;
+        if (mode > 0) amin = mode * 3 / 4 > 0x10 ? mode * 3 / 4 : 0x10;
+    }
     for (int j = 0; j < h; j++) for (int i = 0; i < w; i++){
         const int tx = x0 + i;
         if (tx < 0 || tx >= stride) continue;
@@ -188,7 +202,7 @@ static void glass_blit(CPU *c, uint32_t page, uint32_t image, uint32_t tint, uin
         g->snap[t] = v;
         /* not the opaque seals and frames; on the glass page not its clear cut-outs either. The intglass page is window but for
          * its frame: the race's image (INTGLASS.FSH "glat") is clear, alpha 0, the menus' ("glai") a light tint */
-        g->mask[t] = g->blits == 1 && a <= 0xB0 && (a >= 0x10 || g_file == 4);
+        g->mask[t] = g->blits == 1 && a <= 0xB0 && (a >= amin || g_file == 4);
         glass += g->mask[t]; hist[a >> 4]++;
     }
     if (glass_log_on()){
@@ -234,12 +248,14 @@ static int glass_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
         }
         float r = seen ? (float)same / (float)seen : 0.0f;
         /* the frame too: the clear intglass page is all transparent black but for its frame, as are other, empty pages */
-        if (seen_f >= 16 && same_f * 2 < seen_f) r = 0.0f;
+        /* a real copy matches all but the format's rounding (1.00 in the logs); half matches were room textures with soft
+         * alpha (the showroom's spotlight cones) taken for the gradient intglass page */
+        if (seen < 64 || seen_f < 16 || same_f * 10 < seen_f * 9) r = 0.0f;
         if (g->consumed) r -= 0.001f;
         if (g->bits == data) r += 0.0005f;
         if (r > best){ best = r; page = g; }
     }
-    if (!page || best < 0.5f) return 0;
+    if (!page || best < 0.9f) return 0;
     const int tol = coarse(page->fmt) > coarse(fmt) ? coarse(page->fmt) : coarse(fmt);
     const size_t n = (size_t)page->stride * (size_t)page->rows;
     memset(rg, 0, (size_t)w * h * 2);
@@ -249,6 +265,13 @@ static int glass_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
         if (!texel_same(texel_argb(fmt, raw_at(g_mem + data, up16, t)), texel_argb(page->fmt, page->snap[t]), tol)){ broken++; continue; }
         rg[t * 2 + 1] = 255; kept++;
     }
+    /* the page's opaque seals and frame: G = 100, under the glass pass's 0.5 (no reflection) but enough to keep the game's
+     * sphere-map pass off them (it lit the rubber grey, like a specular) */
+    uint32_t seals = 0;
+    for (size_t t = 0; t < n; t++)
+        if (!page->mask[t] && texel_alpha(page->fmt, page->snap[t]) >= 0xC0 &&
+            texel_same(texel_argb(fmt, raw_at(g_mem + data, up16, t)), texel_argb(page->fmt, page->snap[t]), tol)){ rg[t * 2 + 1] = 100; seals++; }
+    if (glass_log_on()) fprintf(stderr, "[glass] %u seal and frame texels off the stock reflection\n", seals);
     page->consumed = 1;
     if (glass_log_on()) fprintf(stderr, "[glass] upload %08x %dx%d fmt %d (built as %x): %u intact glass texels, %u drawn over (build match %.2f)\n", data, w, h, fmt, page->fmt, kept, broken, best);
     return (int)kept;
@@ -268,7 +291,10 @@ void sub_00444130(CPU *restrict c){
     uint32_t a[7];
     for (int i = 0; i < 7; i++) a[i] = MR32(c->esp + 4 + 4u * (uint32_t)i);
     sub_00444130_orig(c);
-    if ((g_file == 3 || g_file == 4) && glass_on()){     /* the glass pages: tpage5 "glass", tpage6 "intglass" (global, the tinted side windows) */
+    /* the glass pages: tpage5 "glass", tpage6 "intglass" (global, the tinted side windows). In the menus (4444 pages, 115C) file 3
+     * is no window: it is the showroom floor's spotlight decal (alpha 68 with clear cut-outs, drawn from the platform to the
+     * screen's bottom), and the glass pass made it shine like a mirror; the showroom car's windows are the intglass page. */
+    if ((g_file == 4 || (g_file == 3 && a[3] != 0x115Cu)) && glass_on()){
         const uint32_t eax = c->eax, ecx = c->ecx, edx = c->edx;
         glass_blit(c, a[0], a[1], a[2], a[3], (int)a[5], (int)a[6]);
         c->eax = eax; c->ecx = ecx; c->edx = edx;
@@ -323,16 +349,27 @@ static int paint_map_page(uint32_t data, int w, int h, int fmt, uint8_t *rg){
         peak[b] = 255; uint32_t most = 0;
         for (int v = 24; v < 256; v++) if (hist[b][v] > most){ most = hist[b][v]; peak[b] = v; }
     }
-    memset(rg, 0, (size_t)w * h * 2);
+    /* G: 128 neutral (full gloss, no damage; also off the paint, so a filtered edge reads nothing); 128..255 paint darker than
+     * its band's peak (the seams: matte by the shader's dark power); 128..0 damage strength (darker and duller) */
+    for (size_t t = 0; t < (size_t)w * h; t++){ rg[t * 2] = 0; rg[t * 2 + 1] = 128; }
     for (size_t t = 0; t < n; t++){
         if (!live[t]) continue;
         const int pk = peak[page->band[t]];
-        rg[t * 2] = 255; rg[t * 2 + 1] = (uint8_t)(page->red[t] >= pk ? 255 : page->red[t] * 255 / pk);
+        const int keep = page->red[t] >= pk ? 255 : page->red[t] * 255 / pk;
+        rg[t * 2] = 255; rg[t * 2 + 1] = (uint8_t)(128 + (255 - keep) / 2);
     }
     /* paint texels drawn over after the tint (the scrapes a damaged car's page is built with, numbers, plates) stay paint, matte
      * with their own colour: off the paint they took the game's sphere-map reflection pass (glinting like the glass) */
     uint32_t over = 0;
-    for (size_t t = 0; t < n; t++) if (page->band[t] && !live[t]){ rg[t * 2] = 255; rg[t * 2 + 1] = 0; over++; }
+    /* the damage: its strength from how far the texel strays from the paint it covers (at least a little); the shader darkens
+     * it by that and takes the gloss off as much (the stock look: scrapes darker and dull) */
+    for (size_t t = 0; t < n; t++) if (page->band[t] && !live[t]){
+        const uint32_t a = texel_argb(fmt, raw_at(g_mem + data, f16, t)), b = texel_argb(page->fmt, page->expect[t]);
+        int dmax = 0;
+        for (int k = 0; k < 24; k += 8){ const int dd = (int)((a >> k) & 255) - (int)((b >> k) & 255); if (dd > dmax) dmax = dd; if (-dd > dmax) dmax = -dd; }
+        int s = 20 + dmax * 108 / 160; if (s > 128) s = 128;      /* 0..128: 0.15 .. 1 */
+        rg[t * 2] = 255; rg[t * 2 + 1] = (uint8_t)(128 - s); over++;
+    }
     /* untinted texels with paint all round (a 5 x 5 window at least 70 % live paint): the damage scrapes are drawn untinted, and
      * off the paint they took the game's sphere-map reflection pass (the sun's glint, as on the glass); glass, lamps and plates are
      * larger than that. They shade as matte paint with their own colour. */
@@ -347,11 +384,11 @@ static int paint_map_page(uint32_t data, int w, int h, int fmt, uint8_t *rg){
             }
             for (int y = 0; y < H; y++) for (int x = 0; x < W; x++){
                 const size_t t = (size_t)y * W + x;
-                if (live[t]) continue;
+                if (live[t] || page->band[t]) continue;     /* the paint, and the damage marked above */
                 const int x0 = x - 2 < 0 ? 0 : x - 2, y0 = y - 2 < 0 ? 0 : y - 2, x1 = x + 3 > W ? W : x + 3, y1 = y + 3 > H ? H : y + 3;
                 const uint32_t cnt = sum[(size_t)y1 * (W + 1) + x1] - sum[(size_t)y0 * (W + 1) + x1] - sum[(size_t)y1 * (W + 1) + x0] + sum[(size_t)y0 * (W + 1) + x0];
                 const uint32_t area = (uint32_t)((x1 - x0) * (y1 - y0));
-                if (cnt * 10 >= area * 7){ rg[t * 2] = 255; rg[t * 2 + 1] = 0; absorbed++; }
+                if (cnt * 10 >= area * 7){ rg[t * 2] = 255; rg[t * 2 + 1] = 128 - 77; absorbed++; }   /* damage 0.6 */
             }
             free(sum);
         }

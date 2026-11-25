@@ -74,6 +74,7 @@ const P_METAL = 0.2; const P_GRAZING = 0.5; const P_FLAKE_SCALE = 1200.0; const 
 const P_COAT = 1.0; const P_COAT_GLOSS = 0.0; const P_PEEL = 0.5; const P_PEEL_SCALE = 48.0; const P_ROUGH = 0.15; const P_METAL_MAP = 0.0;
 const P_SPEC = 20.0; const P_REFL = 1.0; const P_GLOW = 35.8; const P_GLOW_ANG = 15.0; const P_GLOW_SAT = 0.6;
 const P_VIEW_LIGHT = 1.2; const P_VIEW_DARK = 0.25; const P_ENV_DIFFUSE = 0.3; const P_ENV_GLOW = 0.0;
+const P_DMG_DARK = 0.55;
 const P_SUN_FOG = 150.0; const P_LIGHT_GAIN = 1.7; const P_DARK_MATTE = 1.0; const P_DARK_POWER = 4.0; const P_SUN_REFL = 0.1;
 const MAXMIP = 8.0;
 const SUN_COL = vec3f(1.0, 0.95, 0.85);
@@ -174,9 +175,14 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   let fw = length(fwidth(uv));
   let a = albedo.a * i.color.a;
   if (u.alphaRef > 0.0 && a < u.alphaRef) { discard; }
-  var keep = select(1.0, clamp(pk.g / pk.r, 0.0, 1.0), pk.r > 1e-3);
-  keep = pow(keep, P_DARK_POWER);
+  // runtime/pu_paint.c: G 0.5 neutral; above, paint darker than its band (seams: matte by the dark power); below, damage strength
+  let gv = pk.g * 255.0 - 127.5;
+  var keep = pow(1.0 - clamp(gv / 127.5, 0.0, 1.0), P_DARK_POWER);
   keep = clamp(1.0 - P_DARK_MATTE * (1.0 - keep), 0.0, 1.0);
+  // damage: darker by its strength, and the gloss goes as much
+  let dmg = clamp(-gv / 127.5, 0.0, 1.0);
+  keep = keep * (1.0 - dmg);
+  let base = albedo.rgb * (1.0 - P_DMG_DARK * dmg);
   let V = -normalize(P);
   var Ngeo = normalize(cross(p1, p2));
   if (dot(Ngeo, P) > 0.0) { Ngeo = -Ngeo; }
@@ -213,7 +219,7 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   // the light (sun lobe, view light, sky fill, gain) falls on every paint texel: it scales the texel's own colour, so seams stay
   // dark. Only the shine (sun spot, reflection, coat) follows the texel's darkness. Scaled by it too, a damage scrape (darker
   // paint texels) lost the light and showed as a grey hole in lit paint.
-  var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, albedo.rgb, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
+  var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, base, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
                       coat_c, rough_coat, P_GLOW, P_VIEW_LIGHT, env_irr, env_glow, P_ENV_DIFFUSE, P_ENV_GLOW,
                       P_LIGHT_GAIN, textureSampleLevel(tx, sm, uv, 3.0).rgb);
   rgb = mix(albedo.rgb * i.color.rgb, rgb, pk.r);   // texels the game does not paint keep the stock look
@@ -263,7 +269,7 @@ const G_ROUGH = 0.02; const G_SPEC = 20.0; const G_REFL = 1.0; const G_F0 = 0.04
   let pk = textureSample(paintTx, sm2, i.aux.xy / max(i.aux.z, 1e-6)).rg;
   var r = shade(i);
   // the intact glass (g) has the cube's reflection too: off it when the cube is there
-  return vec4f(r.rgb, r.a * (1.0 - max(pk.r, pk.g * select(0.0, 1.0, u.camR.w > 0.5))));
+  return vec4f(r.rgb, r.a * (1.0 - max(pk.r, select(select(0.0, 0.75, abs(pk.g - 100.0 / 255.0) < 0.03), 1.0, pk.g > 0.9) * select(0.0, 1.0, u.camR.w > 0.5))));
 }
 // a cube face (PC dx11_shaders.h EmissiveGain, SunMaskOutput): em = gain, threshold, power (below 0: full-bright vertices only), sun sprite
 @fragment fn fs_cap(i: VO) -> @location(0) vec4f {

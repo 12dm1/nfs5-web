@@ -83,3 +83,18 @@ Not checked yet. Next steps:
   reflections that are stronger at grazing angles, with the interior still visible. In a race, look at an opponent
   beside you with the chase camera. The 356A's own windows keep the old look (see above).
 - Resolution: Options -> Graphics. Not checked yet (see RES1).
+
+## Follow-up 2026-11-25 (user checks in the browser)
+
+- Menus: builder file 3 on the 4444 pages is the showroom floor's spotlight decal, not a window (GOVLOG=1: its draw spans the
+  platform to the screen's bottom); it shone like a mirror. Only the 32-bit (race) file 3 is glass now; the showroom car's
+  windows are the intglass page. Matching also needs >= 90 % (was 50 %) with the frame.
+- Window edges fainter than 3/4 of the page's glass alpha are left out; the glass pages' opaque seals and frame get G = 100:
+  the stock sphere-map pass is kept off them by 75 % (it lit the rubber grey). User OK.
+- Paint map G: 128 neutral, 128..255 darker paint (seams), 128..0 damage strength (0.15..1 from the texel's distance to the
+  paint it covers). The shader darkens damage by 55 % x strength and takes the gloss off as much. The untinted-islands pass
+  no longer overwrites marked damage. User OK.
+- Monaco at night: opaque full-bright textures go HDR in the cube only where their bright share is small (CAP_AREA 60 per
+  mille, Monaco tracks only; CAP_AREA/CAP_OPAQUE env override). User OK.
+- CAM1: the rotated cycle is de-duplicated (missing cameras fill a repeated slot), so the four slots always differ.
+- Debug: CAPLOG=1 (cube emissive textures), GOVLOG=1 (glass draws, every 600 frames).
