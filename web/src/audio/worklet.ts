@@ -20,6 +20,8 @@ const SAFE_MS = 4;          // the least margin to keep before the game's next w
 const START_MS = 10;        // margin to start with, and after running into the writer
 const WAKE_MS = 14;
 const EXTRA_MAX_MS = 60;    // the most margin a run of stalls (a loading screen, the menus loading a car) can add
+const GAP_WIN_S = 10;       // the longest gap between the game's writes is held this long (two windows)
+const GAP_MAX_MS = 100;     // gaps longer than this are stalls (loads, menus), left to the underrun margin
 const CALM_S = 3;           // no underrun for this long: the added margin goes back, 3 ms a second (the rate trim follows at 5)         // below this margin over the least one (more than a burst: Chrome renders ~4 quanta at once), the game's sound thread is woken to write more
 
 const dbGain = (v: number) => v >= 0 ? 1 : v <= -10000 ? 0 : Math.pow(10, v / 2000);
@@ -36,6 +38,8 @@ interface Stream {
   why: string;
   lastUnder: number;                        // context time of the last underrun
   fadeIn: boolean;                          // the first quantum after a silence ramps up (no click)
+  lastHead: number; lastHeadT: number;       // the writer's last head and when it moved (context seconds)
+  gapCur: number; gapPrev: number; gapT: number;   // longest write gap, ms: this window, the one before, window start
 }
 interface Fmt { data: number; al: number; ch: number; bits: number; nfr: number }
 
@@ -173,10 +177,20 @@ class Mixer extends AudioWorkletProcessor {
     const wrap = (x: number) => ((x % nfr) + nfr) % nfr;
     let v = this.streams.get(b);
     if (!v || v.data !== f.data || v.size !== nfr * f.al || v.ms !== ms) {
-      v = { data: f.data, size: nfr * f.al, ms, rd: wrap(headF - START_MS * ms), holding: true, adj: 0, extra: 0, minFill: Infinity, win: 0, quiet: this.st, why: 'start', lastUnder: -1e9, fadeIn: true };
+      v = { data: f.data, size: nfr * f.al, ms, rd: wrap(headF - START_MS * ms), holding: true, adj: 0, extra: 0, minFill: Infinity, win: 0, quiet: this.st, why: 'start', lastUnder: -1e9, fadeIn: true,
+        lastHead: headF, lastHeadT: currentTime, gapCur: 0, gapPrev: 0, gapT: currentTime };
       this.streams.set(b, v);
     }
-    const target = SAFE_MS * ms + v.extra;
+    // TRK2-1: in races the game's mix thread writes every ~8 ms but often 15-25 ms apart (PC; more on phones). Down to a
+    // 4 ms margin each such gap ran into the writer: 16 ms+ of silence every 10-20 s. The margin now covers the longest
+    // recent gap; a stall over GAP_MAX_MS (a load) still goes to the underrun path and its extra margin.
+    if (headF !== v.lastHead) {
+      const gap = (currentTime - v.lastHeadT) * 1000;
+      if (gap <= GAP_MAX_MS && gap > v.gapCur) v.gapCur = gap;
+      v.lastHead = headF; v.lastHeadT = currentTime;
+    }
+    if (currentTime - v.gapT >= GAP_WIN_S) { v.gapPrev = v.gapCur; v.gapCur = 0; v.gapT = currentTime; }
+    const target = SAFE_MS * ms + Math.max(v.extra, Math.max(v.gapCur, v.gapPrev) * ms);
     let fill = wrap(headF - v.rd);
     if (fill > nfr / 2) fill -= nfr;                       // past the writer
     const step = fps / sampleRate * (1 + v.adj), need = frames * step;
@@ -260,7 +274,7 @@ class Mixer extends AudioWorkletProcessor {
     this.port.postMessage({
       stat: `quanta ${s.quanta}, rms ${Math.sqrt(s.sq / Math.max(1, s.sqN)).toFixed(3)}, stream: avg margin ${(s.fillSum / Math.max(1, s.fillN)).toFixed(1)} ms, least ${s.least === Infinity ? '-' : s.least.toFixed(1)} ms` +
         `, underruns ${s.underruns}, catch-ups ${s.skips}, max trim ${(s.maxAdj * 100).toFixed(2)} %` +
-        (v ? `, extra margin ${(v.extra / v.ms).toFixed(1)} ms` : ', no stream') + `, wakes ${s.wakes}, cursor-buffer quanta ${s.cursorQuanta}`,
+        (v ? `, extra margin ${(v.extra / v.ms).toFixed(1)} ms, write-gap hold ${Math.max(v.gapCur, v.gapPrev).toFixed(1)} ms` : ', no stream') + `, wakes ${s.wakes}, cursor-buffer quanta ${s.cursorQuanta}`,
     });
     this.s = Mixer.stats();
   }
