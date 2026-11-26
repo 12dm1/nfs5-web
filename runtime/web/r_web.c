@@ -1356,7 +1356,7 @@ void r_reshape(int nw){
  * or the GPU at 4K). Every half second: one more face while the wait covers 1.5 faces for 2 s; a raise that costs over 10 % of
  * the frame rate goes back (no retry for 30 s); no wait (the thread is the limit) with the rate under the display's drops one.
  * Never under ~15 cubes a second (up to 3 faces for it). The first 3 s of a race view are left alone, frames over 50 ms left out; the count carries over to the next race.
- * Off by default (one face a frame): ?env=CUBE_ADAPT=1 turns it on; ?env=CUBE_FACES=<1..6> fixes the count, CUBELOG=1 logs every 2 s. */
+ * On by default; ?env=CUBE_ADAPT=0 = one face a frame; ?env=CUBE_FACES=<1..6> fixes the count, CUBELOG=1 logs every 2 s. */
 static int g_cube_n = 2, g_cube_fixed = -1, g_cube_seen;
 static double g_cube_face_ms, g_cube_wait_ms;
 int r_cube_faces_per_frame(void){ g_cube_seen = 1; return g_cube_n; }   /* the race only: pu_cube.c */
@@ -1365,8 +1365,8 @@ static void cube_adapt(void){
     if (g_cube_fixed < 0){
         const char *e = getenv("CUBE_FACES"); g_cube_fixed = e && *e ? atoi(e) : 0;
         if (g_cube_fixed < 0 || g_cube_fixed > 6) g_cube_fixed = 0;
-        /* off for now (the user, 2026-11-25): one face a frame as before, until the race's frame cost is found (docs/tasks/PERF2) */
-        if (!g_cube_fixed){ e = getenv("CUBE_ADAPT"); if (!(e && *e == '1')) g_cube_fixed = 1; }
+        /* on again since PERF2 (2026-11-26: a 4K race frame ~4.5 ms of 6.9 at 144 Hz); ?env=CUBE_ADAPT=0 = one face a frame */
+        if (!g_cube_fixed){ e = getenv("CUBE_ADAPT"); if (e && *e == '0') g_cube_fixed = 1; }
         e = getenv("CUBE_EVERY"); if (e && atoi(e) > 1) g_cube_fixed = 1;      /* the phones' light profile */
         if (g_cube_fixed) g_cube_n = g_cube_fixed;
     }
