@@ -182,14 +182,51 @@ static int thrash_call_locked(CPU *c, const char *name, uint32_t *r);
  * keep running), and another guest thread may call THRASH meanwhile.  A
  * caller that has to wait releases the guest lock too (no deadlock with the
  * presenting thread, which wants it back). */
-static pthread_mutex_t g_rmx = PTHREAD_MUTEX_INITIALIZER;
 void guest_wait_begin(void); void guest_wait_end(void);
+#ifdef __wasm__
+/* PERF2: every THRASH call is made under the guest lock, and the renderer gives that lock up only in its three waits
+ * (r_web.c: a free segment, readrect, the present), so those waits mark themselves (thrash_wait_begin/end) and a call that
+ * finds the renderer inside one waits for it to come back; no lock of its own (the pthread mutex, then a futex, cost
+ * 2-3 % of the game thread at ~400 k calls a second). */
+static int32_t g_rbusy;                                 /* renderer waits in progress (changed under the guest lock only) */
+void thrash_wait_begin(void){ __atomic_add_fetch(&g_rbusy, 1, __ATOMIC_RELEASE); guest_wait_begin(); }
+void thrash_wait_end(void){
+    guest_wait_end();
+    if (__atomic_sub_fetch(&g_rbusy, 1, __ATOMIC_RELEASE) == 0) __builtin_wasm_memory_atomic_notify(&g_rbusy, 0xFFFFFFFFu);
+}
+static void rlock(void){
+    while (__builtin_expect(__atomic_load_n(&g_rbusy, __ATOMIC_ACQUIRE) != 0, 0)){
+        guest_wait_begin();
+        int32_t v;
+        while ((v = __atomic_load_n(&g_rbusy, __ATOMIC_ACQUIRE)) != 0) __builtin_wasm_memory_atomic_wait32(&g_rbusy, v, 1000000LL);
+        guest_wait_end();
+    }
+}
+static void runlock(void){}
+#else
+static pthread_mutex_t g_rmx = PTHREAD_MUTEX_INITIALIZER;
+static void rlock(void){ if (pthread_mutex_trylock(&g_rmx) != 0){ guest_wait_begin(); pthread_mutex_lock(&g_rmx); guest_wait_end(); } }
+static void runlock(void){ pthread_mutex_unlock(&g_rmx); }
+#endif
 int thrash_call(CPU *c, const char *name, uint32_t *r){
-    if (strncmp(name, "_THRASH_", 8)) return 0;
-    { void guest_yield_if_long(double); guest_yield_if_long(4.0); }
-    if (pthread_mutex_trylock(&g_rmx) != 0){ guest_wait_begin(); pthread_mutex_lock(&g_rmx); guest_wait_end(); }
-    int k = thrash_call_locked(c, name, r);
-    pthread_mutex_unlock(&g_rmx);
+    /* PERF2: what a name is (not THRASH / a draw / settexture / another call), cached by the import's name pointer */
+    static struct { const char *p; int kind; } cache[64];
+    const unsigned h = (unsigned)(((uintptr_t)name >> 3) & 63u);
+    int kind;
+    if (cache[h].p == name) kind = cache[h].kind;
+    else {
+        kind = strncmp(name, "_THRASH_", 8) ? 0 : !strncmp(name + 8, "draw", 4) ? 1 : !strcmp(name + 8, "settexture@4") ? 2 : 3;
+        cache[h].p = name; cache[h].kind = kind;
+    }
+    if (!kind) return 0;
+    /* a long run of THRASH calls (texture uploads) hands the guest lock over; the clock is a JS call, so every 8th call only */
+    { static _Thread_local unsigned k; if ((++k & 7u) == 0){ void guest_yield_if_long(double); guest_yield_if_long(4.0); } }
+    rlock();
+    int k = 1;
+    if (kind == 1){ g_calls++; g_draws++; *r = 0; if (g_rend) r_draw(name + 8, (const uint32_t *)(g_mem + c->esp)); }
+    else if (kind == 2 && g_rend){ g_calls++; *r = 0; r_settexture(ARG(0)); }
+    else k = thrash_call_locked(c, name, r);
+    runlock();
     return k;
 }
 static int thrash_call_locked(CPU *c, const char *name, uint32_t *r){
@@ -198,6 +235,8 @@ static int thrash_call_locked(CPU *c, const char *name, uint32_t *r){
     g_calls++;
     *r = 0;
     if (!strncmp(n, "draw", 4)){ g_draws++; if (g_rend) r_draw(n, (const uint32_t *)(g_mem + c->esp)); return 1; }
+    /* the next most frequent calls first (the chain below is ~20 strcmp deep for them) */
+    if (g_rend && !strcmp(n, "settexture@4")){ r_settexture(ARG(0)); return 1; }
     if      (!strcmp(n, "about@0")){ *r = about(); fprintf(stderr, "[thrash] about -> 0x%08x\n", *r); }
     else if (!strcmp(n, "init@0")){
         state_init(); if (!getenv("NO_FMTPATCH")) patch_format_table(); *r = 1;
@@ -237,6 +276,8 @@ static int thrash_call_locked(CPU *c, const char *name, uint32_t *r){
     else if (!strcmp(n, "pageflip@0")){
         g_frames++;
         { void watchdog_on_present(void); watchdog_on_present(); }
+        { static int gr = -1; if (gr < 0){ const char *e = getenv("GILREP"); gr = e && *e == '1'; }
+          if (gr && g_frames % 1500 == 0){ void win32_gil_report(void); fprintf(stderr, "[gilrep] frame %ld\n", g_frames); win32_gil_report(); } }
         if (g_rend) r_pageflip(); else pace();
         if (g_frames <= 3 || g_frames % 300 == 0)
             fprintf(stderr, "[thrash] frame %ld: %llu draws, %u textures, %llu uploads, %ux%u\n", g_frames,

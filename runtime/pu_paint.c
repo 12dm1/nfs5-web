@@ -444,19 +444,36 @@ void sub_00446530(CPU *restrict c){
         float L[3]; memcpy(L, g_mem + sky + 0x48, 12);
         if (norm3(L)){ g_paint_sun[0] = -L[0]; g_paint_sun[1] = -L[1]; g_paint_sun[2] = -L[2]; }
     }
-    for (int j = 0; j < count; j++){
-        const uint32_t src = indices ? g_mem[indices + (uint32_t)j] : (uint32_t)j;
-        float n[3], w[3], cam[3];
-        memcpy(n, g_mem + normals + src * 16u, 12);
-        for (int k = 0; k < 3; k++) w[k] = n[0] * m[k] + n[1] * m[4 + k] + n[2] * m[8 + k];
+    /* PERF2: the model's rotation and the camera's in one 3x3 (the camera's rows are orthonormal, so one normalisation after
+     * both is the same as one after each); this loop ran over every car vertex a frame and cost more than the game's own
+     * light layer (990 ms of a 15 s 4K race against 580) */
+    float C[3][3];
+    for (int i = 0; i < 3; i++){
+        C[0][i] = m[4 * i] * R[0] + m[4 * i + 1] * R[1] + m[4 * i + 2] * R[2];
+        C[1][i] = m[4 * i] * U[0] + m[4 * i + 1] * U[1] + m[4 * i + 2] * U[2];
+        C[2][i] = -(m[4 * i] * F[0] + m[4 * i + 1] * F[1] + m[4 * i + 2] * F[2]);
+    }
+    const uint8_t *nb = g_mem + normals, *ib = indices ? g_mem + indices : NULL;
+    uint8_t *out = g_mem + eagl + 0x448u;
+    /* byte indices: at most 256 normals a batch, shared by several vertices (seams): each one's code once a call */
+    uint32_t memo[256]; uint8_t have[256];
+    if (ib) memset(have, 0, sizeof have);
+    for (int j = 0; j < count; j++, out += stride){
+        const uint32_t src = ib ? ib[j] : (uint32_t)j;
+        if (ib && have[src]){ memcpy(out, &memo[src], 4); continue; }
+        float n[3];
+        memcpy(n, nb + src * 16u, 12);
+        const float c0 = C[0][0] * n[0] + C[0][1] * n[1] + C[0][2] * n[2];
+        const float c1 = C[1][0] * n[0] + C[1][1] * n[1] + C[1][2] * n[2];
+        const float c2 = C[2][0] * n[0] + C[2][1] * n[1] + C[2][2] * n[2];
+        const float l2 = c0 * c0 + c1 * c1 + c2 * c2;
         uint32_t code = 0;
-        if (norm3(w)){
-            cam[0] = w[0] * R[0] + w[1] * R[1] + w[2] * R[2];
-            cam[1] = w[0] * U[0] + w[1] * U[1] + w[2] * U[2];
-            cam[2] = -(w[0] * F[0] + w[1] * F[1] + w[2] * F[2]);
-            if (norm3(cam)) code = byte_of(cam[0]) | byte_of(cam[1]) << 8 | byte_of(cam[2]) << 16;
+        if (l2 > 1e-24f && l2 < 3.4e38f){
+            const float k = 1.0f / sqrtf(l2);
+            code = byte_of(c0 * k) | byte_of(c1 * k) << 8 | byte_of(c2 * k) << 16;
         }
-        MR32(eagl + 0x448u + (uint32_t)(j * stride)) = code;
+        memcpy(out, &code, 4);
+        if (ib){ memo[src] = code; have[src] = 1; }
     }
 }
 #else

@@ -94,7 +94,8 @@ static void cube_face(CPU *c){
     pu_guest_call(c, 0x0045D7D0u, 0, NULL, 0);      /* sky */
     r_capture_phase(1, 1);
     pu_guest_call(c, 0x0047FB40u, traversal, NULL, 0);
-    pu_guest_call(c, 0x00443610u, 0, NULL, 0);      /* cars */
+    { static int nc = -1; if (nc < 0){ const char *e = getenv("CUBE_NOCARS"); nc = e && *e == '1'; }   /* PERF2 test knob */
+      if (!nc) pu_guest_call(c, 0x00443610u, 0, NULL, 0); }      /* cars */
     a = 1; pu_guest_call(c, 0x00537870u, backend, &a, 1);
     a = 3; pu_guest_call(c, 0x00537830u, backend, &a, 1);
     pu_guest_call(c, 0x00467290u, engine, NULL, 0); /* flush */

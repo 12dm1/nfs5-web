@@ -10,7 +10,7 @@ WASI="${WASI:-$(ls -d "$ROOT"/deps/wasi-sdk-*-x86_64-windows 2>/dev/null | tail 
 CC="$WASI/bin/clang.exe"
 J="${J:-16}"
 OPT="${OPT:--O2}"
-OUT="out/web"; mkdir -p "$OUT/obj" "$OUT/rt"
+GEN="${GEN:-gen/all}"; OUT="${WEBOUT:-out/web}"; mkdir -p "$OUT/obj" "$OUT/rt"
 # The guest owns [0, GUEST_END) of linear memory (runtime/cpu.h); the runtime's data starts there.
 GUEST_END=671088640   # 0x28000000
 INITIAL_MB="${INITIAL_MB:-1024}"
@@ -19,10 +19,10 @@ TARGET="--target=wasm32-wasip1-threads -pthread"
 FEAT="-msimd128 -mbulk-memory -mnontrapping-fptoint -mtail-call -mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false"
 DEFS="-D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS"
 # -fno-delete-null-pointer-checks: guest address 0 is real wasm memory (cpu.h)
-CFLAGS="$TARGET $OPT $FEAT $DEFS -fno-delete-null-pointer-checks -w -include runtime/web/compat/wasm_plat.h -Iruntime/web/compat -Iruntime -Igen/all"
+CFLAGS="$TARGET $OPT $FEAT $DEFS -fno-delete-null-pointer-checks -w -include runtime/web/compat/wasm_plat.h -Iruntime/web/compat -Iruntime -I$GEN"
 SHARDFLAGS="-DNFSU2_GUEST_OBJ"
 export CC CFLAGS SHARDFLAGS OUT
-ls gen/all/shard_*.c gen/all/fntab.c gen/all/impargs.c | xargs -P "$J" -I{} sh -c 'o="$OUT/obj/$(basename {} .c).o"; [ "$o" -nt "{}" ] || "$CC" $CFLAGS $SHARDFLAGS -c "{}" -o "$o" || echo "FAILED {}"'
+ls $GEN/shard_*.c $GEN/fntab.c $GEN/impargs.c | xargs -P "$J" -I{} sh -c 'o="$OUT/obj/$(basename {} .c).o"; [ "$o" -nt "{}" ] || "$CC" $CFLAGS $SHARDFLAGS -c "{}" -o "$o" || echo "FAILED {}"'
 RT="win32 win32_ext fileio mem heap dispatch module genexec lifecycle debug watchdog sha256 res modheap pu_stubs pu_hooks nettest pu_com pu_imports thrash_hle pu_ext pu_interp pu_cube pu_paint pu_text pu_cars pu_net"
 pids=""; fail=0
 for f in $RT; do "$CC" $CFLAGS -c "runtime/$f.c" -o "$OUT/rt/$f.o" & pids="$pids $!"; done
@@ -43,4 +43,4 @@ rm -f "$OUT/nfs5.wasm"
 [ -f "$OUT/nfs5.wasm" ] || { echo "link FAILED: $(grep -c 'undefined symbol' "$OUT/link.log") undefined"; grep -E "error" "$OUT/link.log" | head -60 | cut -c1-150; exit 1; }
 SIZE=$(wc -c < "$OUT/nfs5.wasm" | tr -d ' ')
 printf '{"pages":%d,"maxPages":65536,"guestEnd":%d,"size":%d}\n' $(( INITIAL_MB * 16 )) $GUEST_END $SIZE > "$OUT/nfs5.json"
-echo "link OK: out/web/nfs5.wasm ($(( SIZE / 1048576 )) MB)"
+echo "link OK: $OUT/nfs5.wasm ($(( SIZE / 1048576 )) MB)"

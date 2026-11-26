@@ -20,6 +20,7 @@
 
 void guest_wait_begin(void);
 void guest_wait_end(void);
+void thrash_wait_begin(void); void thrash_wait_end(void);   /* thrash_hle.c: a wait that gives the guest lock up */
 
 /* ---- protocol ---- */
 enum { C_VIDEO = 1, C_TEX_CREATE, C_TEX_DESTROY, C_TEX_WRITE, C_TEX_GENMIPS, C_SCISSOR, C_PIPE, C_BIND, C_UNIFORM, C_DRAW, C_PRESENT, C_READRECT, C_TARGET, C_CUBE_MIPS, C_PAINT };
@@ -58,10 +59,10 @@ static void seg_acquire(void){
     Seg *s = &g_ring.seg[next];
     if (__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE)){
         const double w0 = g_pf_on > 0 ? pf_now() : 0;
-        guest_wait_begin();
+        thrash_wait_begin();
         while (__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE))
             __builtin_wasm_memory_atomic_wait32((int32_t *)&s->ready, 1, 100000000LL);
-        guest_wait_end();
+        thrash_wait_end();
         if (g_pf_on > 0) g_pf_wait_seg += pf_now() - w0;
     }
     next = (next + 1) % SEGS;
@@ -529,6 +530,7 @@ void r_reflection_next(void){ g_refl_armed = 1; }
 typedef struct { int slot; float x0, y0, x1, y1, z0, z1; double n, dark; } CarShade;
 #define CAR_SHADES 48
 static CarShade g_cs_cur[CAR_SHADES], g_cs_prev[CAR_SHADES]; static int g_ncs_cur, g_ncs_prev;
+static int g_cs_dark;     /* PERF2: a record of the last frame darkens (cs_factor < 0.995): else cs_apply has nothing to do */
 static CarShade *cs_get(int slot){
     for (int i = 0; i < g_ncs_cur; i++) if (g_cs_cur[i].slot == slot) return &g_cs_cur[i];
     if (g_ncs_cur >= CAR_SHADES) return NULL;
@@ -558,6 +560,7 @@ static void cs_flip(void){
         g_cs_other = 0;
     }
     memcpy(g_cs_prev, g_cs_cur, sizeof g_cs_cur); g_ncs_prev = g_ncs_cur; g_ncs_cur = 0;
+    g_cs_dark = 0; for (int i = 0; i < g_ncs_prev; i++) if (cs_factor(&g_cs_prev[i]) < 0.995f) g_cs_dark = 1;
 }
 static void cs_box(const DV *o, int nv, float *b){
     for (int i = 0; i < nv; i++){
@@ -571,7 +574,7 @@ static void cs_box(const DV *o, int nv, float *b){
 }
 /* a car's own draw: its page's record, or a non-paint draw inside a shaded car's box and depth */
 static void cs_apply(DV *o, int nv, int page){
-    if (!g_ncs_prev || nv <= 0) return;
+    if (!g_ncs_prev || !g_cs_dark || nv <= 0) return;
     if (page){
         for (int i = 0; i < g_ncs_prev; i++) if (g_cs_prev[i].slot == page){ cs_scale(o, nv, cs_factor(&g_cs_prev[i])); return; }
         return;
@@ -657,27 +660,28 @@ void r_draw(const char *n, const uint32_t *a){
 }
 static void draw_any(const char *n, const uint32_t *a){
     const int count = (int)a[0];
-    if (!strcmp(n, "drawtri@12")){ DV v[3]; v[0] = conv(GP(a[0])); v[1] = conv(GP(a[1])); v[2] = conv(GP(a[2])); flush_verts(v, 3, 0); return; }
-    if (!strcmp(n, "drawquad@16")){ quad(GP(a[0]), GP(a[1]), GP(a[2]), GP(a[3])); return; }
-    if (!strcmp(n, "drawline@8")){ line(GP(a[0]), GP(a[1])); return; }
-    if (!strcmp(n, "drawpoint@4")){ point(GP(a[0])); return; }
-    if (!strcmp(n, "drawsprite@8")){ sprite(GP(a[0]), GP(a[1])); return; }
+    const int tm = n[4] == 't' && n[7] == 'm';     /* PERF2: drawtrimesh@12, most draws, skips the chain above it */
+    if (!tm && !strcmp(n, "drawtri@12")){ DV v[3]; v[0] = conv(GP(a[0])); v[1] = conv(GP(a[1])); v[2] = conv(GP(a[2])); flush_verts(v, 3, 0); return; }
+    if (!tm && !strcmp(n, "drawquad@16")){ quad(GP(a[0]), GP(a[1]), GP(a[2]), GP(a[3])); return; }
+    if (!tm && !strcmp(n, "drawline@8")){ line(GP(a[0]), GP(a[1])); return; }
+    if (!tm && !strcmp(n, "drawpoint@4")){ point(GP(a[0])); return; }
+    if (!tm && !strcmp(n, "drawsprite@8")){ sprite(GP(a[0]), GP(a[1])); return; }
     const uint8_t *vb = GP(a[1]);
     if (!vb || count <= 0) return;
     const int vs = g_vstride;
     DV *o = g_scratch; int k = 0;
-    if (!strcmp(n, "drawtrifan@8")){
+    if (!tm && !strcmp(n, "drawtrifan@8")){
         for (int i = 1; i < count - 1 && k + 3 <= MAX_VERTS; i++){ o[k++] = conv(vb); o[k++] = conv(vb + i * vs); o[k++] = conv(vb + (i + 1) * vs); }
         flush_verts(o, k, 0); return; }
-    if (!strcmp(n, "drawtristrip@8")){
+    if (!tm && !strcmp(n, "drawtristrip@8")){
         for (int i = 0; i < count - 2 && k + 3 <= MAX_VERTS; i++){
             const uint8_t *p0 = vb + i * vs, *p1 = vb + (i + 1) * vs, *p2 = vb + (i + 2) * vs;
             if (i & 1){ o[k++] = conv(p1); o[k++] = conv(p0); } else { o[k++] = conv(p0); o[k++] = conv(p1); }
             o[k++] = conv(p2);
         }
         flush_verts(o, k, 0); return; }
-    if (!strcmp(n, "drawlinestrip@8")){ for (int i = 0; i < count - 1; i++) line(vb + i * vs, vb + (i + 1) * vs); return; }
-    if (!strcmp(n, "drawpointstrip@8")){ for (int i = 0; i < count; i++) point(vb + i * vs); return; }
+    if (!tm && !strcmp(n, "drawlinestrip@8")){ for (int i = 0; i < count - 1; i++) line(vb + i * vs, vb + (i + 1) * vs); return; }
+    if (!tm && !strcmp(n, "drawpointstrip@8")){ for (int i = 0; i < count; i++) point(vb + i * vs); return; }
     const uint8_t *ib = GP(a[2]);
     if (!ib) return;
     { static long gd = -2; if (gd == -2){ const char *e = getenv("GDUMP"); gd = e ? atol(e) : -1; }
@@ -1306,10 +1310,10 @@ int r_readrect(int x, int y, int w, int h, uint32_t buf){
     }
     if (wait){
         const double t0 = now;
-        guest_wait_begin();
+        thrash_wait_begin();
         while ((done = __atomic_load_n(&g_read_done, __ATOMIC_ACQUIRE)) - g_read_seq < 0 && now_s() - t0 < 1.0)
             __builtin_wasm_memory_atomic_wait32((int32_t *)&g_read_done, done, 100000000LL);
-        guest_wait_end();
+        thrash_wait_end();
         if (done == g_read_seq) memcpy(g_read_last, g_read_px, (size_t)w * h * 2);
         else memset(g_read_last, 0, (size_t)w * h * 2);
         g_read_w = w; g_read_h = h;
@@ -1352,7 +1356,7 @@ void r_reshape(int nw){
  * or the GPU at 4K). Every half second: one more face while the wait covers 1.5 faces for 2 s; a raise that costs over 10 % of
  * the frame rate goes back (no retry for 30 s); no wait (the thread is the limit) with the rate under the display's drops one.
  * Never under ~15 cubes a second (up to 3 faces for it). The first 3 s of a race view are left alone, frames over 50 ms left out; the count carries over to the next race.
- * Off by default (one face a frame): ?env=CUBE_ADAPT=1 turns it on; ?env=CUBE_FACES=<1..6> fixes the count, CUBELOG=1 logs every 2 s. */
+ * On by default; ?env=CUBE_ADAPT=0 = one face a frame; ?env=CUBE_FACES=<1..6> fixes the count, CUBELOG=1 logs every 2 s. */
 static int g_cube_n = 2, g_cube_fixed = -1, g_cube_seen;
 static double g_cube_face_ms, g_cube_wait_ms;
 int r_cube_faces_per_frame(void){ g_cube_seen = 1; return g_cube_n; }   /* the race only: pu_cube.c */
@@ -1361,8 +1365,8 @@ static void cube_adapt(void){
     if (g_cube_fixed < 0){
         const char *e = getenv("CUBE_FACES"); g_cube_fixed = e && *e ? atoi(e) : 0;
         if (g_cube_fixed < 0 || g_cube_fixed > 6) g_cube_fixed = 0;
-        /* off for now (the user, 2026-11-25): one face a frame as before, until the race's frame cost is found (docs/tasks/PERF2) */
-        if (!g_cube_fixed){ e = getenv("CUBE_ADAPT"); if (!(e && *e == '1')) g_cube_fixed = 1; }
+        /* on again since PERF2 (2026-11-26: a 4K race frame ~4.5 ms of 6.9 at 144 Hz); ?env=CUBE_ADAPT=0 = one face a frame */
+        if (!g_cube_fixed){ e = getenv("CUBE_ADAPT"); if (e && *e == '0') g_cube_fixed = 1; }
         e = getenv("CUBE_EVERY"); if (e && atoi(e) > 1) g_cube_fixed = 1;      /* the phones' light profile */
         if (g_cube_fixed) g_cube_n = g_cube_fixed;
     }
@@ -1414,10 +1418,10 @@ void r_pageflip(void){
     if (g_pf_on < 0){ const char *e = getenv("PERFSTAT"); g_pf_on = e && *e && *e != '0'; }
     const double w0 = g_pf_on > 0 ? pf_now() : 0, w1 = pf_now();
     if (pub - done > 1){
-        guest_wait_begin();
+        thrash_wait_begin();
         while (pub - (done = __atomic_load_n(&g_ring.presents_done, __ATOMIC_ACQUIRE)) > 1)
             __builtin_wasm_memory_atomic_wait32((int32_t *)&g_ring.presents_done, done, 100000000LL);
-        guest_wait_end();
+        thrash_wait_end();
     }
     g_cube_wait_ms = pf_now() - w1;
     cube_adapt();

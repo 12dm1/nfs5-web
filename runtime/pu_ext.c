@@ -230,11 +230,38 @@ static int part_row(uint32_t article, uint32_t ident){
     return 0;
 }
 /* 0043A3B0, mov [esi+2C0h], ebx: esi = R3DCar, ebx = the clamped index */
-/* CARLOD=0 (web/src/quality.ts, phones): the game's own tiers; the garage model costs a third of a race frame's work */
+/* CARLOD=0 (web/src/quality.ts, phones): the game's own tiers; the garage model costs a third of a race frame's work.
+ * PERF2: in a race only a car within CARLOD_NEAR metres of the camera (default 25) draws the garage model: the game's top race
+ * tier holds out to 120 m and more, so all the cars drew the garage model across the whole track (Coastal 8 cars at 4K:
+ * ~63 fps with all of them, ~115 fps with none; CARLOD_NEAR=0: every car, as before).  Camera: the engine's view
+ * ([00628130]+10h) at +B8h+54h; the car's position: R3DCar +3C4h. */
+static float car_cam_dist(uint32_t car){
+    const uint32_t engine = MR32(0x00628130u), view = engine ? MR32(engine + 0x10) : 0;
+    if (!view) return 0.0f;
+    float cam[3], p[3];
+    memcpy(cam, g_mem + view + 0xB8 + 0x54, 12); memcpy(p, g_mem + car + 0x3C4, 12);
+    const float dx = p[0] - cam[0], dy = p[1] - cam[1], dz = p[2] - cam[2], d2 = dx * dx + dy * dy + dz * dz;
+    return d2 == d2 ? sqrtf(d2) : 0.0f;
+}
 void pu_car_lod(CPU *c){
-    static int on = -1;
-    if (on < 0){ const char *e = getenv("CARLOD"); on = !(e && *e == '0'); }
+    static int on = -1; static float near_m = 25.0f;
+    if (on < 0){ const char *e = getenv("CARLOD"); on = !(e && *e == '0');
+                 const char *n = getenv("CARLOD_NEAR"); if (n && *n) near_m = (float)atof(n); }
+    { static int lg = -1; static long n;
+      if (lg < 0){ const char *e = getenv("LODLOG"); lg = e && *e == '1'; }
+      if (lg && (++n % 97) == 0){
+          const uint32_t inf = MR32(c->esi + 0xF4);
+          fprintf(stderr, "[lodlog] car %08x index %d detail %d state %d flags %x dist %.1f\n", c->esi, (int)c->ebx, (int)MR32(0x006197C4u),
+                  (int)MR32(0x00657424u), inf ? MR32(inf + 0x52C) : 0xFFFFu, car_cam_dist(c->esi));
+      } }
+    extern int g_cam_capture;
     if (!on) return;
+    if (g_cam_capture){                                        /* a cube face: CUBE_CARLOD tiers coarser than the game's (default 2), */
+        static int step = -1;                                  /* the 7 opponents in every face were most of its cost; eax = the */
+        if (step < 0){ const char *e = getenv("CUBE_CARLOD"); step = e && *e ? atoi(e) : 2; }    /* game's clamp, the last tier */
+        int idx = (int)c->ebx + step; if (idx > (int)c->eax) idx = (int)c->eax; if (idx < (int)c->ebx) idx = (int)c->ebx;
+        c->ebx = (uint32_t)idx; return;
+    }
     const int index = (int)c->ebx, detail = (int)MR32(0x006197C4u), state = (int)MR32(0x00657424u);
     if (detail < 0 || detail > 2) return;
     const uint32_t info = MR32(c->esi + 0xF4);
@@ -246,6 +273,7 @@ void pu_car_lod(CPU *c){
         if (flags & 0x10) idx = index;                         /* its base is 0 already */
         else if ((flags & 8) && detail == 0 && index == (int)MR32(0x005CD5B8u) + 1) idx = 0;    /* AI: base + 1 */
     }
+    if (idx == 0 && idx != index && near_m > 0.0f && MR32(0x0065B928u) == 0 && car_cam_dist(c->esi) > near_m) idx = index;
     c->ebx = (uint32_t)idx;
 }
 /* L3: vertex-animated parts (the 911 rear spoiler grille) have only frame 0 right in LOD 1: the garage never moves them, the raise
@@ -1303,4 +1331,153 @@ void sub_00445b10(CPU *restrict c){
     } else r = MR32(layer + 8);
     c->eax = r;
     POP32(c->eip); c->esp += 8;
+}
+
+/* ---- PERF2: 00488B50 in C (the track traversal's segment test, ~10 % of a 4K race frame as lifted x87) ----
+ * thiscall(const float *P, const float *Q, bool keyed) ret 0Ch, this = [00628960] (0047F9A9): does the 2D segment
+ * P -> P + (Q - P) (x at +0, z at +8; the end rounded to float as the game stores it) cross one of the [this+28h] records
+ * of 28 bytes at [this+2Ch] (+4 x0, +8 z0, +0Ch dx, +10h dz) whose byte [this+30h][i] is 0?  keyed: only a record whose
+ * first byte is set counts.  al = 1 / 0.  The test is 00489CC0's (its out pointer NULL here), with the same double
+ * operations and float stores as the lifted x87 code, so the answers are the same.  SEGCHK=1 runs the lifted function as
+ * well and logs any difference (its answer is the one used then). */
+static int seg_cross(const float *A, float bx0, float bz0, float bx1, float bz1, double K0, double K1){
+    /* 00489CC0(A, B): A = (A[0], A[2]) -> (A[3], A[5]), B the same layout */
+    const double s0 = (double)bz1 - (double)bz0;
+    const float dax = (float)((double)A[3] - (double)A[0]);
+    const float daz = (float)((double)A[5] - (double)A[2]);
+    const double s1 = (double)bx1 - (double)bx0;
+    const double den = (double)dax * s0 - s1 * (double)daz;
+    if (!(den != K0) || den != den) return 0;           /* C3 set: equal or unordered */
+    const float denf = (float)den;
+    const float ex = (float)((double)A[2] - (double)bz0);
+    const float ez = (float)((double)A[0] - (double)bx0);
+    const float t = (float)(((double)ex * s1 - (double)ez * s0) / (double)denf);
+    if (!((double)t >= K0)) return 0;                    /* C0: below or unordered */
+    if ((double)t > K1) return 0;
+    const double u = ((double)ex * (double)dax - (double)ez * (double)daz) / (double)denf;
+    if (!(u >= K0)) return 0;
+    if (u > K1) return 0;
+    return 1;
+}
+void sub_00488b50(CPU *restrict c){
+    const uint32_t self = c->ecx, pp = MR32(c->esp + 4), qp = MR32(c->esp + 8);
+    const int keyed = MR8(c->esp + 12) != 0;
+    const float *P = (const float *)(g_mem + pp), *Q = (const float *)(g_mem + qp);
+    const float dx = (float)((double)Q[0] - (double)P[0]), dz = (float)((double)Q[2] - (double)P[2]);
+    const float bx1 = (float)((double)dx + (double)P[0]), bz1 = (float)((double)dz + (double)P[2]);
+    const double K0 = (double)MRF32(0x005B23F8u), K1 = (double)MRF32(0x005B24A8u);
+    const uint32_t n = MR32(self + 0x28), recs = MR32(self + 0x2C), skip = MR32(self + 0x30);
+    int hit = 0;
+    for (uint32_t i = 0; i < n; i++){
+        if (MR8(skip + i)) continue;
+        const uint32_t r = recs + i * 0x1Cu;
+        const float *R = (const float *)(g_mem + r + 4);   /* x0, z0, dx, dz */
+        float A[6];
+        A[0] = R[0]; A[2] = R[1];
+        A[3] = (float)((double)R[2] + (double)R[0]); A[5] = (float)((double)R[3] + (double)R[1]);
+        if (seg_cross(A, P[0], P[2], bx1, bz1, K0, K1) && (!keyed || MR8(r))){ hit = 1; break; }
+    }
+    static int chk = -1;
+    if (chk < 0){ const char *e = getenv("SEGCHK"); chk = e && *e == '1'; }
+    if (chk){
+        static long calls, bad, hits;
+        sub_00488b50_orig(c);
+        calls++; hits += hit;
+        if ((int)(c->eax & 0xFF) != hit && ++bad <= 20)
+            fprintf(stderr, "[segchk] MISMATCH call %ld: C %d lifted %d (n %u keyed %d)\n", calls, hit, (int)(c->eax & 0xFF), n, keyed);
+        if (calls % 200000 == 0) fprintf(stderr, "[segchk] %ld calls (%ld hits), %ld mismatches\n", calls, hits, bad);
+        return;
+    }
+    c->eax = (c->eax & 0xFFFFFF00u) | (uint32_t)hit;
+    POP32(c->eip); c->esp += 12u;
+}
+
+/* ---- PERF2: 005B0730 in C (EAGL's vertex transform: every car / track vertex, ~7 % of a 4K race frame as lifted x87) ----
+ * cdecl(flags, count, src, dst): for count vertices (do-while), the matrix [005DEA58] (flags & 2: x,y,z + the translation
+ * row; else x,y,z,w by four rows) gives X, Y, Z (stored as floats at 5DFC9C..A4 and at dst +0..8), rhw = [5DFC90] / Z at
+ * dst+0Ch, and a clip code at [[69E0D0] + i * [5DEA6C]] from the per-vertex function 5DFB80[(flags >> 8) & 3]
+ * (005B05C0 or 005B0660, inlined here: bit logic on the float bits); strides [5DEA64] src, [5DEA68] dst.  The game sets the
+ * x87 to single precision here; the lifted code computes in double (X87PC=0) and so does this.  TRCHK=1 runs the lifted one
+ * and compares every output word (logs the first differences). */
+static uint32_t clip_05c0(uint32_t x, uint32_t y, uint32_t z){
+    const uint32_t a = ((x >> 29) & 4u) | ((y >> 30) & 2u) | (z >> 31);
+    const uint32_t ax = x & 0x7FFFFFFFu, ay = y & 0x7FFFFFFFu, az = z & 0x7FFFFFFFu;
+    const uint32_t b = (((az - ax) >> 27) & 0x10u) | (((az - ay) & 0x80000000u) >> 28);
+    const uint32_t nf = (((MR32(0x005DEA74u) - z) & ~z) & 0x80000000u) >> 30 | ((z - MR32(0x005DEA70u)) | z) >> 31;
+    return MR32(0x005DFB90u + 4u * (b | a)) | nf;
+}
+static uint32_t clip_0660(uint32_t x, uint32_t y, uint32_t z){
+    const uint32_t a = ((x >> 29) & 4u) | ((y >> 30) & 2u) | (z >> 31);
+    const uint32_t ax = x & 0x7FFFFFFFu, ay = y & 0x7FFFFFFFu, az = z & 0x7FFFFFFFu;
+    const uint32_t g = MR32(0x005DEA60u) + az;
+    const uint32_t b = (((az - ax) >> 27) & 0x10u) | (((az - ay) & 0x80000000u) >> 28);
+    const uint32_t gb = (((g - ax) >> 27) & 0x10u) | (((g - ay) & 0x80000000u) >> 28);
+    const uint32_t nf = (((MR32(0x005DEA74u) - z) & ~z) & 0x80000000u) >> 30 | ((z - MR32(0x005DEA70u)) | z) >> 31;
+    return (MR32(0x005DFC10u + 4u * (b | a)) << 8) | MR32(0x005DFC10u + 4u * (a | gb)) | nf;
+}
+/* the loop; out != NULL: the dst words and codes go to host arrays (TRCHK) instead of guest memory */
+static void xform_run(uint32_t flags, uint32_t count, uint32_t src, uint32_t dst, uint32_t code, uint32_t fn,
+                      uint32_t *out, uint32_t *outc, float last[3]){
+    const float *M = (const float *)(g_mem + MR32(0x005DEA58u));
+    const double K = (double)MRF32(0x005DFC90u);
+    const uint32_t ss = MR32(0x005DEA64u), ds = MR32(0x005DEA68u), cs = MR32(0x005DEA6Cu);
+    const int three = (flags & 2u) != 0;
+    uint32_t i = 0;
+    do {
+        const float *s = (const float *)(g_mem + src);
+        const double s0 = s[0], s1 = s[1], s2 = s[2];
+        double x = (s0 * (double)M[0] + s1 * (double)M[4]) + s2 * (double)M[8];
+        double y = (s0 * (double)M[1] + s1 * (double)M[5]) + s2 * (double)M[9];
+        double z = (s0 * (double)M[2] + s1 * (double)M[6]) + s2 * (double)M[10];
+        if (three){ x = x + (double)M[12]; y = y + (double)M[13]; z = z + (double)M[14]; }
+        else { const double s3 = s[3]; x = x + s3 * (double)M[12]; y = y + s3 * (double)M[13]; z = z + s3 * (double)M[14]; }
+        const float X = (float)x, Y = (float)y, Z = (float)z;
+        uint32_t xb, yb, zb; memcpy(&xb, &X, 4); memcpy(&yb, &Y, 4); memcpy(&zb, &Z, 4);
+        const float rhw = (float)(K / z);
+        const uint32_t cc = fn == 0x005B05C0u ? clip_05c0(xb, yb, zb) : clip_0660(xb, yb, zb);
+        if (out){ out[4 * i] = xb; out[4 * i + 1] = yb; out[4 * i + 2] = zb; memcpy(&out[4 * i + 3], &rhw, 4); outc[i] = cc; }
+        else { MR32(dst) = xb; MR32(dst + 4) = yb; MR32(dst + 8) = zb; MRF32(dst + 12) = rhw; MR32(code) = cc; }
+        last[0] = X; last[1] = Y; last[2] = Z;
+        src += ss; dst += ds; code += cs; i++;
+    } while (--count);
+}
+void sub_005b0730(CPU *restrict c){
+    const uint32_t flags = MR32(c->esp + 4), count = MR32(c->esp + 8), src = MR32(c->esp + 12), dst = MR32(c->esp + 16);
+    const uint32_t fn = MR32(0x005DFB80u + 4u * ((flags >> 8) & 3u));
+    static int chk = -1;
+    if (chk < 0){ const char *e = getenv("TRCHK"); chk = e && *e == '1'; }
+    if ((fn != 0x005B05C0u && fn != 0x005B0660u) || count == 0 || count > 65536){ sub_005b0730_orig(c); return; }
+    const uint32_t code = MR32(0x0069E0D0u);
+    if (chk){
+        static long calls, bad, verts; static uint32_t *o, *oc; static uint32_t cap;
+        const uint32_t ds = MR32(0x005DEA68u), ss = MR32(0x005DEA64u);
+        const int overlap = !(dst + ds * count <= src || src + ss * count <= dst);
+        sub_005b0730_orig(c);
+        if (overlap) return;
+        if (count > cap){ cap = count; o = realloc(o, cap * 16u); oc = realloc(oc, cap * 4u); }
+        float last[3];
+        xform_run(flags, count, src, dst, code, fn, o, oc, last);
+        calls++; verts += count;
+        const uint32_t cst = MR32(0x005DEA6Cu);
+        for (uint32_t i = 0; i < count; i++){
+            const uint32_t d = dst + i * ds;
+            const int ok = MR32(d) == o[4 * i] && MR32(d + 4) == o[4 * i + 1] && MR32(d + 8) == o[4 * i + 2] && MR32(d + 12) == o[4 * i + 3]
+                           && MR32(code + i * cst) == oc[i];
+            if (!ok){ if (++bad <= 20) fprintf(stderr, "[trchk] MISMATCH call %ld vertex %u/%u flags %x fn %x: lifted %08x %08x %08x %08x code %x, C %08x %08x %08x %08x code %x\n",
+                      calls, i, count, flags, fn, MR32(d), MR32(d + 4), MR32(d + 8), MR32(d + 12), MR32(code + i * cst), o[4 * i], o[4 * i + 1], o[4 * i + 2], o[4 * i + 3], oc[i]);
+                      break; }
+        }
+        if (calls % 100000 == 0) fprintf(stderr, "[trchk] %ld calls, %ld vertices, %ld mismatches\n", calls, verts, bad);
+        return;
+    }
+    MR32(0x005DFC94u) = fn;
+    MR16(0x005DFCA8u) = c->fcw; MR16(0x005DFCAAu) = (uint16_t)((c->fcw & 0xFCFFu) | 0x3Fu);
+    float last[3];
+    xform_run(flags, count, src, dst, code, fn, NULL, NULL, last);
+    const uint32_t ss = MR32(0x005DEA64u), ds = MR32(0x005DEA68u), cs = MR32(0x005DEA6Cu);
+    MRF32(0x005DFC9Cu) = last[0]; MRF32(0x005DFCA0u) = last[1]; MRF32(0x005DFCA4u) = last[2];
+    MR32(0x005DFC98u) = code + cs * count;
+    MR32(c->esp + 8) = 0; MR32(c->esp + 12) = src + ss * count; MR32(c->esp + 16) = dst + ds * count;
+    c->eax = src + ss * count; c->ecx = code + cs * (count - 1); c->edx = 0;
+    POP32(c->eip);
 }

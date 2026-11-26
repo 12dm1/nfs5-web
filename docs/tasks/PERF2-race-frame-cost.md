@@ -1,6 +1,56 @@
 # PERF2: where the race's frame time goes (desktop)
 
-Opened 2026-11-25. Branch `release` (worktree `nfs5-web-release`). Not started.
+Opened 2026-11-25. Branch `release` (worktree `nfs5-web-release`). In progress (round 1 done 2026-11-25, see Results).
+
+## Results, round 1 (2026-11-25, headless, no user runs)
+
+Bench: Quick Race Côte d'Azur (Coastal; `NETTEST_PICK` matches "azur"), 8 cars, AI drives the player, canvas 3840x1906, `PERFSTAT=1` work ms a frame over 25 s from
+4 s after the race's start (`web/tools/perf_fps_pcores.sh <tag> [env]`, pinned to the P-cores; the numbers below are
+game-thread work per frame).
+
+| change | P-cores | E-cores |
+|---|---|---|
+| before (all cars drew the garage model) | ~8.7-9.2 ms | ~16.8 ms |
+| garage model only within 25 m of the camera (`CARLOD_NEAR`, 0 = old) | ~7.7 | ~13.3 |
+| + cube faces draw cars 2 tiers coarser (`CUBE_CARLOD`, face 1.35 -> 1.1 ms) | ~7.7 | |
+| + THRASH calls: futex lock instead of the pthread mutex, clock check every 8th call, settexture fast path | ~6.9 | |
+| normals into the specular dword (`sub_00446530` hook) as one 3x3, no double normalisation | own cost 1.7x -> 0.1x the game's light layer | |
+| + lifter `X87OPT=1` (gen.sh default now: x87 stack slots as constant-index locals within a block) | ~6.1-6.3 (A/B 3 rounds: 6.6 -> 6.1) | |
+
+| + `00488B50` (segment crossing test) in C, `SEGCHK=1` compares with the lifted one | ~6.0 | |
+| + THRASH lock lock-free on wasm (the renderer's 3 waits count in an atomic, guest threads only wait while it is non-zero); draw_any skips 9 strcmp on texture-manager draws | ~5.8 | |
+| + car shade pass (`cs_apply`) skipped when no car of the last frame is darkened | ~5.65 | |
+| + EAGL vertex transform `005B0730` in C with the clip-code functions inlined (`TRCHK=1`: every output word against the lifted one, Côte d'Azur 37 M + Hometown 56 M vertices, 0 differences) | ~5.35 | |
+| + normals hook: each indexed normal once a batch | ~5.25 | 15-20 (noisy, see below) |
+
+Round 2 (2026-11-26): P-cores ~8.9 -> ~5.25 ms over both rounds (-41 %). E-core runs are bimodal run to run (15-28 ms for
+the same build, the round-1 build measured worse in the same session: 19-28), so only P-core numbers are used for A/B.
+Cube split (`CUBE_NOCARS=1` test knob): a face 0.75 ms, of which cars 0.21; the rest is the track traversal
+(`00467290` 35 % of the cube, `0047FB40` 10 %). `prof_race.mjs --kids <fn>` lists the callees inside the focus.
+
+Left (2000 us profile): `00543AE0` (EAGL draw, 2287 lines, ~7 % self, one caller `0053F6xx`), `00449390`, `00489CC0`,
+the light layer `00446530_orig`, our `flush_verts`/`submit`, the cube's track traversal `00467290`.
+
+`X87OPT` was checked with AI races (3 laps Côte d'Azur, 8 cars, `NETTEST_TRACE=1`: every racer's progress / speed /
+finish state every 10 s): 3 races each build, mean progress at 110 s 3112-3240 (old) vs 3216-3278 (X87OPT), no
+traps; the race is not deterministic run to run, so this is a sanity check, not a bit-exact one. **Every worktree has to
+regenerate its lifted C** (`./gen.sh`, or `X87OPT=1 GENOUT=gen/all python tools/genall.py ...` with gen.sh's
+environment) to get it; `web/build.sh` takes `GEN=<dir> WEBOUT=<dir>` for side-by-side builds.
+
+Findings:
+
+- **The profiler doubles the frame cost** at a 250 us interval: use `--interval 2000` (prof_race.mjs) or the fps-only
+  scripts for A/B; the profile's shares stay right.
+- **P-cores vs E-cores (i7-14700KF)**: the same race is ~2.4x slower on an E-core (60 fps vs 140). The user's runs
+  (a cube face 3.1-3.8 ms vs 1.1-1.6 headless) match the game thread on an E-core. Unpinned runs flip between both
+  as the machine's load changes, so A/B runs are pinned.
+- All cars drew the garage model at every distance (the game's top race tier holds to 120 m+): ~2 ms a frame.
+- Guest lock: the main thread waits ~6 % of the time, mostly for the sound thread's own mixing (serialised by the
+  lock); hand-off overhead ~1.5 %; `GIL_HOLD_MS` (hold the lock longer) gave nothing and was removed.
+- What is left (2000 us profile, P-cores): cars `0043C830` 43 % (EAGL: `00543AE0` 7 % self, `00489CC0` 5 %,
+  `005B0730` 5 % per-vertex transform + projection with a call per vertex, `00449390` 4 %, light layer `00446530_orig`
+  4 %), cube 13 %, our draw path (`draw_any`, `flush_verts`, `submit`, `cs_apply`) 8 %, guest lock 8 %.
+  Next: C versions of the EAGL kernels (verified against the lifted code on the same input), then our draw path.
 
 ## The problem
 
@@ -54,7 +104,12 @@ layer `00446530`, the clipper appending corners past the model's vertices), all 
 - `?log=1&env=PERFSTAT=1` on the local dev server: the game's log goes to the server's stdout (not the browser's
   console): `[perf game]` work / wait segment / wait present per frame every 5 s; `[perf page]` the page's side.
 - `?env=CUBELOG=1` logs fps, the present wait and a cube face's cost every 2 s.
-- Knobs for A/B: `CUBE=0`, `CARLOD=0`, `DRAW_X=1`, `PAINT=0`, `GLASS=0`, `?msaa=1` (off), `CUBE_FACES=<n>`.
+- Knobs for A/B: `CUBE=0`, `CARLOD=0`, `CARLOD_NEAR=<m>`, `CUBE_CARLOD=<tiers>`, `DRAW_X=1`, `PAINT=0`, `GLASS=0`,
+  `?msaa=1` (off), `CUBE_FACES=<n>`; diagnostics `LODLOG=1` (car LOD index / distance), `GILREP=1` (guest lock per
+  thread every 1500 frames).
+- Headless tools: `web/tools/perf_fps.sh` (fps only), `perf_fps_pcores.sh` / `perf_fps_ecores.sh` (pinned),
+  `perf_prof.sh` (sampling profile, `IV=2000 FOCUS=fn CALLERS=fn`), all on `web/tools/prof_race.mjs`
+  (`--at <log regex> --delay s`: the window from the race's start; `--noprof`).
 - Chrome DevTools Performance on the game worker (wasm function names, if the build keeps a name section) for the
   hot functions; or a sampling counter in the runtime.
 - Test on one or two tracks only, with a mid-poly custom car and with stock cars, menu-flow race (fe=0 races stay
