@@ -1477,3 +1477,66 @@ void sub_005b0730(CPU *restrict c){
     c->eax = src + ss * count; c->ecx = code + cs * (count - 1); c->edx = 0;
     POP32(c->eip);
 }
+
+/* ---- TRK2-4/5: the track table (004FAE20) reads <save dir>\nfs5.trk, which the game copied from FEData\Data\nfs5.trk
+ * the first time and never again. Profiles made before a roster change keep its old order and the old records (all
+ * converted tracks once carried monaco1's ladder). After the stock load the table is rebuilt in the data file's order:
+ * definitions from the data file, records from the save, except places still equal to monaco1's stock places (those
+ * take the data file's new places), sorted by time. The game writes the merged table back when a record falls. ---- */
+#define TRK_STRIDE   0x4A8u
+#define TRK_REC_AT   0x1B0u
+#define TRK_PLACE    0x4Cu
+#define TRK_PLACES   8
+#define TRK_TIME     0x48u
+#define TRK_TABLE    0x00691C90u
+#define TRK_COUNT    0x00691C94u
+#define TRK_TABLE2   0x00691CE8u
+static int place_cmp(const void *a, const void *b){
+    const uint32_t ta = *(const uint32_t *)((const uint8_t *)a + TRK_TIME), tb = *(const uint32_t *)((const uint8_t *)b + TRK_TIME);
+    return ta < tb ? -1 : ta > tb;
+}
+void sub_004fae20_orig(CPU *);
+void sub_004fae20(CPU *restrict c){
+    sub_004fae20_orig(c);
+    char path[1024];
+    if (!fileio_resolve_game("FEData\\Data\\nfs5.trk", path, sizeof path)){ fprintf(stderr, "[trk] no data nfs5.trk\n"); return; }
+    FILE *f = fopen(path, "rb");
+    if (!f){ fprintf(stderr, "[trk] cannot open %s\n", path); return; }
+    fseek(f, 0, SEEK_END); const long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    const uint32_t nd = sz > 0 ? (uint32_t)sz / TRK_STRIDE : 0;
+    uint8_t *data = nd ? malloc((size_t)nd * TRK_STRIDE) : 0;
+    const int ok = data && fread(data, TRK_STRIDE, nd, f) == nd;
+    fclose(f);
+    if (!ok){ free(data); return; }
+    const uint32_t tab = MR32(TRK_TABLE), ns = MR32(TRK_COUNT);
+    const uint8_t *save = tab ? g_mem + tab : 0;
+    const uint8_t *monaco = 0;
+    for (uint32_t i = 0; i < nd; i++) if (!strcmp((const char *)data + i * TRK_STRIDE + 8, "monaco1")) monaco = data + i * TRK_STRIDE;
+    uint8_t *out = malloc((size_t)nd * TRK_STRIDE);
+    int moved = 0, fresh = 0, kept = 0;
+    for (uint32_t i = 0; i < nd; i++){
+        uint8_t *o = out + i * TRK_STRIDE; const uint8_t *d = data + i * TRK_STRIDE;
+        memcpy(o, d, TRK_STRIDE);
+        const uint8_t *s = 0;
+        for (uint32_t j = 0; save && j < ns; j++) if (!memcmp(save + j * TRK_STRIDE, d, 4)){ s = save + j * TRK_STRIDE; if (j != i) moved++; break; }
+        if (!s) continue;
+        uint8_t places[2 * TRK_PLACES][TRK_PLACE]; int np = 0;
+        for (int k = 0; k < TRK_PLACES; k++){
+            const uint8_t *sp = s + TRK_REC_AT + k * TRK_PLACE;
+            const int stale = monaco && *(const uint32_t *)(d + 4) >= 0x2000u && memcmp(d, monaco, 4)
+                              && !memcmp(sp, monaco + TRK_REC_AT + k * TRK_PLACE, TRK_PLACE);
+            memcpy(places[np++], stale ? d + TRK_REC_AT + k * TRK_PLACE : sp, TRK_PLACE);
+            if (stale) fresh++; else kept++;
+        }
+        qsort(places, (size_t)np, TRK_PLACE, place_cmp);
+        for (int k = 0; k < TRK_PLACES; k++) memcpy(o + TRK_REC_AT + k * TRK_PLACE, places[k], TRK_PLACE);
+    }
+    if (save && ns == nd && !memcmp(out, save, (size_t)nd * TRK_STRIDE)){ fprintf(stderr, "[trk] save copy %u tracks, as the data file\n", ns); free(out); free(data); return; }
+    uint32_t dst = tab;
+    if (!tab || ns < nd) dst = gheap_alloc(1, nd * TRK_STRIDE, 1);
+    memcpy(g_mem + dst, out, (size_t)nd * TRK_STRIDE);
+    MR32(TRK_TABLE) = dst; MR32(TRK_TABLE2) = dst; MR32(TRK_COUNT) = nd;
+    fprintf(stderr, "[trk] save copy %u tracks -> %u in the data order (%d moved), records: %d places kept, %d stale monaco1 places replaced\n",
+            ns, nd, moved, kept, fresh);
+    free(out); free(data);
+}
