@@ -75,6 +75,7 @@ const P_COAT = 1.0; const P_COAT_GLOSS = 0.0; const P_PEEL = 0.5; const P_PEEL_S
 const P_SPEC = 20.0; const P_REFL = 1.0; const P_GLOW = 35.8; const P_GLOW_ANG = 15.0; const P_GLOW_SAT = 0.6;
 const P_VIEW_LIGHT = 1.2; const P_VIEW_DARK = 0.25; const P_ENV_DIFFUSE = 0.3; const P_ENV_GLOW = 0.0;
 const P_DMG_DARK = 0.55;
+const P_CAR_BIAS = 0.0; const P_SEAM = 0.85;
 const P_SUN_FOG = 150.0; const P_LIGHT_GAIN = 1.7; const P_DARK_MATTE = 1.0; const P_DARK_POWER = 4.0; const P_SUN_REFL = 0.1;
 const MAXMIP = 8.0;
 const SUN_COL = vec3f(1.0, 0.95, 0.85);
@@ -166,7 +167,7 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
 }
 @fragment fn fs_car(i: VO) -> @location(0) vec4f {
   let uv = i.uvq.xy / i.uvq.z;
-  let albedo = textureSampleBias(tx, sm, uv, u.lodBias);
+  let albedo = textureSampleBias(tx, sm, uv, u.lodBias + P_CAR_BIAS);
   let pk = textureSample(paintTx, sm, uv).rg;
   let d = 1.0 / max(i.uvq.z, 1e-6);
   let P = i.ray * d;
@@ -222,6 +223,9 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   var rgb = shade_car(Nb, Nc, N, V, u.sun.xyz, base, i.color.rgb, sun, env_b, env_c, metal_c, rough, P_SPEC * keep, P_REFL * keep,
                       coat_c, rough_coat, P_GLOW, P_VIEW_LIGHT, env_irr, env_glow, P_ENV_DIFFUSE, P_ENV_GLOW,
                       P_LIGHT_GAIN, textureSampleLevel(tx, sm, uv, 3.0).rgb);
+  // the seams (paint darker than its band, G above 128) darker once more by that ratio: the light lifts (gain, view light, sky) and
+  // the knee washed them out on light paint (the user picked 0.85, 2026-11-26; ?seam=0 = off, ?seam=<0..3> to try)
+  if (P_SEAM > 0.0) { rgb *= max(mix(1.0, clamp(1.0 - gv / 127.5, 0.0, 1.0), P_SEAM), 0.0); }
   rgb = mix(albedo.rgb * i.color.rgb, rgb, pk.r);   // texels the game does not paint keep the stock look
   return vec4f(fog(rgb, i.uvq.z), a);
 }
@@ -375,6 +379,11 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   if (glassDbg === 1) code = code.replace('  return out_;', '  return vec4f(1.0, 0.0, 1.0, 1.0);');
   if (glassDbg === 2) code = code.replace('  return out_;', '  return vec4f(refl, 1.0);');
   if (glassDbg === 3) code = code.replace('  if (g < 0.5) { discard; }', '').replace('  return out_;', '  return vec4f(1.0, 0.0, 1.0, 1.0);');
+  // ?carbias=<-4..2>: the car page's mip bias (negative = sharper: thin seams survive the distance); ?seam=<0..3> (see fs_car)
+  const carBias = Number(new URLSearchParams(location.search).get('carbias') ?? NaN);
+  if (carBias >= -4 && carBias <= 2) code = code.replace('const P_CAR_BIAS = 0.0;', `const P_CAR_BIAS = ${carBias.toFixed(3)};`);
+  const seamQ = Number(new URLSearchParams(location.search).get('seam') ?? NaN);
+  if (seamQ >= 0 && seamQ <= 3) code = code.replace('const P_SEAM = 0.85;', `const P_SEAM = ${seamQ.toFixed(3)};`);
   if (peelQ >= 0 && peelQ <= 2) code = code.replace('const P_PEEL = 0.5;', `const P_PEEL = ${peelQ.toFixed(3)};`);
   const module = device.createShaderModule({ code });
   void module.getCompilationInfo().then(ci => { for (const m of ci.messages) log(`[gpu] shader ${m.type} line ${m.lineNum}: ${m.message}`); });
