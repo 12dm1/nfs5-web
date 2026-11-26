@@ -17,7 +17,7 @@
   </tr>
   <tr>
     <td width="50%"><img src="docs/screens/race-biplane.jpg" alt="A converted High Stakes track"></td>
-    <td width="50%"><img src="docs/screens/quick-race-menu.jpg" alt="Quick Race with 15 opponents in the showroom"></td>
+    <td width="50%"><img src="docs/screens/garage.jpg" alt="The garage"></td>
   </tr>
 </table>
 
