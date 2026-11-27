@@ -429,22 +429,19 @@ int pu_head_frame(float *o){
     if (lg){ static int k; if (++k % 600 == 0) fprintf(stderr, "[head] night %d axle %.1f %.1f %.1f right %.2f %.2f %.2f\n",
                                                      (int)dark, o[0], o[1], o[2], o[6], o[7], o[8]); }
     o[12] = dark;
-    /* the car's own lamps: car+D87 bits 0/1 = the two headlights (action 13 LIGHTSON toggles 3, both on at night), bit 2 the high beams
-     * (action 15); the beams follow them */
-    const uint8_t lamps = g_mem[car + 0xD87u];
-    o[13] = (lamps & 1) ? 1.0f : 0.0f; o[14] = (lamps & 2) ? 1.0f : 0.0f; o[15] = (lamps & 4) ? 1.0f : 0.0f;
-    /* a broken lamp, as the game breaks the car's parts: the damage panels (car+4E4 + 4 i, 0..100; 00494500, chosen by 00494DF0 from
-     * the hit normal against the car's axes: a ring 0 front-left corner, 1 front, 2 front-right corner, 3 side, 4/5/6 the rear, 7 side,
-     * 8 the roof); 0043E390 marks a part broken (part+50: its glow goes) once a panel it lies on is over 0.5 x 1/0.02 = 25. A lamp's
-     * beam goes with it: its corner or the front over 25. DMGPANEL=<i> (test): that panel at 100. */
+    /* the car's lamps as the game draws their glows: the car's R3DCar (car+74C) keeps one byte per lamp at [+2D4] (levels at [+2D8]),
+     * set each frame by the lamp updater 00439360 from car+D87 and the damage; 0043D800 draws a lamp record's glow when its lamp's byte
+     * is set: the headlight record with lamp 0 (the car's left), its mirrored copy with lamp 1 (the right). A broken headlight's byte
+     * goes to 0 with its glow (front-left crushed: lamp 0 off, lamp 1 on). High beams: car+D87 bit 2 (action 15).
+     * DMGPANEL=<i> (test): damage panel i (car+4E4 + 4 i; 0 front-left, 1 front, 2 front-right) at 100. */
     { static int tp = -2; if (tp == -2){ const char *e = getenv("DMGPANEL"); tp = e ? atoi(e) : -1; }
       if (tp >= 0 && tp < 9 && MR32(0x00606AC4u) > 200){ const float full = 100.0f; memcpy(g_mem + car + 0x4E4 + 4 * tp, &full, 4); } }
-    float pd[3]; memcpy(pd, g_mem + car + 0x4E4, 12);
-    for (int s2 = 0; s2 < 2; s2++){
-        const float dmg = pd[s2 ? 2 : 0] > pd[1] ? pd[s2 ? 2 : 0] : pd[1];
-        if (dmg * 0.02f > 0.5f) o[13 + s2] = 0.0f;
-    }
-    if (lg){ static int kp; if (++kp % 600 == 0) fprintf(stderr, "[head] lamps %.2f %.2f high %.0f panels %.0f %.0f %.0f" "\n", o[13], o[14], o[15], pd[0], pd[1], pd[2]); }
+    const uint32_t r3d = MR32(car + 0x74Cu), lb = r3d ? MR32(r3d + 0x2D4u) : 0;
+    if (!lb) return 0;
+    o[13] = g_mem[lb] ? 1.0f : 0.0f; o[14] = g_mem[lb + 1] ? 1.0f : 0.0f;
+    o[15] = (g_mem[car + 0xD87u] & 4) ? 1.0f : 0.0f;
+    if (lg){ static int kp; if (++kp % 600 == 0){ float pd[3]; memcpy(pd, g_mem + car + 0x4E4, 12);
+        fprintf(stderr, "[head] lamps %.0f %.0f high %.0f (D87 %02x) panels %.0f %.0f %.0f" "\n", o[13], o[14], o[15], g_mem[car + 0xD87u], pd[0], pd[1], pd[2]); } }
     /* the game's own headlights (LayerVertexLight@Headlights: track vertices lit per frame) give way to the beams: their apply method
      * (vtable slot 0 of the three Headlights layer classes) becomes the base layer's empty one, 0044A0A0 (mov eax,[ecx+8]; ret 8) */
     { static int patched; if (!patched){ patched = 1;
