@@ -15,6 +15,7 @@ User list of 2026-11-26. Status per item.
 | 9 | Aquatica lamp rays opaque | done (`<additive>` bitmaps -> soft alpha, _mod 84f3378) |
 | 10 | Dolphin Cove lighthouse: rotating beam opaque | done (_mod 5d16d38): animated G8 textures 200/201 soft at alpha /10 (~0.1); backup _mod/backups/LH1-beam-20261127 |
 | 11 | Landstrasse (Germany) night version instead of day | done (_mod 6d57b69): converter stages trn.* + night sky tags (NIGHT_TRACKS); road line identical, so AI/walls/records stay; installed crp/fsh/env/map/Sky; backup _mod/backups/GN1-night-20261127. Night variants also exist for Coastal, France, Gt1-3, Hills, Park, Snowy, Uk |
+| 12 | Night Landstrasse: headlights do not light the track | done (_mod ee1b2ec + 597db45): Opaque materials 13 layers (mt+0x20) + Industrial's RM Opaque (Headlights vertex light) + prim InfoRow slots 14/15/16 (9/10/11 broke the geometry); race shots: road ahead +15-40 levels brighter |
 
 ## 8 — draw distance per track (waiting)
 
