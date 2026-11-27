@@ -145,7 +145,9 @@ static int g_cap, g_cap_clear, g_cap_opaque, g_cap_sun, g_cube_faces;
 extern float g_paint_sun[3];
 /* the paint shader's camera (PC car_reflection.cpp BuildConstants, materials.cpp): basis rows, projection, the pixels' centre and half size,
  * the game's car light in camera space */
+float pu_wheel_spin(void);
 static void paint_uniform(float *u){
+    u[44] = pu_wheel_spin();                    /* WHEEL1: fs_wheel's smear (x1.x) */
     const uint32_t eagl = MR32(0x0069E0D4u), engine = MR32(0x00628130u);
     const uint32_t view = engine ? MR32(engine + 0x10) : 0, cam = view ? MR32(view + 0x0C) : 0;
     if (!eagl || !cam) return;
@@ -173,7 +175,7 @@ static void emit_state(const DrawState *d){
     /* a change of anything closes the running draw */
     uint32_t pipe = (uint32_t)d->blend | (uint32_t)d->zcmp << 3 | (uint32_t)d->zwrite << 6 | (uint32_t)d->cull << 7 |
                     (uint32_t)d->topo << 9 | (uint32_t)d->colorwrite << 11;
-    pipe |= (uint32_t)(d->paint == 1) << 15 | (uint32_t)(d->paint == 2) << 16 | (uint32_t)(d->paint == 3) << 17;
+    pipe |= (uint32_t)(d->paint == 1) << 15 | (uint32_t)(d->paint == 2) << 16 | (uint32_t)(d->paint == 3) << 17 | (uint32_t)(d->paint == 4) << 18;
     if (g_cap) pipe |= 1u << 12 | (uint32_t)(g_cap_clear && d->blend == 0) << 13 | (uint32_t)(g_cap_sun && d->blend == 1) << 14;
     uint32_t sam = (uint32_t)d->filter | (uint32_t)d->cs << 1 | (uint32_t)d->ct << 3 | (uint32_t)d->mips << 5;
     float u[UNI];
@@ -347,7 +349,7 @@ static void game_state(DrawState *d, int topo){
     if (!(d->bias > -16.0f && d->bias < 16.0f)) d->bias = 0.0f;
     d->paint = 0; d->paint_tex = 0;
     if ((g_race || MR32(0x0065B928u)) && !g_cap && g_paint_on && topo == 0){
-        if (d->tex > 0 && g_tex[d->tex - 1].paint){ d->paint = g_tex[d->tex - 1].paint == 2 ? 3 : 1; d->paint_tex = d->tex; }   /* 3: a glass page */
+        if (d->tex > 0 && g_tex[d->tex - 1].paint){ const int k = g_tex[d->tex - 1].paint; d->paint = k == 2 ? 3 : k == 4 ? 4 : 1; d->paint_tex = d->tex; }   /* 3: a glass page, 4: the rim's (WHEEL1) */
         else if (g_mask_slot){ d->paint = 2; d->paint_tex = g_mask_slot; }
     }
 }
@@ -697,7 +699,7 @@ static void draw_any(const char *n, const uint32_t *a){
         const int bound = tan_substitute(g_bound);
         const int paintable = (g_race || MR32(0x0065B928u)) && !g_cap;
         const int armed = g_refl_armed; g_refl_armed = 0;
-        const int bp = bound ? g_tex[bound - 1].paint : 0;
+        const int bp = bound && g_tex[bound - 1].paint != 4 ? g_tex[bound - 1].paint : 0;   /* the rim's page (4) is no paint page */
         const int again = armed && paintable && bound && !bp && g_pv_slot && g_pv_vb == a[1] && g_pv_ib == a[2] && g_pv_count == count && pv_same(o, nv);
         if (paintable && bound && (bp || again)) car_clip_normals(a[1], vb, ib, o, nv);
         if (paintable && bound && bp == 2) glass_log(bound, o, nv, 2);

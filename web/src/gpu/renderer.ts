@@ -68,6 +68,32 @@ fn shade(i: VO) -> vec4f {
   return vec4f(fog(r.rgb, i.uvq.z), r.a);
 }
 @fragment fn fs(i: VO) -> @location(0) vec4f { return shade(i); }
+// WHEEL1: the rim (the car's tpage4, its quarter u, v < 0.5, centre 0.25, 0.25) smeared round its centre by the wheels' turn in a
+// frame (u.x1.x radians, runtime/pu_paint.c pu_wheel_spin): 12 samples over the arc. The tyre's tread and the rest of the page as is.
+const P_WHEEL = 1.0;
+@fragment fn fs_wheel(i: VO) -> @location(0) vec4f {
+  let uv = i.uvq.xy / i.uvq.z;
+  let gx = dpdx(uv); let gy = dpdy(uv);
+  let d = uv - vec2f(0.25);
+  let ang = min(u.x1.x * P_WHEEL, 2.6);
+  var t: vec4f;
+  if (ang > 0.02 && all(uv >= vec2f(0.0)) && all(uv <= vec2f(0.5)) && dot(d, d) < 0.0625) {
+    var acc = vec4f(0.0);
+    for (var k = 0; k < 12; k++) {
+      let a = ang * (f32(k) / 11.0 - 0.5);
+      let cs = cos(a); let sn = sin(a);
+      let p = vec2f(0.25) + vec2f(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+      acc += textureSampleGrad(tx, sm, clamp(p, vec2f(0.002), vec2f(0.498)), gx, gy);
+    }
+    t = acc / 12.0;
+  } else {
+    t = textureSampleGrad(tx, sm, uv, gx, gy);
+  }
+  var r = t * i.color;
+  if (u.alphaRef > 0.0 && r.a < u.alphaRef) { discard; }
+  if (u.hard > 0.5) { r.a = 1.0; }
+  return vec4f(fog(r.rgb, i.uvq.z), r.a);
+}
 // ---- car paint (PC dx11_shaders.h PSMaterial car branch, shaders/material_core.inc mat_shade_car; [car_paint] values of dx11z.ini) ----
 const PI = 3.14159265;
 const P_METAL = 0.2; const P_GRAZING = 0.5; const P_FLAKE_SCALE = 1200.0; const P_FLAKE = 0.015; const P_SILVER = 0.5;
@@ -297,6 +323,65 @@ struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 }
 @fragment fn fs(i: VO) -> @location(0) vec4f { return textureSampleLevel(tx, sm, i.uv, 0.0); }`;
 
+// LAMP1: light bloom. Every draw also writes a second target whose blend keeps only the additive draws (lamp and street
+// light glows, head/brake lights, flares: the game's own light sprites), opaque draws clear it (no halo through a wall),
+// alpha-blended ones dim it. At a present that target goes to a quarter-size chain: downsample, 9-tap blur both ways,
+// a wide horizontal streak (lens), then the composite adds both to the frame. ?bloom=0 off (gfx low: off), ?bloom=<k>.
+const BLOOM_WGSL = /* wgsl */`
+@group(0) @binding(0) var tx: texture_2d<f32>;
+@group(0) @binding(1) var sm: sampler;
+@group(0) @binding(2) var tb: texture_2d<f32>;
+@group(0) @binding(3) var ts: texture_2d<f32>;
+struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+const K_BLOOM = 1.0;
+const K_GAIN = 2.2;
+const K_STREAK = 0.6;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var o: VO; let x = f32(i & 1u) * 2.0; let y = f32((i >> 1u) & 1u) * 2.0;
+  o.pos = vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0); o.uv = vec2f(x, y); return o;
+}
+fn px(t: texture_2d<f32>) -> vec2f { return 1.0 / vec2f(textureDimensions(t)); }
+// full-size glow -> quarter: 4 bilinear taps = a 4x4 box
+@fragment fn fs_down(i: VO) -> @location(0) vec4f {
+  let d = px(tx);
+  let t0 = textureSampleLevel(tx, sm, i.uv + d * vec2f(-1.0, -1.0), 0.0).rgb; let t1 = textureSampleLevel(tx, sm, i.uv + d * vec2f(1.0, -1.0), 0.0).rgb;
+  let t2 = textureSampleLevel(tx, sm, i.uv + d * vec2f(-1.0, 1.0), 0.0).rgb; let t3 = textureSampleLevel(tx, sm, i.uv + d * vec2f(1.0, 1.0), 0.0).rgb;
+  // half mean, half max: a lamp a few pixels wide keeps its strength in the quarter image
+  let c = 0.5 * (t0 + t1 + t2 + t3) * 0.25 + 0.5 * max(max(t0, t1), max(t2, t3));
+  return vec4f(c, 1.0);
+}
+fn blur(uv: vec2f, dir: vec2f, step: f32) -> vec4f {
+  let w = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+  var c = textureSampleLevel(tx, sm, uv, 0.0).rgb * w[0];
+  for (var k = 1; k < 5; k++) {
+    let o = dir * f32(k) * step;
+    c += (textureSampleLevel(tx, sm, uv + o, 0.0).rgb + textureSampleLevel(tx, sm, uv - o, 0.0).rgb) * w[k];
+  }
+  return vec4f(c, 1.0);
+}
+@fragment fn fs_bh(i: VO) -> @location(0) vec4f { return blur(i.uv, vec2f(px(tx).x, 0.0), 1.2); }
+@fragment fn fs_bv(i: VO) -> @location(0) vec4f { return blur(i.uv, vec2f(0.0, px(tx).y), 1.2); }
+// the wide pass adds a soft halo to the tight core (keeps the core: c + wide)
+@fragment fn fs_bh2(i: VO) -> @location(0) vec4f { return blur(i.uv, vec2f(px(tx).x, 0.0), 3.5); }
+@fragment fn fs_bv2(i: VO) -> @location(0) vec4f { return blur(i.uv, vec2f(0.0, px(tx).y), 3.5); }
+// the lens streak: a long thin horizontal smear of the brightest glow
+@fragment fn fs_streak(i: VO) -> @location(0) vec4f {
+  let d = px(tx).x;
+  var c = vec3f(0.0); var wsum = 0.0;
+  for (var k = -16; k <= 16; k++) {
+    let w = exp(-abs(f32(k)) / 6.0);
+    let t = textureSampleLevel(tx, sm, i.uv + vec2f(f32(k) * 3.0 * d, 0.0), 0.0).rgb;
+    c += max(t - vec3f(0.08), vec3f(0.0)) * w; wsum += w;
+  }
+  return vec4f(c / wsum * 3.0 * vec3f(0.75, 0.85, 1.0), 1.0);
+}
+@fragment fn fs_comp(i: VO) -> @location(0) vec4f {
+  let c = textureSampleLevel(tx, sm, i.uv, 0.0).rgb;
+  let b = (textureSampleLevel(tb, sm, i.uv, 0.0).rgb * K_GAIN + textureSampleLevel(ts, sm, i.uv, 0.0).rgb * K_STREAK) * K_BLOOM;
+  // screen-style add: bright light never clips to a flat white patch
+  return vec4f(c + b * (vec3f(1.0) - c * 0.5), 1.0);
+}`;
+
 // GLASS1: the glass pass is premultiplied (its colour is the reflection, its alpha the share of what is under it that goes)
 const GLASS_BLEND: GPUBlendState = { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } };
 const BLEND: (GPUBlendState | undefined)[] = [
@@ -353,6 +438,9 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   // threshold, survivors opaque", which the shader's hard cutout already does, so there is no coverage from alpha here.
   const msaaParam = Number(new URLSearchParams(location.search).get('msaa') ?? gfxSamples());
   const SAMPLES = msaaParam === 1 ? 1 : 4;
+  const bloomParam = new URLSearchParams(location.search).get('bloom');
+  const BLOOM = bloomParam === null ? gfxSamples() > 1 : Number(bloomParam) > 0;
+  const BLOOM_K = bloomParam !== null && Number(bloomParam) > 0 ? Number(bloomParam) : 1.0;
   const makeTargets = () => {
     const colorTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
     const msTex = SAMPLES > 1 ? device.createTexture({ size: [W, H], format: 'rgba8unorm', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
@@ -361,11 +449,31 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     return { colorTex, msTex, depthTex, colorView, depthView: depthTex.createView(), drawView: msTex ? msTex.createView() : colorView };
   };
   let { colorTex, msTex, depthTex, colorView, depthView, drawView } = makeTargets();
+  // LAMP1 targets: the glow (multisampled like the scene, resolved), the quarter chain, the composite the present shows
+  const makeBloom = () => {
+    if (!BLOOM) return null;
+    const RT = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
+    const glowTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: RT });
+    const msGlow = SAMPLES > 1 ? device.createTexture({ size: [W, H], format: 'rgba8unorm', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
+    const qw = Math.max(1, Math.ceil(W / 4)), qh = Math.max(1, Math.ceil(H / 4));
+    const q = () => device.createTexture({ size: [qw, qh], format: 'rgba16float', usage: RT });
+    const a = q(), b = q(), st = q(), w = q();
+    const finalTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: RT | GPUTextureUsage.COPY_SRC });
+    const glowView = glowTex.createView();
+    return { glowTex, msGlow, a, b, st, finalTex, glowView, glowDraw: msGlow ? msGlow.createView() : glowView,
+      av: a.createView(), bv: b.createView(), sv: st.createView(), wv: w.createView(), fv: finalTex.createView(),
+      all: [glowTex, a, b, st, w, finalTex, ...(msGlow ? [msGlow] : [])] };
+  };
+  let bloom = makeBloom();
+  let glowClear = true;
+  if (BLOOM) log(`[gpu] LAMP1 light bloom x${BLOOM_K}`);
   log(`[gpu] MSAA x${SAMPLES}`);
   // the multisampled target into colorTex: an empty pass whose end resolves
   const resolve = (enc: GPUCommandEncoder) => {
     if (!msTex) return;
-    enc.beginRenderPass({ colorAttachments: [{ view: drawView, resolveTarget: colorView, loadOp: 'load', storeOp: 'store' }] }).end();
+    const att: GPURenderPassColorAttachment[] = [{ view: drawView, resolveTarget: colorView, loadOp: 'load', storeOp: 'store' }];
+    if (bloom && bloom.msGlow) att.push({ view: bloom.glowDraw, resolveTarget: bloom.glowView, loadOp: glowClear ? 'clear' : 'load', storeOp: 'store', clearValue: [0, 0, 0, 0] });
+    enc.beginRenderPass({ colorAttachments: att }).end();
   };
 
   // ?paintdbg=1..6: what the paint shader sees (1 paint mask: magenta paint, green stock; 2 normal; 3 environment; 4 vertex light; 5 keep/paint/sun visibility; 6 albedo)
@@ -384,7 +492,23 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   if (carBias >= -4 && carBias <= 2) code = code.replace('const P_CAR_BIAS = 0.0;', `const P_CAR_BIAS = ${carBias.toFixed(3)};`);
   const seamQ = Number(new URLSearchParams(location.search).get('seam') ?? NaN);
   if (seamQ >= 0 && seamQ <= 3) code = code.replace('const P_SEAM = 0.85;', `const P_SEAM = ${seamQ.toFixed(3)};`);
+  // ?wheelblur=<k>: the rim smear x k (0 off)
+  const wheelQ = Number(new URLSearchParams(location.search).get('wheelblur') ?? NaN);
+  if (wheelQ >= 0 && wheelQ <= 4) code = code.replace('const P_WHEEL = 1.0;', `const P_WHEEL = ${wheelQ.toFixed(3)};`);
+  // ?wheelspin=<radians>: a fixed smear for looks (the menus' cars stand still)
+  const spinQ = Number(new URLSearchParams(location.search).get('wheelspin') ?? NaN);
+  if (spinQ >= 0 && spinQ <= 3) code = code.replace('let ang = min(u.x1.x * P_WHEEL, 2.6);', `let ang = ${spinQ.toFixed(3)};`);
   if (peelQ >= 0 && peelQ <= 2) code = code.replace('const P_PEEL = 0.5;', `const P_PEEL = ${peelQ.toFixed(3)};`);
+  if (BLOOM) {
+    for (const n of ['fs', 'fs_car', 'fs_glass', 'fs_mask', 'fs_wheel']) code = code.replace(`@fragment fn ${n}(i: VO) -> @location(0) vec4f {`, `fn ${n}_b(i: VO) -> vec4f {`);
+    code += `
+struct MRT { @location(0) c: vec4f, @location(1) g: vec4f };
+@fragment fn fs(i: VO) -> MRT { let c = fs_b(i); return MRT(c, c); }
+@fragment fn fs_car(i: VO) -> MRT { let c = fs_car_b(i); return MRT(c, c); }
+@fragment fn fs_glass(i: VO) -> MRT { let c = fs_glass_b(i); return MRT(c, c); }
+@fragment fn fs_mask(i: VO) -> MRT { let c = fs_mask_b(i); return MRT(c, c); }
+@fragment fn fs_wheel(i: VO) -> MRT { let c = fs_wheel_b(i); return MRT(c, c); }`;
+  }
   const module = device.createShaderModule({ code });
   void module.getCompilationInfo().then(ci => { for (const m of ci.messages) log(`[gpu] shader ${m.type} line ${m.lineNum}: ${m.message}`); });
   const blitModule = device.createShaderModule({ code: BLIT });
@@ -415,6 +539,15 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     const keep: GPUBlendComponent = key & (1 << 13) ? { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' } : { srcFactor: 'zero', dstFactor: 'one' };
     return { color: base ? base.color : { srcFactor: 'one', dstFactor: 'zero' }, alpha: keep };
   };
+  // LAMP1: the glow target keeps the additive draws, opaque ones clear it, alpha-blended ones dim it
+  const GLOW_KEEP: GPUBlendState = { color: { srcFactor: 'zero', dstFactor: 'one' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } };
+  const GLOW_CLEAR: GPUBlendState = { color: { srcFactor: 'zero', dstFactor: 'zero' }, alpha: { srcFactor: 'zero', dstFactor: 'zero' } };
+  const GLOW_DIM: GPUBlendState = { color: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } };
+  const glowBlend = (key: number): GPUBlendState => {
+    if (key & (1 << 17)) return GLOW_KEEP;
+    const m = key & 7;
+    return m === 1 ? BLEND[1]! : m === 0 || m === 2 ? GLOW_DIM : m === 3 ? GLOW_KEEP : GLOW_CLEAR;
+  };
   const pipes = new Map<number, GPURenderPipeline>();
   const pipeline = (key: number) => {
     let p = pipes.get(key);
@@ -427,7 +560,8 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
         { shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x2' },
         { shaderLocation: 2, offset: 24, format: 'unorm8x4' }, { shaderLocation: 3, offset: 28, format: 'unorm8x4' },
         { shaderLocation: 4, offset: 32, format: 'float32x4' }] }] },
-      fragment: { module, entryPoint: cap ? 'fs_cap' : key & (1 << 15) ? 'fs_car' : key & (1 << 16) ? 'fs_mask' : key & (1 << 17) ? 'fs_glass' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
+      fragment: { module, entryPoint: cap ? 'fs_cap' : key & (1 << 18) ? 'fs_wheel' : key & (1 << 15) ? 'fs_car' : key & (1 << 16) ? 'fs_mask' : key & (1 << 17) ? 'fs_glass' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 },
+        ...(BLOOM && !cap ? [{ format: 'rgba8unorm' as GPUTextureFormat, blend: glowBlend(key), writeMask: cw ? GPUColorWrite.ALL : 0 }] : [])] },
       primitive: { topology: TOPO[topo], cullMode: topo === 0 ? CULL[cull] : 'none', frontFace: 'cw' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: !!zwrite, depthCompare: DEPTH[zcmp] },
       multisample: { count: cap ? 1 : SAMPLES },
@@ -482,6 +616,44 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const genPipe = blitPipe('rgba8unorm'), presentPipe = blitPipe(canvasFormat), cubeMipPipe = blitPipe(CUBE_FORMAT);
   const makePresentGroup = () => device.createBindGroup({ layout: blitLayout, entries: [{ binding: 0, resource: colorView }, { binding: 1, resource: genSampler }] });
   let presentGroup = makePresentGroup();
+  // ?bloomdbg=1: the composite shows the bloom alone (2: the glow target as the scene left it)
+  const bloomDbg = Number(new URLSearchParams(location.search).get('bloomdbg') ?? 0);
+  let bloomCode = BLOOM_WGSL.replace('const K_BLOOM = 1.0;', `const K_BLOOM = ${BLOOM_K.toFixed(3)};`);
+  if (bloomDbg === 1) bloomCode = bloomCode.replace('return vec4f(c + b * (vec3f(1.0) - c * 0.5), 1.0);', 'return vec4f(b, 1.0);');
+  const bloomModule = BLOOM ? device.createShaderModule({ code: bloomCode }) : null;
+  if (bloomModule) void bloomModule.getCompilationInfo().then(ci => { for (const m of ci.messages) log(`[gpu] bloom shader ${m.type} line ${m.lineNum}: ${m.message}`); });
+  const bloomLayout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} }] });
+  const bloomPipeLayout = device.createPipelineLayout({ bindGroupLayouts: [bloomLayout] });
+  const bloomPipe = (entry: string, format: GPUTextureFormat) => device.createRenderPipeline({ layout: bloomPipeLayout,
+    vertex: { module: bloomModule!, entryPoint: 'vs' }, fragment: { module: bloomModule!, entryPoint: entry, targets: [{ format }] }, primitive: { topology: 'triangle-list' } });
+  // the wide halo is added onto the tight blur (one, one)
+  const bloomPipeAdd = () => device.createRenderPipeline({ layout: bloomPipeLayout,
+    vertex: { module: bloomModule!, entryPoint: 'vs' }, fragment: { module: bloomModule!, entryPoint: 'fs_bv2', targets: [{ format: 'rgba16float',
+      blend: { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } } }] }, primitive: { topology: 'triangle-list' } });
+  const bp = bloomModule ? { down: bloomPipe('fs_down', 'rgba16float'), bh: bloomPipe('fs_bh', 'rgba16float'), bv: bloomPipe('fs_bv', 'rgba16float'),
+    bh2: bloomPipe('fs_bh2', 'rgba16float'), bv2: bloomPipe('fs_bv2', 'rgba16float'),
+    streak: bloomPipe('fs_streak', 'rgba16float'), comp: bloomPipe('fs_comp', 'rgba8unorm'), add: bloomPipeAdd() } : null;
+  const bg = (a: GPUTextureView, b?: GPUTextureView, c?: GPUTextureView) => device.createBindGroup({ layout: bloomLayout, entries: [
+    { binding: 0, resource: a }, { binding: 1, resource: genSampler }, { binding: 2, resource: b ?? a }, { binding: 3, resource: c ?? a }] });
+  const makeBloomGroups = () => bloom ? { down: bg(bloom.glowView), bh: bg(bloom.av), bv: bg(bloom.bv), streak: bg(bloom.av), wide: bg(bloom.wv),
+    comp: bloomDbg === 2 ? bg(bloom.glowView, bloom.glowView, bloom.glowView) : bg(colorView, bloom.av, bloom.sv), show: device.createBindGroup({ layout: blitLayout, entries: [{ binding: 0, resource: bloom.fv }, { binding: 1, resource: genSampler }] }) } : null;
+  let bloomGroups = makeBloomGroups();
+  const runBloom = (enc: GPUCommandEncoder) => {
+    if (!bloom || !bp || !bloomGroups) return;
+    const step = (pipe: GPURenderPipeline, group: GPUBindGroup, view: GPUTextureView, load: GPULoadOp = 'clear') => {
+      const p = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: load, storeOp: 'store', clearValue: [0, 0, 0, 0] }] });
+      p.setPipeline(pipe); p.setBindGroup(0, group); p.draw(3); p.end();
+    };
+    step(bp.down, bloomGroups.down, bloom.av);           // glow -> a (quarter)
+    step(bp.streak, bloomGroups.streak, bloom.sv);       // a -> streak
+    step(bp.bh2, bloomGroups.bh, bloom.wv);              // a -> w (wide, horizontal)
+    step(bp.bh, bloomGroups.bh, bloom.bv);               // a -> b (tight, horizontal)
+    step(bp.bv, bloomGroups.bv, bloom.av);               // b -> a (tight)
+    step(bp.add, bloomGroups.wide, bloom.av, 'load');    // a += vertical(w) (wide halo)
+    step(bp.comp, bloomGroups.comp, bloom.fv);
+  };
   const genMips = (t: T) => {
     const enc = device.createCommandEncoder();
     for (let l = 1; l < t.levels; l++) {
@@ -530,6 +702,8 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     toFree.push(colorTex, depthTex); if (msTex) toFree.push(msTex);
     W = nw; H = nh; canvas.width = W; canvas.height = H;
     ({ colorTex, msTex, depthTex, colorView, depthView, drawView } = makeTargets());
+    if (bloom) toFree.push(...bloom.all);
+    bloom = makeBloom(); bloomGroups = makeBloomGroups(); glowClear = true;
     presentGroup = makePresentGroup();
     log(`[gpu] screen ${lw}x${lh} drawn at ${W}x${H}`);
   };
@@ -553,8 +727,10 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
       if (pass) return pass;
       const load: GPULoadOp = capFace >= 0 && capClear ? 'clear' : 'load';
       capClear = false;
+      const att: GPURenderPassColorAttachment[] = [{ view: capFace >= 0 ? cubeViews[capFace][0] : drawView, loadOp: load, storeOp: 'store', clearValue: [0, 0, 0, 0] }];
+      if (bloom && capFace < 0) { att.push({ view: bloom.glowDraw, loadOp: glowClear ? 'clear' : 'load', storeOp: 'store', clearValue: [0, 0, 0, 0] }); glowClear = false; }
       pass = enc.beginRenderPass({
-        colorAttachments: [{ view: capFace >= 0 ? cubeViews[capFace][0] : drawView, loadOp: load, storeOp: 'store', clearValue: [0, 0, 0, 0] }],
+        colorAttachments: att,
         depthStencilAttachment: { view: capFace >= 0 ? cubeDepthView : depthView, depthLoadOp: load, depthClearValue: 1, depthStoreOp: 'store' },
       });
       pass.setVertexBuffer(0, vbuf);
@@ -659,13 +835,17 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     if (present) {
       const frame = ++stats.frames;
       const view = ctx.getCurrentTexture().createView();
+      // the race only (its mode is wider than the menus' 640 x 480): the showroom's light panels are large additive walls
+      const bloomNow = !!bloomGroups && lw > 640;
+      if (bloomNow) runBloom(enc);
       const out = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
-      out.setPipeline(presentPipe); out.setBindGroup(0, presentGroup); out.draw(3); out.end();
+      out.setPipeline(presentPipe); out.setBindGroup(0, bloomNow ? bloomGroups!.show : presentGroup); out.draw(3); out.end();
+      glowClear = true;
       if (shotSet.has(frame) || stats.shotNext) {
         stats.shotNext = false;
         const sw = W, sh = H, row = ((sw * 4 + 255) >> 8) << 8;
         const rb = device.createBuffer({ size: row * sh, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-        enc.copyTextureToBuffer({ texture: colorTex }, { buffer: rb, bytesPerRow: row }, [sw, sh]);
+        enc.copyTextureToBuffer({ texture: bloomNow ? bloom!.finalTex : colorTex }, { buffer: rb, bytesPerRow: row }, [sw, sh]);
         void queue.onSubmittedWorkDone().then(async () => {
           await rb.mapAsync(GPUMapMode.READ);
           const src = new Uint8Array(rb.getMappedRange()), px = new Uint8Array(sw * sh * 4);

@@ -13,6 +13,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "decls.h"
+#include "pu_cars.h"
 
 uint32_t pu_guest_call(CPU *c, uint32_t fn, uint32_t ecx, const uint32_t *args, int n);
 extern int g_cam_capture;
@@ -276,6 +277,62 @@ static int glass_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
     if (glass_log_on()) fprintf(stderr, "[glass] upload %08x %dx%d fmt %d (built as %x): %u intact glass texels, %u drawn over (build match %.2f)\n", data, w, h, fmt, page->fmt, kept, broken, best);
     return (int)kept;
 }
+/* ---- WHEEL1: the rim's page (the builder's file 3, tpage4 128 x 128: the rim image whg/whf, 64 x 64 at (0, 0), on every car).
+ * Its upload becomes paint kind 4 (r_web.c): drawn by the renderer's fs_wheel, which smears the rim quarter round its centre by the
+ * wheels' turn in one frame (pu_wheel_spin). WHEELBLUR=0 off, WHEELLOG=1 the pages and the speed. ---- */
+#define WHEELS 32
+/* the rim quarter as the blit left it (the page's memory is used again before its upload): its texels in the build's format */
+static uint32_t g_wheel_bits[WHEELS], g_wheel_fmt[WHEELS], g_wheel_sig[WHEELS][64 * 64]; static int g_wheel_next;
+static int wheel_on(void){ static int on = -1; if (on < 0){ const char *e = getenv("WHEELBLUR"); on = !(e && *e == '0'); } return on; }
+static int wheel_log(void){ static int on = -1; if (on < 0){ const char *e = getenv("WHEELLOG"); on = e && *e && *e != '0'; } return on; }
+static void wheel_blit(uint32_t page, uint32_t image, uint32_t fmt, int x, int y){
+    const int stride = (int)MR32(page + 4);
+    const uint32_t bits = MR32(page + 0x28);
+    if (!bits || stride != 128 || (fmt != 0x613 && fmt != 0x115C && fmt != 0x20)) return;
+    int16_t w16, h16; memcpy(&w16, g_mem + image + 4, 2); memcpy(&h16, g_mem + image + 6, 2);
+    const int32_t pos = (int32_t)MR32(image + 0xC);
+    const int x0 = ((pos << 20) >> 20) + x, y0 = ((pos << 4) >> 20) + y;
+    if (w16 != 64 || h16 != 64 || x0 != 0 || y0 != 0) return;
+    int k = -1;
+    for (int i = 0; i < WHEELS; i++) if (g_wheel_bits[i] == bits + 0x10) k = i;      /* a later image over the same quarter */
+    if (k < 0){ k = g_wheel_next; g_wheel_next = (g_wheel_next + 1) % WHEELS; }
+    g_wheel_bits[k] = bits + 0x10; g_wheel_fmt[k] = fmt;
+    const int f16 = fmt16((int)fmt);
+    for (int j = 0; j < 64; j++) for (int i = 0; i < 64; i++) g_wheel_sig[k][j * 64 + i] = raw_at(g_mem + bits + 0x10, f16, (size_t)j * 128u + (size_t)i);
+    if (wheel_log()) fprintf(stderr, "[wheel] rim page %08x fmt %x\n", bits + 0x10, fmt);
+}
+/* an upload whose top-left quarter is a rim as built */
+static int wheel_map(uint32_t data, int w, int h, int fmt){
+    if (w != 128 || h != 128) return 0;
+    int best = 0;
+    for (int i = 0; i < WHEELS; i++){
+        if (!g_wheel_bits[i] || !fmt_fits((int)g_wheel_fmt[i], fmt)) continue;
+        const int f16 = fmt16((int)g_wheel_fmt[i]);
+        int same = 0;
+        for (int t = 0; t < 64 * 64; t += 7) same += raw_at(g_mem + data, f16, (size_t)(t / 64) * 128u + (size_t)(t % 64)) == g_wheel_sig[i][t];
+        const int seen = (64 * 64 + 6) / 7;
+        if (same > best) best = same;
+        if (same * 100 >= seen * 95){
+            if (wheel_log()) fprintf(stderr, "[wheel] upload %08x = rim page %08x (%d of %d)\n", data, g_wheel_bits[i], same, seen);
+            return 1;                   /* kept: the same car's page goes up again after a reload */
+        }
+    }
+    if (wheel_log()) fprintf(stderr, "[wheel] upload %08x 128x128 fmt %d: no rim (best %d)\n", data, fmt, best);
+    return 0;
+}
+/* the wheels' turn in one frame (radians, renderer uniform x1.x): the player's car speed (+35C, m/s) over a 0.33 m tyre, x 1/90 s */
+float pu_wheel_spin(void){
+    if (!wheel_on() || MR32(0x0065B928u)) return 0.0f;
+    const uint32_t n = MR32(CARS_N_RACERS), me = MR32(0x0065741Cu);
+    if (!n || me >= n || me >= CARS_MAX) return 0.0f;
+    const uint32_t car = MR32(CARS_L_RACER + 4u * me);
+    if (!car) return 0.0f;
+    float v; memcpy(&v, g_mem + car + 0x35C, 4);
+    if (!(v > 0.0f && v < 200.0f)) return 0.0f;
+    if (wheel_log()){ static int k; if (++k % 20000 == 0) fprintf(stderr, "[wheel] player speed %.1f\n", v); }
+    return v / 0.33f / 90.0f;
+}
+
 /* 00443F60, the page builder: thiscall(file, page, fmt) ret 0C */
 void sub_00443f60(CPU *restrict c){
     const int outer = g_file;
@@ -302,6 +359,7 @@ void sub_00444130(CPU *restrict c){
         c->eax = eax; c->ecx = ecx; c->edx = edx;
         return;
     }
+    if (g_file == 2 && wheel_on()){ wheel_blit(a[0], a[1], a[3], (int)a[5], (int)a[6]); return; }
     if (g_file != 0) return;            /* the exterior page only ([car_paint] files=1) */
     const uint32_t eax = c->eax, ecx = c->ecx, edx = c->edx;
     record(c, a[0], a[1], a[2], a[3], a[4], (int)a[5], (int)a[6]);
@@ -311,6 +369,7 @@ static int paint_map_page(uint32_t data, int w, int h, int fmt, uint8_t *rg);
 /* r_web.c r_tupdate: the map of an upload (w x h, two bytes a texel): 1 a paint page, 2 a glass page, 0 none */
 int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
     if (paint_map_page(data, w, h, fmt, rg)) return 1;
+    if (wheel_map(data, w, h, fmt)){ for (size_t t = 0; t < (size_t)w * h; t++){ rg[t * 2] = 0; rg[t * 2 + 1] = 128; } return 4; }
     return glass_on() && glass_map(data, w, h, fmt, rg) ? 2 : 0;
 }
 static int paint_map_page(uint32_t data, int w, int h, int fmt, uint8_t *rg){
@@ -483,4 +542,5 @@ void sub_00446530(CPU *restrict c){
 void sub_00443f60(CPU *restrict c){ sub_00443f60_orig(c); }
 void sub_00444130(CPU *restrict c){ sub_00444130_orig(c); }
 void sub_00446530(CPU *restrict c){ sub_00446530_orig(c); }
+float pu_wheel_spin(void){ return 0.0f; }
 #endif
