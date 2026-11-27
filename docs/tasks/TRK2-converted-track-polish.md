@@ -16,7 +16,7 @@ User list of 2026-11-26. Status per item.
 | 10 | Dolphin Cove lighthouse: rotating beam opaque | done (_mod 5d16d38): animated G8 textures 200/201 soft at alpha /10 (~0.1); backup _mod/backups/LH1-beam-20261127 |
 | 11 | Landstrasse (Germany) night version instead of day | done (_mod 6d57b69): converter stages trn.* + night sky tags (NIGHT_TRACKS); road line identical, so AI/walls/records stay; installed crp/fsh/env/map/Sky; backup _mod/backups/GN1-night-20261127. Night variants also exist for Coastal, France, Gt1-3, Hills, Park, Snowy, Uk |
 | 12 | Night Landstrasse: headlights do not light the track | done (_mod ee1b2ec + 597db45): Opaque materials 13 layers (mt+0x20) + Industrial's RM Opaque (Headlights vertex light) + prim InfoRow slots 14/15/16 (9/10/11 broke the geometry); race shots: road ahead +15-40 levels brighter |
-| 13 | Snowy Ridge clouds drawn as opaque white blobs | done (_mod SN1): ACLD (tex 25) native soft alpha /1.25 (~15 %); only snowy.fsh changed; race shot verified; backup _mod/backups/SN1-clouds-20261127. Same class: France `jcld` (tex 40) converted fully transparent (clouds invisible), not fixed yet |
+| 13 | Snowy Ridge clouds drawn as opaque white blobs | done (_mod SN1): ACLD (tex 25) native soft alpha /1.25 (~15 %); only snowy.fsh changed; race shot verified; backup _mod/backups/SN1-clouds-20261127. Same class: France `jcld` (tex 40) converted fully transparent -> fixed (_mod FR1, native alpha 0-79; two 40 m mist cards 34/57 m off the road at slices 366/398, not caught by the race camera; backup _mod/backups/FR1-clouds-20261127) |
 
 ## 8 — draw distance per track (waiting)
 
