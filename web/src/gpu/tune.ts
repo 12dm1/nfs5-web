@@ -19,23 +19,23 @@ export const TUNE_PARAMS: TuneParam[] = [
   { group: 'Headlights', key: 'hlrange', label: 'range m', min: 5, max: 120, step: 1, def: 18 },
   { group: 'Headlights', key: 'hlwidth', label: 'spread', min: 0.05, max: 1.2, step: 0.01, def: 0.79 },
   { group: 'Headlights', key: 'hlvert', label: 'vertical spread', min: 0.005, max: 0.2, step: 0.001, def: 0.139 },
-  { group: 'Headlights', key: 'hlcut', label: 'cutoff (down -)', min: -0.08, max: 0.04, step: 0.002, def: -0.002 },
-  { group: 'Headlights', key: 'hlkick', label: 'kerb step-up', min: 0, max: 0.6, step: 0.01, def: 0.19 },
+  { group: 'Headlights', key: 'hlcut', label: 'cutoff (down -)', min: -0.08, max: 0.04, step: 0.002, def: -0.006 },
+  { group: 'Headlights', key: 'hlkick', label: 'kerb step-up', min: 0, max: 0.6, step: 0.01, def: 0.1 },
   { group: 'Headlights', key: 'hlsym', label: 'symmetry (0 right side, 1 both)', min: 0, max: 1, step: 0.05, def: 0 },
   { group: 'Headlights', key: 'hlsoft', label: 'cutoff softness', min: 0.001, max: 0.05, step: 0.001, def: 0.009 },
-  { group: 'Headlights', key: 'hlhot', label: 'hot spot', min: 0, max: 4, step: 0.05, def: 0.85 },
-  { group: 'Headlights', key: 'hlwrap', label: 'grazing light', min: 0, max: 1, step: 0.01, def: 0.5 },
-  { group: 'Headlights', key: 'hlfringe', label: 'lens fringe', min: 0, max: 2, step: 0.05, def: 0.5 },
-  { group: 'Headlights', key: 'hlwarm', label: 'warm (-) / xenon (+)', min: -1, max: 1, step: 0.05, def: -0.9 },
+  { group: 'Headlights', key: 'hlhot', label: 'hot spot', min: 0, max: 4, step: 0.05, def: 1.4 },
+  { group: 'Headlights', key: 'hlwrap', label: 'grazing light', min: 0, max: 1, step: 0.01, def: 0.32 },
+  { group: 'Headlights', key: 'hlfringe', label: 'lens fringe', min: 0, max: 2, step: 0.05, def: 1.35 },
+  { group: 'Headlights', key: 'hlwarm', label: 'warm (-) / xenon (+)', min: -1, max: 1, step: 0.05, def: -1 },
   { group: 'Headlights', key: 'hlh', label: 'lamp height m', min: 0, max: 1.2, step: 0.01, def: 0.63 },
-  { group: 'Headlights', key: 'hlfwd', label: 'lamp ahead of axle m', min: -0.5, max: 2, step: 0.05, def: 0.8 },
+  { group: 'Headlights', key: 'hlfwd', label: 'lamp ahead of axle m', min: -0.5, max: 2, step: 0.05, def: 0.4 },
   { group: 'Headlights', key: 'hlsep', label: 'lamp spacing x', min: 0, max: 1.2, step: 0.02, def: 0.74 },
   // WHEEL1
-  { group: 'Wheels', key: 'wheel', label: 'rim blur', min: 0, max: 4, step: 0.05, def: 1.65 },
+  { group: 'Wheels', key: 'wheel', label: 'rim blur', min: 0, max: 4, step: 0.05, def: 2.45 },
   { group: 'Wheels', key: 'wheeldbg', label: 'debug: turn as red', min: 0, max: 1, step: 1, def: 0 },
 ];
 
-const STORE = 'nfs5.tune.v2';   // v2: the user's first tuning became the defaults
+const STORE = 'nfs5.tune.v3';   // v3: the user's second tuning became the defaults
 export const tune: Record<string, number> = {};
 for (const p of TUNE_PARAMS) tune[p.key] = p.def;
 

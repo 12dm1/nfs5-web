@@ -430,6 +430,19 @@ int pu_head_frame(float *o){
      * (action 15); the beams follow them */
     const uint8_t lamps = g_mem[car + 0xD87u];
     o[13] = (lamps & 1) ? 1.0f : 0.0f; o[14] = (lamps & 2) ? 1.0f : 0.0f; o[15] = (lamps & 4) ? 1.0f : 0.0f;
+    /* a broken lamp: the damage panels (car+4E4 + 4 i, 0..100; 00494500, chosen by 00494DF0 from the hit normal against the car's
+     * axes: a ring 0 front corner (+right), 1 front, 2 front corner (-right), 3 side, 4/5/6 the rear, 7 side, 8 the roof). A lamp
+     * dims from 40 and is out from 80 of its corner panel (the front panel counts 0.8). DMGPANEL=<i> (test): that panel at 100. */
+    { static int tp = -2; if (tp == -2){ const char *e = getenv("DMGPANEL"); tp = e ? atoi(e) : -1; }
+      if (tp >= 0 && tp < 9 && MR32(0x00606AC4u) > 200){ const float full = 100.0f; memcpy(g_mem + car + 0x4E4 + 4 * tp, &full, 4); } }
+    float pd[3]; memcpy(pd, g_mem + car + 0x4E4, 12);
+    for (int s2 = 0; s2 < 2; s2++){
+        float dmg = pd[s2 ? 2 : 0], fr = 0.8f * pd[1]; if (fr > dmg) dmg = fr;
+        if (!(dmg >= 0.0f && dmg <= 1000.0f)) dmg = 0.0f;
+        float t = (dmg - 40.0f) / 40.0f; t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t; t = t * t * (3.0f - 2.0f * t);
+        o[13 + s2] *= 1.0f - t;
+    }
+    if (lg){ static int kp; if (++kp % 600 == 0) fprintf(stderr, "[head] lamps %.2f %.2f high %.0f panels %.0f %.0f %.0f" "\n", o[13], o[14], o[15], pd[0], pd[1], pd[2]); }
     /* the game's own headlights (LayerVertexLight@Headlights: track vertices lit per frame) give way to the beams: their apply method
      * (vtable slot 0 of the three Headlights layer classes) becomes the base layer's empty one, 0044A0A0 (mov eax,[ecx+8]; ret 8) */
     { static int patched; if (!patched){ patched = 1;
