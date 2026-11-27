@@ -145,9 +145,9 @@ static int g_cap, g_cap_clear, g_cap_opaque, g_cap_sun, g_cube_faces;
 extern float g_paint_sun[3];
 /* the paint shader's camera (PC car_reflection.cpp BuildConstants, materials.cpp): basis rows, projection, the pixels' centre and half size,
  * the game's car light in camera space */
-float pu_wheel_spin(void);
+int pu_wheel_hubs(float *out, int max);
+#define CARS_MAX_HUBS 64
 static void paint_uniform(float *u){
-    u[44] = pu_wheel_spin();                    /* WHEEL1: fs_wheel's smear (x1.x) */
     const uint32_t eagl = MR32(0x0069E0D4u), engine = MR32(0x00628130u);
     const uint32_t view = engine ? MR32(engine + 0x10) : 0, cam = view ? MR32(view + 0x0C) : 0;
     if (!eagl || !cam) return;
@@ -169,6 +169,42 @@ static void paint_uniform(float *u){
     float sc[3] = { R[0] * sd[0] + R[1] * sd[1] + R[2] * sd[2], U[0] * sd[0] + U[1] * sd[1] + U[2] * sd[2], -(F[0] * sd[0] + F[1] * sd[1] + F[2] * sd[2]) };
     const float l = sqrtf(sc[0] * sc[0] + sc[1] * sc[1] + sc[2] * sc[2]);
     if (l > 1e-6f) for (int k = 0; k < 3; k++) u[36 + k] = sc[k] / l;
+}
+/* HEAD1: a track draw's headlight beams (renderer.ts headlight): the paint camera's projection (28..35, the pixel's ray), the player's
+ * front axle in camera space (16..18), the car's forward (20..22), right (24..26), up (36..38), the darkness (46), on (47). Again whenever
+ * the engine's camera changes (one frame draws the race view, the mirror, the minimap and the dials' 3D views); off for a camera over
+ * 60 m from the car (the minimap's, the dials'). The camera space is the one wheel_corners goes back from: world = cam + R x + U y + F depth. */
+int pu_head_frame(float *o);
+static void head_uniform(float *u){
+    static float c[UNI]; static long frame = -1; static uint8_t key[0x30]; static int ok;
+    const uint32_t engine = MR32(0x00628130u), view = engine ? MR32(engine + 0x10) : 0;
+    if (!view) return;
+    if (frame != g_frames || memcmp(key, g_mem + view + 0xE8, sizeof key)){
+        frame = g_frames; memcpy(key, g_mem + view + 0xE8, sizeof key); ok = 0;
+        float h[13];
+        if (pu_head_frame(h)){
+            memset(c, 0, sizeof c);
+            paint_uniform(c);
+            float R[3], U[3], F[3], cam[3];
+            memcpy(R, g_mem + view + 0xE8, 12); memcpy(U, g_mem + view + 0xF4, 12); memcpy(F, g_mem + view + 0x100, 12);
+            memcpy(cam, g_mem + view + 0x10C, 12);
+            const float d[3] = { h[0] - cam[0], h[1] - cam[1], h[2] - cam[2] };
+            #define CS(o, v) do { c[(o)] = R[0] * (v)[0] + R[1] * (v)[1] + R[2] * (v)[2]; c[(o) + 1] = U[0] * (v)[0] + U[1] * (v)[1] + U[2] * (v)[2]; \
+                                  c[(o) + 2] = -(F[0] * (v)[0] + F[1] * (v)[1] + F[2] * (v)[2]); } while (0)
+            CS(16, d); CS(20, h + 3); CS(24, h + 6); CS(36, h + 9);
+            #undef CS
+            c[19] = c[23] = c[27] = c[39] = 0.0f; c[40] = c[41] = c[42] = c[43] = c[44] = c[45] = 0.0f;
+            /* the night: the section's sky ambient (night Landstrasse out of town 0.16..0.3: dark 1; its lit start 0.48, day 0.50..0.53: 0) */
+            c[46] = h[12]; c[47] = 1.0f;
+            const float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            ok = dist < 60.0f && fabsf(c[28]) > 1e-6f && fabsf(c[34]) > 1e-6f;
+            { static int lg = -1; if (lg < 0){ const char *e = getenv("HEADLOG"); lg = e && *e == '1'; }
+              if (lg && ok){ static int k; if (++k % 200 == 0)
+                  fprintf(stderr, "[head] axle in cam %.2f %.2f %.2f  fwd %.2f %.2f %.2f  right %.2f %.2f %.2f  up %.2f %.2f %.2f  dark %.2f\n",
+                          c[16], c[17], c[18], c[20], c[21], c[22], c[24], c[25], c[26], c[36], c[37], c[38], h[12]); } }
+        }
+    }
+    if (ok) memcpy(u + 16, c + 16, (UNI - 16) * sizeof(float));
 }
 static const float *g_pu_frozen;   /* GLASS1: a deferred glass pass keeps the camera it was drawn with */
 static void emit_state(const DrawState *d){
@@ -216,6 +252,7 @@ static void emit_state(const DrawState *d){
         u[15] = g_cap_sun && d->blend == 1 ? 1.0f : 0.0f;
     }
     if (d->paint){ if (g_pu_frozen) memcpy(u + 16, g_pu_frozen + 16, (UNI - 16) * sizeof(float)); else paint_uniform(u); }
+    else if (g_race && !g_cap && d->blend == 0 && d->topo == 0) head_uniform(u);
     int sc[4] = { 0, 0, g_lw, g_lh };
     if (g_clipvalid) memcpy(sc, g_clip, sizeof sc);
     int ch = pipe != g_s_pipe || sam != g_s_sampler || (uint32_t)d->tex != g_s_tex || !g_s_uni_ok || memcmp(u, g_s_uni, sizeof u) ||
@@ -237,6 +274,33 @@ static void emit_state(const DrawState *d){
     }
 }
 
+/* WHEEL1: each corner of a rim draw back in the world (through the paint shader's camera: depth 1/w) takes the spin of the hub nearest
+ * to it (within 0.7 m) in rect = (spin, 0, 0, 8): fs_wheel reads it (one draw may hold several wheels) */
+static void wheel_corners(DV *v, int n){
+    static float hubs[CARS_MAX_HUBS * 4];
+    const int nh = pu_wheel_hubs(hubs, CARS_MAX_HUBS);
+    float u[UNI]; memset(u, 0, sizeof u);
+    paint_uniform(u);
+    const uint32_t engine = MR32(0x00628130u), view = engine ? MR32(engine + 0x10) : 0;
+    const int ok = nh > 0 && view && fabsf(u[28]) > 1e-6f && fabsf(u[29]) > 1e-6f && fabsf(u[34]) > 1e-6f && fabsf(u[35]) > 1e-6f;
+    float cam[3] = { 0, 0, 0 };
+    if (ok) memcpy(cam, g_mem + view + 0x10C, 12);
+    for (int i = 0; i < n; i++){
+        float spin = 0.0f;
+        if (ok && v[i].w > 1e-6f){
+            const float depth = 1.0f / v[i].w;
+            const float su = (v[i].x - u[32]) / u[34], sv = (v[i].y - u[33]) / u[35];
+            const float rx = (su - u[30]) / u[28] * depth, ry = -(sv - u[31]) / u[29] * depth;
+            float p[3]; for (int a = 0; a < 3; a++) p[a] = cam[a] + u[16 + a] * rx + u[20 + a] * ry + u[24 + a] * depth;
+            float best = 0.7f * 0.7f;
+            for (int h = 0; h < nh; h++){
+                const float dx = hubs[h * 4] - p[0], dy = hubs[h * 4 + 1] - p[1], dz = hubs[h * 4 + 2] - p[2], d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 < best){ best = d2; spin = hubs[h * 4 + 3]; }
+            }
+        }
+        v[i].rect[0] = spin; v[i].rect[1] = 0.0f; v[i].rect[2] = 0.0f; v[i].rect[3] = 8.0f;
+    }
+}
 static void submit(const DV *v, int n, const DrawState *d){
     if (n <= 0) return;
     if (g_nvtx + (uint32_t)n * VSIZE > VTX_BYTES){ seg_publish(0); }
@@ -244,6 +308,7 @@ static void submit(const DV *v, int n, const DrawState *d){
     if ((uint32_t)n * VSIZE > VTX_BYTES) return;
     if (!g_draw_open){ g_draw_first = g_nvtx / VSIZE; g_draw_open = 1; g_draw_count = 0; }
     memcpy(g_vtx + g_nvtx, v, (size_t)n * VSIZE);
+    if (d->paint == 4) wheel_corners((DV *)(g_vtx + g_nvtx), n);
     g_nvtx += (uint32_t)n * VSIZE; g_draw_count += (uint32_t)n;
 }
 

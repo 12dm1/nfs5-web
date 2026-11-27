@@ -38,7 +38,9 @@ srv.stdout.on('data', feed); srv.stderr.on('data', feed);
 await new Promise(r => setTimeout(r, 1000));
 const launch = {
   executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true,
-  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan,WebGPU', '--use-angle=d3d11', '--mute-audio', '--autoplay-policy=no-user-gesture-required'],
+  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan,WebGPU', '--use-angle=d3d11', '--mute-audio', '--autoplay-policy=no-user-gesture-required',
+    // NOVSYNC=1: frames not paced by the display (a sleeping or switched-off monitor stops requestAnimationFrame)
+    ...(process.env.NOVSYNC === '1' ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : [])],
   viewport: { width: +arg('width', 1280), height: +arg('height', 960) },
 };
 const prof = arg('profile', '');
@@ -80,6 +82,10 @@ try {
         await new Promise(r => setTimeout(r, +s * 1000)); onLine(`[race_look] key ${key}`);
         // SHOT: the next frame's raw RGBA to out/web/shot_<frame>.rgba (web/src/main.ts, renderer.ts shotNext)
         if (key === 'SHOT') await page.evaluate(() => { globalThis.stats.shotNext = true; }).catch(() => {});
+        // PAGESHOT: the whole page as the browser shows it (overlays included) to out/web/page_<ms>.png
+        else if (key === 'PAGESHOT') await page.screenshot({ path: `out/web/page_${Date.now()}.png` }).catch(e => onLine('[race_look] pageshot ' + e.message));
+        // <Key>~<ms>: held that long (throttle, hand brake)
+        else if (key.includes('~')) { const [kk, ms] = key.split('~'); await page.keyboard.down(kk).catch(() => {}); await new Promise(r => setTimeout(r, +ms)); await page.keyboard.up(kk).catch(() => {}); }
         else await page.keyboard.press(key, { delay: 150 }).catch(() => {});
       })();
     }

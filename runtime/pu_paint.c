@@ -320,17 +320,81 @@ static int wheel_map(uint32_t data, int w, int h, int fmt){
     if (wheel_log()) fprintf(stderr, "[wheel] upload %08x 128x128 fmt %d: no rim (best %d)\n", data, fmt, best);
     return 0;
 }
-/* the wheels' turn in one frame (radians, renderer uniform x1.x): the player's car speed (+35C, m/s) over a 0.33 m tyre, x 1/90 s */
-float pu_wheel_spin(void){
-    if (!wheel_on() || MR32(0x0065B928u)) return 0.0f;
-    const uint32_t n = MR32(CARS_N_RACERS), me = MR32(0x0065741Cu);
-    if (!n || me >= n || me >= CARS_MAX) return 0.0f;
-    const uint32_t car = MR32(CARS_L_RACER + 4u * me);
-    if (!car) return 0.0f;
-    float v; memcpy(&v, g_mem + car + 0x35C, 4);
-    if (!(v > 0.0f && v < 200.0f)) return 0.0f;
-    if (wheel_log()){ static int k; if (++k % 20000 == 0) fprintf(stderr, "[wheel] player speed %.1f\n", v); }
+/* The wheels' turn in one frame (radians, renderer uniform x1.x), per wheel of every car. The sim car (racer / car lists) holds four wheel
+ * blocks at +7EC, step C4 (0, 1 front left / right, 2, 3 rear): +0 the hub's world position, +64 the wheel's drive (+) / brake (-) torque,
+ * +70 its spin, always the ground speed x -15.5 (the physics never lets a wheel slip or lock). So what the eye expects is made here:
+ * - a driven wheel (torque > 0) turns at least as fast as the engine says: rpm (+DB4) x the gear's ratio ([+760] + 190 + 4 x gear +D82)
+ *   x k, k learned per car while the wheels grip (the largest ground / engine ratio seen, slowly forgotten): a launch spins the tyres;
+ * - the hand brake (rear torque < -1 while the front ones brake not) stops the rear wheels.
+ * Speed over a 0.33 m tyre, x 1/90 s. WHEELLOG=1 logs the match. */
+#define WHEEL_SPIN_K 15.5f
+static float g_wheel_k[CARS_MAX];
+static float wheel_spin_of(uint32_t car, int slot, int w){
+    float spin, tq, tqf, rpm, gr = 0.0f;
+    const uint32_t b = car + 0x7ECu + 0xC4u * (uint32_t)w;
+    memcpy(&spin, g_mem + b + 0x70, 4); memcpy(&tq, g_mem + b + 0x64, 4);
+    memcpy(&tqf, g_mem + car + 0x7ECu + 0x64, 4);
+    float v = fabsf(spin) / WHEEL_SPIN_K;
+    if (!(v < 200.0f)) v = 0.0f;
+    if (w >= 2 && tq < -1.0f && tqf > -0.3f) return 0.0f;        /* hand brake */
+    memcpy(&rpm, g_mem + car + 0xDB4, 4);
+    const uint32_t tr = MR32(car + 0x760u); const int g = g_mem[car + 0xD82u];
+    if (tr && g >= 2 && g < 10) memcpy(&gr, g_mem + tr + 0x190u + 4u * (uint32_t)g, 4);
+    if (gr > 0.0f && gr < 1.0f && rpm > 0.0f && rpm < 20000.0f){
+        float *k = &g_wheel_k[slot];
+        if (*k <= 0.0f) *k = 0.045f;
+        const float e = rpm * gr;
+        /* the coupled speed per (rpm x ratio): learnt slowly from the samples near it; a slipping wheel (r below) and a gear change
+         * (the clutch open, rpm falling: r above) stay out */
+        if (v > 6.0f && e > 1.0f){ const float r = v / e; if (r > *k * 0.8f && r < *k * 1.25f) *k = *k * 0.998f + r * 0.002f; }
+        if (*k < 0.03f || *k > 0.08f) *k = 0.045f;
+        /* wheel spin: the engine turns the driven wheels faster than the ground (10 % margin for the sim's own slip) */
+        if (tq > 0.05f){ const float ve = e * *k; if (ve > v * 1.1f) v = ve; }
+    }
     return v / 0.33f / 90.0f;
+}
+/* every car's four hubs (world) and their spins, for a rim draw (r_web.c gives each corner the spin of the hub nearest to it): count */
+int pu_wheel_hubs(float *out, int max){
+    if (!wheel_on() || MR32(0x0065B928u)) return 0;
+    int n = (int)MR32(CARS_N_CARS), k = 0; if (n > CARS_MAX) n = CARS_MAX;
+    for (int i = 0; i < n && k + 4 <= max; i++){
+        const uint32_t car = MR32(CARS_L_CARS + 4u * (uint32_t)i);
+        if (!car) continue;
+        for (int w = 0; w < 4; w++, k++){
+            memcpy(out + k * 4, g_mem + car + 0x7ECu + 0xC4u * (uint32_t)w, 12);
+            out[k * 4 + 3] = wheel_spin_of(car, i, w);
+        }
+        if (wheel_log() && i == 0){ static int kk; if (++kk % 3000 == 0) fprintf(stderr, "[wheel] car 0 spins %.3f %.3f %.3f %.3f k %.4f\n",
+                                                                          out[k * 4 - 13], out[k * 4 - 9], out[k * 4 - 5], out[k * 4 - 1], g_wheel_k[0]); }
+    }
+    return k;
+}
+
+/* HEAD1: the player's car for the renderer's headlight beams (r_web.c head_uniform): the front axle's middle (the hubs of wheel blocks
+ * 0 and 1), forward (+37C), up (+370), right = up x forward, all world; o[12] the night (1 / 0). 0 in the menus or with no car.
+ * HEADLIGHTS=0 off. */
+int pu_head_frame(float *o){
+    static int on = -1; if (on < 0){ const char *e = getenv("HEADLIGHTS"); on = !(e && *e == '0'); }
+    if (!on || MR32(0x0065B928u)) return 0;
+    const uint32_t n = MR32(CARS_N_RACERS), me = MR32(0x0065741Cu);
+    if (!n || me >= n || me >= CARS_MAX) return 0;
+    const uint32_t car = MR32(CARS_L_RACER + 4u * me);
+    if (!car) return 0;
+    float h0[3], h1[3], f[3], up[3];
+    memcpy(h0, g_mem + car + 0x7EC, 12); memcpy(h1, g_mem + car + 0x7EC + 0xC4, 12);
+    memcpy(up, g_mem + car + 0x370, 12); memcpy(f, g_mem + car + 0x37C, 12);
+    for (int k = 0; k < 3; k++){ o[k] = 0.5f * (h0[k] + h1[k]); o[3 + k] = f[k]; o[9 + k] = up[k]; }
+    /* the world is left-handed (the camera's R = U x F): right = up x forward (= the car's row +364) */
+    o[6] = up[1] * f[2] - up[2] * f[1]; o[7] = up[2] * f[0] - up[0] * f[2]; o[8] = up[0] * f[1] - up[1] * f[0];
+    /* the night: the game's own flag (00628A28, the time variant of the track spec: its headlights on; the night Landstrasse 1, day
+     * tracks 0). The sky's ambient tells no night from a shaded day track (night Landstrasse 0.09..0.68, day Normandie 0.18..0.43). */
+    const float dark = MR32(0x00628A28u) ? 1.0f : 0.0f;
+    static int lg = -1; if (lg < 0){ const char *e = getenv("HEADLOG"); lg = e && *e == '1'; }
+    if (lg){ static int k; if (++k % 600 == 0) fprintf(stderr, "[head] night %d axle %.1f %.1f %.1f right %.2f %.2f %.2f\n",
+                                                     (int)dark, o[0], o[1], o[2], o[6], o[7], o[8]); }
+    o[12] = dark;
+    for (int k = 0; k < 13; k++) if (!(o[k] == o[k]) || fabsf(o[k]) > 1e6f) return 0;
+    return 1;
 }
 
 /* 00443F60, the page builder: thiscall(file, page, fmt) ret 0C */
@@ -542,5 +606,6 @@ void sub_00446530(CPU *restrict c){
 void sub_00443f60(CPU *restrict c){ sub_00443f60_orig(c); }
 void sub_00444130(CPU *restrict c){ sub_00444130_orig(c); }
 void sub_00446530(CPU *restrict c){ sub_00446530_orig(c); }
-float pu_wheel_spin(void){ return 0.0f; }
+int pu_wheel_hubs(float *out, int max){ (void)out; (void)max; return 0; }
+int pu_head_frame(float *o){ (void)o; return 0; }
 #endif
