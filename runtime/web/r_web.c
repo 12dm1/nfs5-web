@@ -280,7 +280,7 @@ static void emit_state(const DrawState *d){
 /* WHEEL1: a rim corner's turn. The corner back in the world (the paint camera), then in each car's drawn frame: the car whose box
  * holds it; the wheel by its side (left / right) and by the axle it is nearer (front / rear). Within 0.55 m of the middle it is the
  * car's inside (the steering wheel shares the rim image): no turn. */
-static long g_wheel_kinds[3];   /* WHEELLOG */
+static long g_wheel_kinds[3], g_wheel_percar[16];   /* WHEELLOG */
 static void wheel_corners(DV *v, int n){
     static float cars[CARS_MAX * 16], spins[CARS_MAX * 4];
     const int nc = pu_wheel_cars(cars, spins, CARS_MAX);
@@ -307,7 +307,7 @@ static void wheel_corners(DV *v, int n){
                 if (r >= best) continue;
                 best = r;
                 if (fabsf(lx) < 0.55f){ spin = 0.0f; kind = 1; continue; }
-                kind = 2;
+                kind = 2; if (c < 16) g_wheel_percar[c]++;
                 const int w = (lz > 0.5f * (k[12] + k[13]) ? 0 : 2) + (lx < 0.0f ? 0 : 1);
                 spin = spins[4 * c + w];
             }
@@ -318,7 +318,9 @@ static void wheel_corners(DV *v, int n){
     { static int lg = -1; if (lg < 0){ const char *e = getenv("WHEELLOG"); lg = e && *e == '1'; }
       static long last; if (lg && g_frames - last >= 300){ last = g_frames;
           fprintf(stderr, "[wheel] rim corners within 15 m: no car %ld, a car's inside %ld, a wheel %ld\n", g_wheel_kinds[0], g_wheel_kinds[1], g_wheel_kinds[2]);
-          memset(g_wheel_kinds, 0, sizeof g_wheel_kinds); } }
+          fprintf(stderr, "[wheel] per car (cars list order): %ld %ld %ld %ld %ld %ld %ld %ld\n", g_wheel_percar[0], g_wheel_percar[1], g_wheel_percar[2],
+                  g_wheel_percar[3], g_wheel_percar[4], g_wheel_percar[5], g_wheel_percar[6], g_wheel_percar[7]);
+          memset(g_wheel_kinds, 0, sizeof g_wheel_kinds); memset(g_wheel_percar, 0, sizeof g_wheel_percar); } }
 }
 static void submit(const DV *v, int n, const DrawState *d){
     if (n <= 0) return;

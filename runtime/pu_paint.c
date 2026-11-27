@@ -280,7 +280,7 @@ static int glass_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
 /* ---- WHEEL1: the rim's page (the builder's file 3, tpage4 128 x 128: the rim image whg/whf, 64 x 64 at (0, 0), on every car).
  * Its upload becomes paint kind 4 (r_web.c): drawn by the renderer's fs_wheel, which smears the rim quarter round its centre by the
  * wheels' turn in one frame (pu_wheel_spin). WHEELBLUR=0 off, WHEELLOG=1 the pages and the speed. ---- */
-#define WHEELS 32
+#define WHEELS 64
 /* the rim quarter as the blit left it (the page's memory is used again before its upload): its texels in the build's format */
 static uint32_t g_wheel_bits[WHEELS], g_wheel_fmt[WHEELS], g_wheel_sig[WHEELS][64 * 64]; static int g_wheel_next;
 static int wheel_on(void){ static int on = -1; if (on < 0){ const char *e = getenv("WHEELBLUR"); on = !(e && *e == '0'); } return on; }
@@ -293,12 +293,15 @@ static void wheel_blit(uint32_t page, uint32_t image, uint32_t fmt, int x, int y
     const int32_t pos = (int32_t)MR32(image + 0xC);
     const int x0 = ((pos << 20) >> 20) + x, y0 = ((pos << 4) >> 20) + y;
     if (w16 != 64 || h16 != 64 || x0 != 0 || y0 != 0) return;
-    int k = -1;
-    for (int i = 0; i < WHEELS; i++) if (g_wheel_bits[i] == bits + 0x10) k = i;      /* a later image over the same quarter */
-    if (k < 0){ k = g_wheel_next; g_wheel_next = (g_wheel_next + 1) % WHEELS; }
-    g_wheel_bits[k] = bits + 0x10; g_wheel_fmt[k] = fmt;
+    /* kept by content: the page's memory goes to the next car's build too (another rim over the same bits), and a car's texture can
+     * go up again later (a reload): every rim seen stays matchable, one slot per different image */
     const int f16 = fmt16((int)fmt);
-    for (int j = 0; j < 64; j++) for (int i = 0; i < 64; i++) g_wheel_sig[k][j * 64 + i] = raw_at(g_mem + bits + 0x10, f16, (size_t)j * 128u + (size_t)i);
+    static uint32_t sig[64 * 64];
+    for (int j = 0; j < 64; j++) for (int i = 0; i < 64; i++) sig[j * 64 + i] = raw_at(g_mem + bits + 0x10, f16, (size_t)j * 128u + (size_t)i);
+    for (int i = 0; i < WHEELS; i++) if (g_wheel_bits[i] && g_wheel_fmt[i] == fmt && !memcmp(g_wheel_sig[i], sig, sizeof sig)) return;
+    const int k = g_wheel_next; g_wheel_next = (g_wheel_next + 1) % WHEELS;
+    g_wheel_bits[k] = bits + 0x10; g_wheel_fmt[k] = fmt;
+    memcpy(g_wheel_sig[k], sig, sizeof sig);
     if (wheel_log()) fprintf(stderr, "[wheel] rim page %08x fmt %x\n", bits + 0x10, fmt);
 }
 /* an upload whose top-left quarter is a rim as built */
@@ -430,17 +433,16 @@ int pu_head_frame(float *o){
      * (action 15); the beams follow them */
     const uint8_t lamps = g_mem[car + 0xD87u];
     o[13] = (lamps & 1) ? 1.0f : 0.0f; o[14] = (lamps & 2) ? 1.0f : 0.0f; o[15] = (lamps & 4) ? 1.0f : 0.0f;
-    /* a broken lamp: the damage panels (car+4E4 + 4 i, 0..100; 00494500, chosen by 00494DF0 from the hit normal against the car's
-     * axes: a ring 0 front corner (+right), 1 front, 2 front corner (-right), 3 side, 4/5/6 the rear, 7 side, 8 the roof). A lamp
-     * dims from 40 and is out from 80 of its corner panel (the front panel counts 0.8). DMGPANEL=<i> (test): that panel at 100. */
+    /* a broken lamp, as the game breaks the car's parts: the damage panels (car+4E4 + 4 i, 0..100; 00494500, chosen by 00494DF0 from
+     * the hit normal against the car's axes: a ring 0 front-left corner, 1 front, 2 front-right corner, 3 side, 4/5/6 the rear, 7 side,
+     * 8 the roof); 0043E390 marks a part broken (part+50: its glow goes) once a panel it lies on is over 0.5 x 1/0.02 = 25. A lamp's
+     * beam goes with it: its corner or the front over 25. DMGPANEL=<i> (test): that panel at 100. */
     { static int tp = -2; if (tp == -2){ const char *e = getenv("DMGPANEL"); tp = e ? atoi(e) : -1; }
       if (tp >= 0 && tp < 9 && MR32(0x00606AC4u) > 200){ const float full = 100.0f; memcpy(g_mem + car + 0x4E4 + 4 * tp, &full, 4); } }
     float pd[3]; memcpy(pd, g_mem + car + 0x4E4, 12);
     for (int s2 = 0; s2 < 2; s2++){
-        float dmg = pd[s2 ? 2 : 0], fr = 0.8f * pd[1]; if (fr > dmg) dmg = fr;
-        if (!(dmg >= 0.0f && dmg <= 1000.0f)) dmg = 0.0f;
-        float t = (dmg - 40.0f) / 40.0f; t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t; t = t * t * (3.0f - 2.0f * t);
-        o[13 + s2] *= 1.0f - t;
+        const float dmg = pd[s2 ? 2 : 0] > pd[1] ? pd[s2 ? 2 : 0] : pd[1];
+        if (dmg * 0.02f > 0.5f) o[13 + s2] = 0.0f;
     }
     if (lg){ static int kp; if (++kp % 600 == 0) fprintf(stderr, "[head] lamps %.2f %.2f high %.0f panels %.0f %.0f %.0f" "\n", o[13], o[14], o[15], pd[0], pd[1], pd[2]); }
     /* the game's own headlights (LayerVertexLight@Headlights: track vertices lit per frame) give way to the beams: their apply method
