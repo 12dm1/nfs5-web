@@ -115,8 +115,9 @@ fn headlight(i: VO) -> vec3f {
   if (dot(N, P) > 0.0) { N = -N; }
   let base = u.camR.xyz + u.sun.xyz * tn.h3.x + u.camU.xyz * tn.h3.y;
   let side = u.camF.xyz * (0.7 * tn.h3.z);
-  // each lamp as the car has it (car+D87: on, broken or switched off = 0; high beams); forced beams by day light both
-  let f = select(0.0, 1.0, tn.h2.w > 0.0);
+  // each lamp as the car has it (the game's lamp byte: on, broken or switched off = 0; high beams); forced beams light both by day
+  // only: at night the lamp bytes decide (a broken lamp stays dark)
+  let f = select(0.0, 1.0, tn.h2.w > 0.0 && u.x1.z <= 0.0);
   let hi = u.x0.z;
   let e = beam(P, N, base - side, hi) * max(u.x0.x, f) + beam(P, N, base + side, hi) * max(u.x0.y, f);
   let warm = tn.h2.z;

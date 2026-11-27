@@ -7,23 +7,23 @@ export interface TuneParam { key: string; label: string; min: number; max: numbe
 export const TUNE_PARAMS: TuneParam[] = [
   // LAMP1 bloom + lens streak
   { group: 'Bloom', key: 'bloom', label: 'overall', min: 0, max: 4, step: 0.05, def: 0.45 },
-  { group: 'Bloom', key: 'gain', label: 'halo', min: 0, max: 6, step: 0.05, def: 0 },
-  { group: 'Bloom', key: 'wide', label: 'wide halo', min: 0, max: 3, step: 0.05, def: 0.4 },
-  { group: 'Bloom', key: 'streak', label: 'streak', min: 0, max: 3, step: 0.05, def: 1.95 },
+  { group: 'Bloom', key: 'gain', label: 'halo', min: 0, max: 6, step: 0.05, def: 0.1 },
+  { group: 'Bloom', key: 'wide', label: 'wide halo', min: 0, max: 3, step: 0.05, def: 0.65 },
+  { group: 'Bloom', key: 'streak', label: 'streak', min: 0, max: 3, step: 0.05, def: 1.9 },
   { group: 'Bloom', key: 'sthr', label: 'streak threshold', min: 0, max: 0.6, step: 0.01, def: 0.12 },
   { group: 'Bloom', key: 'slen', label: 'streak length', min: 0.5, max: 8, step: 0.1, def: 1.4 },
   { group: 'Bloom', key: 'sun', label: 'sun + flares', min: 0, max: 2, step: 0.05, def: 0.3 },
   // HEAD1 projected headlights
-  { group: 'Headlights', key: 'hl', label: 'intensity', min: 0, max: 6, step: 0.05, def: 2.5 },
-  { group: 'Headlights', key: 'hlforce', label: 'force (day too)', min: 0, max: 1, step: 0.05, def: 0 },
-  { group: 'Headlights', key: 'hlrange', label: 'range m', min: 5, max: 120, step: 1, def: 18 },
+  { group: 'Headlights', key: 'hl', label: 'intensity', min: 0, max: 6, step: 0.05, def: 2.45 },
+  { group: 'Headlights', key: 'hlforce', label: 'force (day too)', min: 0, max: 1, step: 0.05, def: 0.1 },
+  { group: 'Headlights', key: 'hlrange', label: 'range m', min: 5, max: 120, step: 1, def: 32 },
   { group: 'Headlights', key: 'hlwidth', label: 'spread', min: 0.05, max: 1.2, step: 0.01, def: 0.79 },
-  { group: 'Headlights', key: 'hlvert', label: 'vertical spread', min: 0.005, max: 0.2, step: 0.001, def: 0.139 },
+  { group: 'Headlights', key: 'hlvert', label: 'vertical spread', min: 0.005, max: 0.2, step: 0.001, def: 0.136 },
   { group: 'Headlights', key: 'hlcut', label: 'cutoff (down -)', min: -0.08, max: 0.04, step: 0.002, def: -0.006 },
-  { group: 'Headlights', key: 'hlkick', label: 'kerb step-up', min: 0, max: 0.6, step: 0.01, def: 0.1 },
-  { group: 'Headlights', key: 'hlsym', label: 'symmetry (0 right side, 1 both)', min: 0, max: 1, step: 0.05, def: 0 },
-  { group: 'Headlights', key: 'hlsoft', label: 'cutoff softness', min: 0.001, max: 0.05, step: 0.001, def: 0.009 },
-  { group: 'Headlights', key: 'hlhot', label: 'hot spot', min: 0, max: 4, step: 0.05, def: 1.4 },
+  { group: 'Headlights', key: 'hlkick', label: 'kerb step-up', min: 0, max: 0.6, step: 0.01, def: 0.07 },
+  { group: 'Headlights', key: 'hlsym', label: 'symmetry (0 right side, 1 both)', min: 0, max: 1, step: 0.05, def: 0.8 },
+  { group: 'Headlights', key: 'hlsoft', label: 'cutoff softness', min: 0.001, max: 0.05, step: 0.001, def: 0.022 },
+  { group: 'Headlights', key: 'hlhot', label: 'hot spot', min: 0, max: 4, step: 0.05, def: 0.4 },
   { group: 'Headlights', key: 'hlwrap', label: 'grazing light', min: 0, max: 1, step: 0.01, def: 0.32 },
   { group: 'Headlights', key: 'hlfringe', label: 'lens fringe', min: 0, max: 2, step: 0.05, def: 1.35 },
   { group: 'Headlights', key: 'hlwarm', label: 'warm (-) / xenon (+)', min: -1, max: 1, step: 0.05, def: -1 },
@@ -31,11 +31,11 @@ export const TUNE_PARAMS: TuneParam[] = [
   { group: 'Headlights', key: 'hlfwd', label: 'lamp ahead of axle m', min: -0.5, max: 2, step: 0.05, def: 0.4 },
   { group: 'Headlights', key: 'hlsep', label: 'lamp spacing x', min: 0, max: 1.2, step: 0.02, def: 0.74 },
   // WHEEL1
-  { group: 'Wheels', key: 'wheel', label: 'rim blur', min: 0, max: 4, step: 0.05, def: 2.45 },
+  { group: 'Wheels', key: 'wheel', label: 'rim blur', min: 0, max: 4, step: 0.05, def: 1.75 },
   { group: 'Wheels', key: 'wheeldbg', label: 'debug: turn as red', min: 0, max: 1, step: 1, def: 0 },
 ];
 
-const STORE = 'nfs5.tune.v3';   // v3: the user's second tuning became the defaults
+const STORE = 'nfs5.tune.v4';   // v4: the user's third tuning became the defaults
 export const tune: Record<string, number> = {};
 for (const p of TUNE_PARAMS) tune[p.key] = p.def;
 
