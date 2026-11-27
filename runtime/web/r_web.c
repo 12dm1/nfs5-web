@@ -8,6 +8,7 @@
  * reaches the GPU before its draws, so updating a texture this segment already drew with closes the segment first.
  * The protocol is web/src/gpu/proto.ts. */
 #include "../cpu.h"
+#include "../pu_cars.h"
 #include "host_abi.h"
 #include "../../renderer/dx11z/thrash_api.h"
 #include <stdint.h>
@@ -145,8 +146,7 @@ static int g_cap, g_cap_clear, g_cap_opaque, g_cap_sun, g_cube_faces;
 extern float g_paint_sun[3];
 /* the paint shader's camera (PC car_reflection.cpp BuildConstants, materials.cpp): basis rows, projection, the pixels' centre and half size,
  * the game's car light in camera space */
-int pu_wheel_hubs(float *out, int max);
-#define CARS_MAX_HUBS 64
+int pu_wheel_cars(float *out, float *spins, int max);
 static void paint_uniform(float *u){
     const uint32_t eagl = MR32(0x0069E0D4u), engine = MR32(0x00628130u);
     const uint32_t view = engine ? MR32(engine + 0x10) : 0, cam = view ? MR32(view + 0x0C) : 0;
@@ -181,7 +181,7 @@ static void head_uniform(float *u){
     if (!view) return;
     if (frame != g_frames || memcmp(key, g_mem + view + 0xE8, sizeof key)){
         frame = g_frames; memcpy(key, g_mem + view + 0xE8, sizeof key); ok = 0;
-        float h[13];
+        float h[16];
         if (pu_head_frame(h)){
             memset(c, 0, sizeof c);
             paint_uniform(c);
@@ -193,8 +193,9 @@ static void head_uniform(float *u){
                                   c[(o) + 2] = -(F[0] * (v)[0] + F[1] * (v)[1] + F[2] * (v)[2]); } while (0)
             CS(16, d); CS(20, h + 3); CS(24, h + 6); CS(36, h + 9);
             #undef CS
-            c[19] = c[23] = c[27] = c[39] = 0.0f; c[40] = c[41] = c[42] = c[43] = c[44] = c[45] = 0.0f;
+            c[19] = c[23] = c[27] = c[39] = 0.0f; c[43] = c[44] = c[45] = 0.0f;
             /* the night: the section's sky ambient (night Landstrasse out of town 0.16..0.3: dark 1; its lit start 0.48, day 0.50..0.53: 0) */
+            c[40] = h[13]; c[41] = h[14]; c[42] = h[15];   /* the left / right lamp on, high beams (car+D87) */
             c[46] = h[12]; c[47] = 1.0f;
             const float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
             ok = dist < 60.0f && fabsf(c[28]) > 1e-6f && fabsf(c[34]) > 1e-6f;
@@ -276,13 +277,17 @@ static void emit_state(const DrawState *d){
 
 /* WHEEL1: each corner of a rim draw back in the world (through the paint shader's camera: depth 1/w) takes the spin of the hub nearest
  * to it (within 0.7 m) in rect = (spin, 0, 0, 8): fs_wheel reads it (one draw may hold several wheels) */
+/* WHEEL1: a rim corner's turn. The corner back in the world (the paint camera), then in each car's drawn frame: the car whose box
+ * holds it; the wheel by its side (left / right) and by the axle it is nearer (front / rear). Within 0.55 m of the middle it is the
+ * car's inside (the steering wheel shares the rim image): no turn. */
+static long g_wheel_kinds[3];   /* WHEELLOG */
 static void wheel_corners(DV *v, int n){
-    static float hubs[CARS_MAX_HUBS * 4];
-    const int nh = pu_wheel_hubs(hubs, CARS_MAX_HUBS);
+    static float cars[CARS_MAX * 16], spins[CARS_MAX * 4];
+    const int nc = pu_wheel_cars(cars, spins, CARS_MAX);
     float u[UNI]; memset(u, 0, sizeof u);
     paint_uniform(u);
     const uint32_t engine = MR32(0x00628130u), view = engine ? MR32(engine + 0x10) : 0;
-    const int ok = nh > 0 && view && fabsf(u[28]) > 1e-6f && fabsf(u[29]) > 1e-6f && fabsf(u[34]) > 1e-6f && fabsf(u[35]) > 1e-6f;
+    const int ok = nc > 0 && view && fabsf(u[28]) > 1e-6f && fabsf(u[29]) > 1e-6f && fabsf(u[34]) > 1e-6f && fabsf(u[35]) > 1e-6f;
     float cam[3] = { 0, 0, 0 };
     if (ok) memcpy(cam, g_mem + view + 0x10C, 12);
     for (int i = 0; i < n; i++){
@@ -292,14 +297,28 @@ static void wheel_corners(DV *v, int n){
             const float su = (v[i].x - u[32]) / u[34], sv = (v[i].y - u[33]) / u[35];
             const float rx = (su - u[30]) / u[28] * depth, ry = -(sv - u[31]) / u[29] * depth;
             float p[3]; for (int a = 0; a < 3; a++) p[a] = cam[a] + u[16 + a] * rx + u[20 + a] * ry + u[24 + a] * depth;
-            float best = 0.7f * 0.7f;
-            for (int h = 0; h < nh; h++){
-                const float dx = hubs[h * 4] - p[0], dy = hubs[h * 4 + 1] - p[1], dz = hubs[h * 4 + 2] - p[2], d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 < best){ best = d2; spin = hubs[h * 4 + 3]; }
+            float best = 1e9f; int kind = 0;
+            for (int c = 0; c < nc; c++){
+                const float *k = cars + 16 * c;
+                const float d[3] = { p[0] - k[0], p[1] - k[1], p[2] - k[2] };
+                const float lx = d[0] * k[3] + d[1] * k[4] + d[2] * k[5], ly = d[0] * k[6] + d[1] * k[7] + d[2] * k[8], lz = d[0] * k[9] + d[1] * k[10] + d[2] * k[11];
+                if (fabsf(lx) > 1.4f || ly < -1.4f || ly > 0.6f || lz < k[13] - 0.8f || lz > k[12] + 0.8f) continue;
+                const float r = lx * lx + ly * ly + lz * lz;
+                if (r >= best) continue;
+                best = r;
+                if (fabsf(lx) < 0.55f){ spin = 0.0f; kind = 1; continue; }
+                kind = 2;
+                const int w = (lz > 0.5f * (k[12] + k[13]) ? 0 : 2) + (lx < 0.0f ? 0 : 1);
+                spin = spins[4 * c + w];
             }
+            if (depth < 15.0f) g_wheel_kinds[kind]++;
         }
         v[i].rect[0] = spin; v[i].rect[1] = 0.0f; v[i].rect[2] = 0.0f; v[i].rect[3] = 8.0f;
     }
+    { static int lg = -1; if (lg < 0){ const char *e = getenv("WHEELLOG"); lg = e && *e == '1'; }
+      static long last; if (lg && g_frames - last >= 300){ last = g_frames;
+          fprintf(stderr, "[wheel] rim corners within 15 m: no car %ld, a car's inside %ld, a wheel %ld\n", g_wheel_kinds[0], g_wheel_kinds[1], g_wheel_kinds[2]);
+          memset(g_wheel_kinds, 0, sizeof g_wheel_kinds); } }
 }
 static void submit(const DV *v, int n, const DrawState *d){
     if (n <= 0) return;

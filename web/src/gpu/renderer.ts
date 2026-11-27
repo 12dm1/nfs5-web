@@ -14,7 +14,7 @@ struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDen
   camR: vec4f, camU: vec4f, camF: vec4f, proj: vec4f, vp: vec4f, sun: vec4f, x0: vec4f, x1: vec4f };
 @group(0) @binding(0) var<uniform> u: U;
 // live tuning (gpu/tune.ts): h0 intensity, force, range, spread; h1 cutoff, step-up, softness, hot spot; h2 wrap, fringe, warm, -;
-// h3 lamp height, ahead, spacing, vertical spread; w0 rim blur, sun glow, -, -
+// h3 lamp height, ahead, spacing, vertical spread; w0 rim blur, sun glow, symmetry, rim debug
 struct T { h0: vec4f, h1: vec4f, h2: vec4f, h3: vec4f, w0: vec4f };
 @group(0) @binding(1) var<uniform> tn: T;
 @group(1) @binding(0) var tx: texture_2d<f32>;
@@ -77,13 +77,16 @@ fn shade(i: VO) -> vec4f {
 // middle in camera space camR.xyz, the car's forward camU, right camF, up sun; x1.z the night's darkness, x1.w on). The pixel back in
 // camera space (ray x depth 1/q), its normal from the screen derivatives. A beam: wide falloff + a hot spot under a sharp cutoff that
 // steps up to the kerb side (a European low beam), a blue lens fringe on the cutoff line, 1/(1 + (d/range)^2), wrapped N.L.
-fn beam(P: vec3f, N: vec3f, L0: vec3f) -> vec2f {
+fn beam(P: vec3f, N: vec3f, L0: vec3f, hi: f32) -> vec2f {
   let d = P - L0;
   let f = dot(d, u.camU.xyz);
   if (f < 0.3) { return vec2f(0.0); }
   let h = dot(d, u.camF.xyz) / f;
   let v = dot(d, u.sun.xyz) / f;
-  let cut = tn.h1.x + clamp(h, 0.0, 0.35) * tn.h1.y;
+  // the kerb-side step-up: European asymmetric (right side only) .. mirrored to both sides (tn.w0.z symmetry); high beams lift the
+  // cutoff above the horizon
+  let kick = mix(clamp(h, 0.0, 0.35), clamp(abs(h), 0.0, 0.35), tn.w0.z) * tn.h1.y;
+  let cut = tn.h1.x + kick + hi * 0.05;
   let mask = smoothstep(cut + tn.h1.z, cut - tn.h1.z, v);
   let w = max(tn.h0.w, 0.01);
   // the vertical profile: a low beam's light sits just under the cutoff (the far road); the road under the bumper (far below
@@ -97,7 +100,8 @@ fn beam(P: vec3f, N: vec3f, L0: vec3f) -> vec2f {
   let z = (v - cut) / max(tn.h1.z, 0.002);
   let fringe = exp(-z * z) * spread * tn.h2.y * 0.35;
   let d2 = dot(d, d);
-  let att = 1.0 / (1.0 + d2 / max(tn.h0.z * tn.h0.z, 1.0));
+  let rng = tn.h0.z * (1.0 + hi);
+  let att = 1.0 / (1.0 + d2 / max(rng * rng, 1.0));
   let L = -d * inverseSqrt(max(d2, 1e-4));
   let ndl = clamp((dot(N, L) + tn.h2.x) / (1.0 + tn.h2.x), 0.0, 1.0);
   return vec2f((spread + hot) * mask * att * ndl, fringe * att * ndl);
@@ -111,7 +115,10 @@ fn headlight(i: VO) -> vec3f {
   if (dot(N, P) > 0.0) { N = -N; }
   let base = u.camR.xyz + u.sun.xyz * tn.h3.x + u.camU.xyz * tn.h3.y;
   let side = u.camF.xyz * (0.7 * tn.h3.z);
-  let e = beam(P, N, base - side) + beam(P, N, base + side);
+  // each lamp as the car has it (car+D87: on, broken or switched off = 0; high beams); forced beams by day light both
+  let f = select(0.0, 1.0, tn.h2.w > 0.0);
+  let hi = u.x0.z;
+  let e = beam(P, N, base - side, hi) * max(u.x0.x, f) + beam(P, N, base + side, hi) * max(u.x0.y, f);
   let warm = tn.h2.z;
   let col = select(mix(vec3f(1.0, 0.97, 0.9), vec3f(1.0, 0.82, 0.55), -warm), mix(vec3f(1.0, 0.97, 0.9), vec3f(0.82, 0.9, 1.0), warm), warm >= 0.0);
   // x1.z: the game's night flag (00628A28, its headlights on), tn.h2.w forces the beams by day
@@ -141,6 +148,8 @@ fn headlight(i: VO) -> vec3f {
     t = textureSampleGrad(tx, sm, uv, gx, gy);
   }
   var r = t * i.color;
+  // ?t_wheeldbg=1: the corner's turn as red (none: green), to see which rims the runtime matched
+  if (tn.w0.w > 0.0 && i.rect.w == 8.0) { r = vec4f(mix(vec3f(0.0, 0.6, 0.0), vec3f(1.0, 0.0, 0.0), clamp(i.rect.x * 2.0, 0.0, 1.0)), r.a); }
   if (u.alphaRef > 0.0 && r.a < u.alphaRef) { discard; }
   if (u.hard > 0.5) { r.a = 1.0; }
   return vec4f(fog(r.rgb, i.uvq.z), r.a);
@@ -570,7 +579,7 @@ struct MRT { @location(0) c: vec4f, @location(1) g: vec4f };
   const writeTune = () => {
     const t = tune;
     tuneF.set([t.hl, 0, t.hlrange, t.hlwidth, t.hlcut, t.hlkick, t.hlsoft, t.hlhot, t.hlwrap, t.hlfringe, t.hlwarm, t.hlforce,
-      t.hlh, t.hlfwd, t.hlsep, t.hlvert, t.wheel, t.sun, 0, 0], 0);
+      t.hlh, t.hlfwd, t.hlsep, t.hlvert, t.wheel, t.sun, t.hlsym, t.wheeldbg], 0);
     queue.writeBuffer(tuneBuf, 0, tuneF);
   };
   writeTune();

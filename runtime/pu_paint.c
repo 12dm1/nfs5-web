@@ -353,25 +353,57 @@ static float wheel_spin_of(uint32_t car, int slot, int w){
     }
     return v / 0.33f / 90.0f;
 }
-/* every car's four hubs (world) and their spins, for a rim draw (r_web.c gives each corner the spin of the hub nearest to it): count */
-int pu_wheel_hubs(float *out, int max){
+/* the render interpolation (pu_interp.c) draws a car's body between two simulation steps; the wheels and the beams go with the body
+ * as drawn (0.5 m off at 100 km/h otherwise: rims found no wheel, the beams jumped at the step rate) */
+int pu_interp_sim_xf(uint32_t position, float *pos, float *rot);
+/* a car's front and rear axle middles in its own frame (x right, y up, z forward). The hubs (+7EC) trail the body by a step or two
+ * (0.5 m at 70 km/h: the beams jumped at the step rate), so they are taken while the car stands (every car stands at the start) and
+ * kept: geometry. Until then, from the hubs as they are. */
+#define AXLE_SLOTS 64
+static struct { uint32_t car; float l[2][3]; int still; } g_axle[AXLE_SLOTS];
+static void axle_local(uint32_t car, float *front, float *rear){
+    float sp[3], sr[9], vel[3];
+    if (!pu_interp_sim_xf(car + 0x330u, sp, sr)){ memcpy(sp, g_mem + car + 0x330, 12); memcpy(sr, g_mem + car + 0x364, 36); }
+    memcpy(vel, g_mem + car + 0x33C, 12);
+    float l[2][3];
+    for (int a = 0; a < 2; a++){
+        const float *h0 = (const float *)(g_mem + car + 0x7ECu + 0xC4u * (uint32_t)(2 * a)), *h1 = (const float *)(g_mem + car + 0x7ECu + 0xC4u * (uint32_t)(2 * a + 1));
+        const float d[3] = { 0.5f * (h0[0] + h1[0]) - sp[0], 0.5f * (h0[1] + h1[1]) - sp[1], 0.5f * (h0[2] + h1[2]) - sp[2] };
+        for (int r = 0; r < 3; r++) l[a][r] = d[0] * sr[3 * r] + d[1] * sr[3 * r + 1] + d[2] * sr[3 * r + 2];
+    }
+    int slot = (int)((car >> 4) % AXLE_SLOTS);
+    for (int t = 0; t < AXLE_SLOTS && g_axle[slot].car && g_axle[slot].car != car; t++) slot = (slot + 1) % AXLE_SLOTS;
+    if (g_axle[slot].car != car){ g_axle[slot].car = car; g_axle[slot].still = 0; }
+    const float sp2 = vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2];
+    if (sp2 < 0.25f && fabsf(l[0][2] - l[1][2]) > 1.0f && fabsf(l[0][2] - l[1][2]) < 5.0f){
+        memcpy(g_axle[slot].l, l, sizeof l); g_axle[slot].still = 1;
+    }
+    const float (*o)[3] = g_axle[slot].still ? g_axle[slot].l : (const float (*)[3])l;
+    memcpy(front, o[0], 12); memcpy(rear, o[1], 12);
+}
+/* every car for a rim draw (r_web.c wheel_corners): 16 floats each = the drawn position (3), the drawn rows +364/+370/+37C (9), the
+ * front and rear axles' forward offsets in the car's own frame, then nothing; and the four wheels' turns in spins[4 * car]. Count. */
+int pu_wheel_cars(float *out, float *spins, int max){
     if (!wheel_on() || MR32(0x0065B928u)) return 0;
     int n = (int)MR32(CARS_N_CARS), k = 0; if (n > CARS_MAX) n = CARS_MAX;
-    for (int i = 0; i < n && k + 4 <= max; i++){
+    for (int i = 0; i < n && k < max; i++){
         const uint32_t car = MR32(CARS_L_CARS + 4u * (uint32_t)i);
         if (!car) continue;
-        for (int w = 0; w < 4; w++, k++){
-            memcpy(out + k * 4, g_mem + car + 0x7ECu + 0xC4u * (uint32_t)w, 12);
-            out[k * 4 + 3] = wheel_spin_of(car, i, w);
-        }
-        if (wheel_log() && i == 0){ static int kk; if (++kk % 3000 == 0) fprintf(stderr, "[wheel] car 0 spins %.3f %.3f %.3f %.3f k %.4f\n",
-                                                                          out[k * 4 - 13], out[k * 4 - 9], out[k * 4 - 5], out[k * 4 - 1], g_wheel_k[0]); }
+        float *o = out + 16 * k;
+        memcpy(o, g_mem + car + 0x330, 12); memcpy(o + 3, g_mem + car + 0x364, 36);
+        for (int w = 0; w < 4; w++) spins[4 * k + w] = wheel_spin_of(car, i, w);
+        float fr[3], re[3]; axle_local(car, fr, re);
+        o[12] = fr[2]; o[13] = re[2]; o[14] = o[15] = 0.0f;
+        if (wheel_log() && i == 0){ static int kk; if (++kk % 3000 == 0) fprintf(stderr, "[wheel] car 0 spins %.3f %.3f %.3f %.3f k %.4f axles %.2f %.2f\n",
+                                                                          spins[0], spins[1], spins[2], spins[3], g_wheel_k[0], o[12], o[13]); }
+        k++;
     }
     return k;
 }
 
 /* HEAD1: the player's car for the renderer's headlight beams (r_web.c head_uniform): the front axle's middle (the hubs of wheel blocks
- * 0 and 1), forward (+37C), up (+370), right = up x forward, all world; o[12] the night (1 / 0). 0 in the menus or with no car.
+ * 0 and 1), forward (+37C), up (+370), right = up x forward, all world; o[12] the night (1 / 0), o[13..15] left / right lamp, high
+ * beams (car+D87). 0 in the menus or with no car.
  * HEADLIGHTS=0 off. */
 int pu_head_frame(float *o){
     static int on = -1; if (on < 0){ const char *e = getenv("HEADLIGHTS"); on = !(e && *e == '0'); }
@@ -380,10 +412,11 @@ int pu_head_frame(float *o){
     if (!n || me >= n || me >= CARS_MAX) return 0;
     const uint32_t car = MR32(CARS_L_RACER + 4u * me);
     if (!car) return 0;
-    float h0[3], h1[3], f[3], up[3];
-    memcpy(h0, g_mem + car + 0x7EC, 12); memcpy(h1, g_mem + car + 0x7EC + 0xC4, 12);
+    float fr[3], re[3], f[3], up[3], dp[3], dr[9];
+    axle_local(car, fr, re);
+    memcpy(dp, g_mem + car + 0x330, 12); memcpy(dr, g_mem + car + 0x364, 36);   /* the body as this frame draws it */
     memcpy(up, g_mem + car + 0x370, 12); memcpy(f, g_mem + car + 0x37C, 12);
-    for (int k = 0; k < 3; k++){ o[k] = 0.5f * (h0[k] + h1[k]); o[3 + k] = f[k]; o[9 + k] = up[k]; }
+    for (int k = 0; k < 3; k++){ o[k] = dp[k] + fr[0] * dr[k] + fr[1] * dr[3 + k] + fr[2] * dr[6 + k]; o[3 + k] = f[k]; o[9 + k] = up[k]; }
     /* the world is left-handed (the camera's R = U x F): right = up x forward (= the car's row +364) */
     o[6] = up[1] * f[2] - up[2] * f[1]; o[7] = up[2] * f[0] - up[0] * f[2]; o[8] = up[0] * f[1] - up[1] * f[0];
     /* the night: the game's own flag (00628A28, the time variant of the track spec: its headlights on; the night Landstrasse 1, day
@@ -393,7 +426,16 @@ int pu_head_frame(float *o){
     if (lg){ static int k; if (++k % 600 == 0) fprintf(stderr, "[head] night %d axle %.1f %.1f %.1f right %.2f %.2f %.2f\n",
                                                      (int)dark, o[0], o[1], o[2], o[6], o[7], o[8]); }
     o[12] = dark;
-    for (int k = 0; k < 13; k++) if (!(o[k] == o[k]) || fabsf(o[k]) > 1e6f) return 0;
+    /* the car's own lamps: car+D87 bits 0/1 = the two headlights (action 13 LIGHTSON toggles 3, both on at night), bit 2 the high beams
+     * (action 15); the beams follow them */
+    const uint8_t lamps = g_mem[car + 0xD87u];
+    o[13] = (lamps & 1) ? 1.0f : 0.0f; o[14] = (lamps & 2) ? 1.0f : 0.0f; o[15] = (lamps & 4) ? 1.0f : 0.0f;
+    /* the game's own headlights (LayerVertexLight@Headlights: track vertices lit per frame) give way to the beams: their apply method
+     * (vtable slot 0 of the three Headlights layer classes) becomes the base layer's empty one, 0044A0A0 (mov eax,[ecx+8]; ret 8) */
+    { static int patched; if (!patched){ patched = 1;
+        static const uint32_t vt[3] = { 0x005B3B70u, 0x005B3B44u, 0x005B3B9Cu };
+        for (int v = 0; v < 3; v++) if (MR32(vt[v]) == 0x00453110u || MR32(vt[v]) == 0x004535C0u) MR32(vt[v]) = 0x0044A0A0u; } }
+    for (int k = 0; k < 16; k++) if (!(o[k] == o[k]) || fabsf(o[k]) > 1e6f) return 0;
     return 1;
 }
 
@@ -606,6 +648,6 @@ void sub_00446530(CPU *restrict c){
 void sub_00443f60(CPU *restrict c){ sub_00443f60_orig(c); }
 void sub_00444130(CPU *restrict c){ sub_00444130_orig(c); }
 void sub_00446530(CPU *restrict c){ sub_00446530_orig(c); }
-int pu_wheel_hubs(float *out, int max){ (void)out; (void)max; return 0; }
+int pu_wheel_cars(float *out, float *spins, int max){ (void)out; (void)spins; (void)max; return 0; }
 int pu_head_frame(float *o){ (void)o; return 0; }
 #endif
