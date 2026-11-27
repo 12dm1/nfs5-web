@@ -13,6 +13,8 @@ User list of 2026-11-26. Status per item.
 | 7 | Horizon bottom vs sky dome colour (sea on Atlantica/Dolphin shows light) | done (_mod 3945e49): band down to the NFS4 strip foot (<= 45 deg below the eye), last panel row carried down; tracks without panels (Atlantica, Aquatica, Raceway 1/2) get NFS4's earth gradient; backup _mod/backups/TRK2-sky-20261127 |
 | 8 | Huge draw distance: good on Coastal, bad on Snowy Ridge (far track pieces float) | **TODO, waiting for the user**: per-track draw-distance table; the user will name the tracks that go back to the default distance |
 | 9 | Aquatica lamp rays opaque | done (`<additive>` bitmaps -> soft alpha, _mod 84f3378) |
+| 10 | Dolphin Cove lighthouse: rotating beam opaque | done (_mod 5d16d38): animated G8 textures 200/201 soft at alpha /10 (~0.1); backup _mod/backups/LH1-beam-20261127 |
+| 11 | Landstrasse (Germany) night version instead of day | done (_mod 6d57b69): converter stages trn.* + night sky tags (NIGHT_TRACKS); road line identical, so AI/walls/records stay; installed crp/fsh/env/map/Sky; backup _mod/backups/GN1-night-20261127. Night variants also exist for Coastal, France, Gt1-3, Hills, Park, Snowy, Uk |
 
 ## 8 — draw distance per track (waiting)
 
