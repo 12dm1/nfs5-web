@@ -437,7 +437,15 @@ static void qr_tick(CPU *c, uint32_t fe, uint32_t vt){
         }
         command(c, fe, "PLAYGAME"); LOG("quickrace: PLAYGAME"); st = 4; break; }
     case 4:   /* back in the menus after the race */
-        if (vt && MR32(SIMTICK) > 640){ LOG("quickrace: frontend again (screen vt %08x), sim tick %u", vt, MR32(SIMTICK)); st = 5; }
+        if (vt && MR32(SIMTICK) > 640){ LOG("quickrace: frontend again (screen vt %08x), sim tick %u", vt, MR32(SIMTICK)); st = 5; t0 = now_s(); }
+        break;
+    case 5:   /* NETTEST_AGAIN=<n>: n more races from the menu the race came back to */
+        { static int again = -1; if (again < 0){ const char *e = getenv("NETTEST_AGAIN"); again = e ? atoi(e) : 0; }
+          /* NETTEST_PICK2: the next races' picks (the quick race screen again: state 3 sets them and plays) */
+          if (again > 0 && vt && now_s() - t0 > 4.0){
+              again--; LOG("quickrace: again (%d more)", again);
+              if (getenv("NETTEST_PICK2")){ setenv("NETTEST_PICK", getenv("NETTEST_PICK2"), 1); st = 3; t0 = now_s() - 5.0; }
+              else { command(c, fe, "PLAYGAME"); st = 4; } } }
         break;
     }
 }
@@ -498,6 +506,18 @@ void nettest_race(CPU *c){
             LOG("%s", line);
         }
         last = tick;
+        /* NETTEST_RACE_S=<s>: leave each race after s seconds of race time (the race menu's quit, as below) */
+        { static int rs = -1; static uint32_t qlast; static int quit;
+          if (rs < 0){ const char *e = getenv("NETTEST_RACE_S"); rs = e ? atoi(e) : 0; }
+          if (tick < qlast) quit = 0;
+          qlast = tick;
+          if (rs > 0 && !quit && tick > (uint32_t)rs * 64u){
+              quit = 1; LOG("quickrace: leaving the race after %d s (tick %u)", rs, tick);
+              call_guest(c, 0x004AB270u, 0, NULL);
+              call_guest(c, 0x004120F0u, 0, NULL);
+              MR32(0x00606A90u) = 0; MR32(0x00606A8Cu) = 1; MR32(0x00606A88u) = 0;
+              if ((int)MR32(0x005E99F4u) < 2){ uint32_t one = 1; MR32(0x00657424u) = 3; call_guest(c, 0x00416AC0u, 1, &one); }
+          } }
         return;
     }
     if (MR32(0x006573E8u) != 3u || !comms()) return;

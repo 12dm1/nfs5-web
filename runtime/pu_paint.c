@@ -384,6 +384,10 @@ static void axle_local(uint32_t car, float *front, float *rear){
     const float (*o)[3] = g_axle[slot].still ? g_axle[slot].l : (const float (*)[3])l;
     memcpy(front, o[0], 12); memcpy(rear, o[1], 12);
 }
+/* a guest pointer worth following: the cars' lists keep the last race's pointers while the next one loads (its loading screen
+ * draws in the race mode), and what they point at is freed by then: a pointer read there went past the wasm memory (HEAD2: the
+ * third race's start trapped) */
+static inline int head_ptr(uint32_t a){ return a >= 0x10000u && a < GUEST_END - 0x10000u; }
 /* every car for a rim draw (r_web.c wheel_corners): 16 floats each = the drawn position (3), the drawn rows +364/+370/+37C (9), the
  * front and rear axles' forward offsets in the car's own frame, then nothing; and the four wheels' turns in spins[4 * car]. Count. */
 int pu_wheel_cars(float *out, float *spins, int max){
@@ -391,7 +395,7 @@ int pu_wheel_cars(float *out, float *spins, int max){
     int n = (int)MR32(CARS_N_CARS), k = 0; if (n > CARS_MAX) n = CARS_MAX;
     for (int i = 0; i < n && k < max; i++){
         const uint32_t car = MR32(CARS_L_CARS + 4u * (uint32_t)i);
-        if (!car) continue;
+        if (!head_ptr(car)) continue;
         float *o = out + 16 * k;
         memcpy(o, g_mem + car + 0x330, 12); memcpy(o + 3, g_mem + car + 0x364, 36);
         for (int w = 0; w < 4; w++) spins[4 * k + w] = wheel_spin_of(car, i, w);
@@ -414,7 +418,7 @@ int pu_head_frame(float *o){
     const uint32_t n = MR32(CARS_N_RACERS), me = MR32(0x0065741Cu);
     if (!n || me >= n || me >= CARS_MAX) return 0;
     const uint32_t car = MR32(CARS_L_RACER + 4u * me);
-    if (!car) return 0;
+    if (!head_ptr(car)) return 0;
     float fr[3], re[3], f[3], up[3], dp[3], dr[9];
     axle_local(car, fr, re);
     memcpy(dp, g_mem + car + 0x330, 12); memcpy(dr, g_mem + car + 0x364, 36);   /* the body as this frame draws it */
@@ -436,8 +440,8 @@ int pu_head_frame(float *o){
      * DMGPANEL=<i> (test): damage panel i (car+4E4 + 4 i; 0 front-left, 1 front, 2 front-right) at 100. */
     { static int tp = -2; if (tp == -2){ const char *e = getenv("DMGPANEL"); tp = e ? atoi(e) : -1; }
       if (tp >= 0 && tp < 9 && MR32(0x00606AC4u) > 200){ const float full = 100.0f; memcpy(g_mem + car + 0x4E4 + 4 * tp, &full, 4); } }
-    const uint32_t r3d = MR32(car + 0x74Cu), lb = r3d ? MR32(r3d + 0x2D4u) : 0;
-    if (!lb) return 0;
+    const uint32_t r3d = MR32(car + 0x74Cu), lb = head_ptr(r3d) ? MR32(r3d + 0x2D4u) : 0;
+    if (!head_ptr(lb)) return 0;
     o[13] = g_mem[lb] ? 1.0f : 0.0f; o[14] = g_mem[lb + 1] ? 1.0f : 0.0f;
     o[15] = (g_mem[car + 0xD87u] & 4) ? 1.0f : 0.0f;
     if (lg){ static int kp; if (++kp % 600 == 0){ float pd[3]; memcpy(pd, g_mem + car + 0x4E4, 12);
@@ -464,7 +468,7 @@ int pu_head_boxes(float *out, int max){
     int n = (int)MR32(CARS_N_CARS), k = 0; if (n > CARS_MAX) n = CARS_MAX;
     for (int i = 0; i < n && k < max; i++){
         const uint32_t car = MR32(CARS_L_CARS + 4u * (uint32_t)i);
-        if (!car || car == me) continue;
+        if (!head_ptr(car) || car == me) continue;
         float p[3], r[9], fr[3], re[3];
         memcpy(p, g_mem + car + 0x330, 12); memcpy(r, g_mem + car + 0x364, 36);   /* rows: right, up, forward */
         axle_local(car, fr, re);

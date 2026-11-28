@@ -31,15 +31,15 @@ export const TUNE_PARAMS: TuneParam[] = [
   { group: 'Headlights', key: 'hlfwd', label: 'lamp ahead of axle m', min: -0.5, max: 2, step: 0.05, def: 0.4 },
   { group: 'Headlights', key: 'hlsep', label: 'lamp spacing x', min: 0, max: 1.2, step: 0.02, def: 0.74 },
   // HEAD2 the beams on other cars
-  { group: 'Headlights', key: 'hlcar', label: 'on cars', min: 0, max: 3, step: 0.05, def: 1 },
-  { group: 'Headlights', key: 'hlcarspec', label: 'shine on cars', min: 0, max: 3, step: 0.05, def: 1 },
-  { group: 'Headlights', key: 'hlshadow', label: 'car shadows', min: 0, max: 1, step: 0.05, def: 1 },
+  { group: 'Headlights', key: 'hlcar', label: 'on cars', min: 0, max: 3, step: 0.05, def: 0.45 },
+  { group: 'Headlights', key: 'hlcarspec', label: 'shine on cars', min: 0, max: 3, step: 0.05, def: 0.6 },
+  { group: 'Headlights', key: 'hlshadow', label: 'car shadows', min: 0, max: 1, step: 0.05, def: 0.6 },
   // WHEEL1
   { group: 'Wheels', key: 'wheel', label: 'rim blur', min: 0, max: 4, step: 0.05, def: 1.75 },
   { group: 'Wheels', key: 'wheeldbg', label: 'debug: turn as red', min: 0, max: 1, step: 1, def: 0 },
 ];
 
-const STORE = 'nfs5.tune.v4';   // v4: the user's third tuning became the defaults
+const STORE = 'nfs5.tune.v5';   // v5: the user's fourth tuning (HEAD2 on cars) became the defaults
 export const tune: Record<string, number> = {};
 for (const p of TUNE_PARAMS) tune[p.key] = p.def;
 
