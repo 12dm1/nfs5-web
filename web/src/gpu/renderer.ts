@@ -3,15 +3,22 @@
 //
 // Ring (bytes): magic 0, seg_count 4, published 8, consumed 12, presents_pub 16, presents_done 20, segments 24 (32 bytes each:
 // ready, cmd_words, vtx_bytes, up_bytes, has_present, cmd, vtx, up).
-const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14, PAINT: 15 };
+const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14, PAINT: 15, HEADBOX: 16 };
 const VSIZE = 48, VERTEX_BUFFER = 24 << 20, UBO_ALIGN = 256, UBO_SLOTS = 65536 / 256 * 64;
 
 import { gfxLines, gfxSamples } from '../quality';
+import { tune, loadTune, mountTunePanel } from './tune';
 
 const SHADER = /* wgsl */`
 struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDensity: f32, fogScale: f32, hard: f32, lodBias: f32, em: vec4f,
-  camR: vec4f, camU: vec4f, camF: vec4f, proj: vec4f, vp: vec4f, sun: vec4f, x0: vec4f, x1: vec4f };
+  camR: vec4f, camU: vec4f, camF: vec4f, proj: vec4f, vp: vec4f, sun: vec4f, x0: vec4f, x1: vec4f,
+  hp: vec4f, hf: vec4f, hr: vec4f, hu: vec4f };
 @group(0) @binding(0) var<uniform> u: U;
+// live tuning (gpu/tune.ts): h0 intensity, force, range, spread; h1 cutoff, step-up, softness, hot spot; h2 wrap, fringe, warm, -;
+// h3 lamp height, ahead, spacing, vertical spread; w0 rim blur, sun glow, symmetry, rim debug; h4 on cars, cars' shine, shadows, -.
+// nb.x: the other cars' boxes in bx (3 each, runtime/web/r_web.c head_boxes): written once a frame by C.HEADBOX
+struct T { h0: vec4f, h1: vec4f, h2: vec4f, h3: vec4f, w0: vec4f, h4: vec4f, nb: vec4f, bx: array<vec4f, 48> };
+@group(0) @binding(1) var<uniform> tn: T;
 @group(1) @binding(0) var tx: texture_2d<f32>;
 @group(1) @binding(1) var sm: sampler;
 @group(1) @binding(2) var paintTx: texture_2d<f32>;
@@ -63,11 +70,151 @@ fn shade(i: VO) -> vec4f {
   }
   let t = textureSampleBias(tx, sm, uv, u.lodBias);
   var r = t * i.color;
+  if (dot(u.hf.xyz, u.hf.xyz) > 0.5) { r = vec4f(r.rgb + t.rgb * headlight(i), r.a); }
   if (u.alphaRef > 0.0 && r.a < u.alphaRef) { discard; }
   if (u.hard > 0.5) { r.a = 1.0; }
   return vec4f(fog(r.rgb, i.uvq.z), r.a);
 }
+// HEAD1: the player's headlights as two projector beams on what the track draws, HEAD2 on the cars' paint, glass and rims
+// (runtime/web/r_web.c head_fill: the front axle's middle in camera space hp.xyz, the car's forward hf, right hr, up hu; the lamps
+// hp.w (left), hf.w (right), high beams hr.w, the night hu.w). The pixel back in camera space (ray x depth 1/q). A beam: wide falloff
+// + a hot spot under a sharp cutoff that steps up to the kerb side (a European low beam), a blue lens fringe on the cutoff line,
+// 1/(1 + (d/range)^2), wrapped N.L. x: the light (x N.L), y: the fringe (x N.L), z: the light alone (the cars' shine).
+fn beam(P: vec3f, N: vec3f, L0: vec3f, hi: f32) -> vec3f {
+  let d = P - L0;
+  let f = dot(d, u.hf.xyz);
+  if (f < 0.3) { return vec3f(0.0); }
+  let h = dot(d, u.hr.xyz) / f;
+  let v = dot(d, u.hu.xyz) / f;
+  // the kerb-side step-up: European asymmetric (right side only) .. mirrored to both sides (tn.w0.z symmetry); high beams lift the
+  // cutoff above the horizon
+  let kick = mix(clamp(h, 0.0, 0.35), clamp(abs(h), 0.0, 0.35), tn.w0.z) * tn.h1.y;
+  let cut = tn.h1.x + kick + hi * 0.05;
+  let mask = smoothstep(cut + tn.h1.z, cut - tn.h1.z, v);
+  let w = max(tn.h0.w, 0.01);
+  // the vertical profile: a low beam's light sits just under the cutoff (the far road); the road under the bumper (far below
+  // it) gets only the spill, so the near road does not burn white
+  let vb = max(tn.h3.w, 0.005);
+  let dv = cut - v;
+  let vert = mix(0.12, 1.0, exp(-dv * dv / (2.0 * vb * vb)));
+  let spread = exp(-h * h / (2.0 * w * w)) * vert;
+  let hv = v - (cut - 0.03);
+  let hot = exp(-(h * h) / (2.0 * 0.09 * 0.09) - hv * hv / (2.0 * 0.02 * 0.02)) * tn.h1.w;
+  let z = (v - cut) / max(tn.h1.z, 0.002);
+  let fringe = exp(-z * z) * spread * tn.h2.y * 0.35;
+  let d2 = dot(d, d);
+  let rng = tn.h0.z * (1.0 + hi);
+  let att = 1.0 / (1.0 + d2 / max(rng * rng, 1.0));
+  let L = -d * inverseSqrt(max(d2, 1e-4));
+  let ndl = clamp((dot(N, L) + tn.h2.x) / (1.0 + tn.h2.x), 0.0, 1.0);
+  let e = (spread + hot) * mask * att;
+  return vec3f(e * ndl, fringe * att * ndl, e);
+}
+// HEAD2: the share of a lamp's light (Ll, in the car's frame: right, up, forward from the axle) that reaches Pl past the other cars'
+// boxes: the metres the ray runs inside a box, soft over the first 0.3 m (the box's edges). A box that holds Pl (with 0.25 m around
+// it) is the lit car's own: skipped.
+fn headShadow(Pl: vec3f, Ll: vec3f) -> f32 {
+  let n = min(i32(tn.nb.x), 16);
+  let D = Pl - Ll;
+  let len = length(D);
+  var vis = 1.0;
+  for (var k = 0; k < n; k++) {
+    let c = tn.bx[3 * k]; let ax = tn.bx[3 * k + 1]; let ay = tn.bx[3 * k + 2];
+    let az = cross(ax.xyz, ay.xyz);
+    let e = vec3f(c.w, ax.w, ay.w);
+    let rp = Pl - c.xyz;
+    if (all(abs(vec3f(dot(rp, ax.xyz), dot(rp, ay.xyz), dot(rp, az))) < e + vec3f(0.25))) { continue; }
+    let ro = Ll - c.xyz;
+    let o = vec3f(dot(ro, ax.xyz), dot(ro, ay.xyz), dot(ro, az));
+    var dd = vec3f(dot(D, ax.xyz), dot(D, ay.xyz), dot(D, az));
+    dd = select(dd, vec3f(1e-6), abs(dd) < vec3f(1e-6));
+    let t1 = (-e - o) / dd; let t2 = (e - o) / dd;
+    let tmin = min(t1, t2); let tmax = max(t1, t2);
+    let a = max(max(max(tmin.x, tmin.y), tmin.z), 0.0);
+    let b = min(min(min(tmax.x, tmax.y), tmax.z), 1.0);
+    vis *= 1.0 - smoothstep(0.0, 0.3, (b - a) * len);
+    if (vis < 0.01) { break; }
+  }
+  return vis;
+}
+// the warm / xenon tint of the beams
+fn headCol() -> vec3f {
+  let warm = tn.h2.z;
+  return select(mix(vec3f(1.0, 0.97, 0.9), vec3f(1.0, 0.82, 0.55), -warm), mix(vec3f(1.0, 0.97, 0.9), vec3f(0.82, 0.9, 1.0), warm), warm >= 0.0);
+}
+// both lamps at P (camera space) with the normal N: rgb the light, w the shine (a GGX spot of the lamp in the surface, rough, ks its
+// strength; 0 = none). Nothing on the player's own car for the cars' draws (from the axle: -6 .. +1.2 m, 1.1 m to the sides).
+fn headAt(P: vec3f, N: vec3f, V: vec3f, ks: f32, rough: f32) -> vec4f {
+  if (dot(u.hf.xyz, u.hf.xyz) < 0.5) { return vec4f(0.0); }
+  let dP = P - u.hp.xyz;
+  let Pl = vec3f(dot(dP, u.hr.xyz), dot(dP, u.hu.xyz), dot(dP, u.hf.xyz));
+  if (ks > 0.0 && Pl.z < 1.2 && Pl.z > -6.0 && abs(Pl.x) < 1.1 && Pl.y > -0.2 && Pl.y < 1.6) { return vec4f(0.0); }
+  // each lamp as the car has it (the game's lamp byte: on, broken or switched off = 0; high beams); forced beams light both by day
+  // only: at night the lamp bytes decide (a broken lamp stays dark)
+  let f = select(0.0, 1.0, tn.h2.w > 0.0 && u.hu.w <= 0.0);
+  let hi = u.hr.w;
+  var acc = vec3f(0.0);
+  for (var l = 0; l < 2; l++) {
+    let sd = select(1.0, -1.0, l == 0);
+    let on = max(select(u.hf.w, u.hp.w, l == 0), f);
+    if (on <= 0.0) { continue; }
+    let Ll = vec3f(sd * 0.7 * tn.h3.z, tn.h3.x, tn.h3.y);
+    let L0 = u.hp.xyz + u.hr.xyz * Ll.x + u.hu.xyz * Ll.y + u.hf.xyz * Ll.z;
+    let b = beam(P, N, L0, hi);
+    if (b.x + b.y + b.z * ks < 1e-4) { continue; }
+    var sh = 1.0;
+    if (tn.h4.z > 0.0) { sh = mix(1.0, headShadow(Pl, Ll), tn.h4.z); }
+    var sp = 0.0;
+    if (ks > 0.0) {
+      let L = normalize(L0 - P); let H = normalize(V + L);
+      let nl = max(dot(N, L), 0.0); let nv = max(dot(N, V), 0.001);
+      sp = b.z * ks * D_GGX(max(dot(N, H), 0.0), rough) * fresnel(vec3f(0.04), max(dot(V, H), 0.0)).x / (4.0 * nv * nl + 0.001) * nl;
+    }
+    acc += vec3f(b.x, b.y, sp) * (sh * on);
+  }
+  // hu.w: the game's night flag (00628A28, its headlights on), tn.h2.w forces the beams by day
+  let s = max(u.hu.w, tn.h2.w) * tn.h0.x;
+  return vec4f((headCol() * acc.x + vec3f(0.35, 0.55, 1.0) * acc.y) * s, acc.z * s);
+}
+fn headlight(i: VO) -> vec3f {
+  let q = max(i.uvq.z, 1e-6);
+  let P = i.ray / q;
+  let Nx = cross(dpdx(P), dpdy(P));
+  if (i.uvq.z == 1.0 || dot(Nx, Nx) < 1e-12 || -P.z > 200.0) { return vec3f(0.0); }
+  var N = normalize(Nx);
+  if (dot(N, P) > 0.0) { N = -N; }
+  return headAt(P, N, -normalize(P), 0.0, 1.0).rgb;
+}
 @fragment fn fs(i: VO) -> @location(0) vec4f { return shade(i); }
+// WHEEL1: the rim (the car's tpage4, its quarter u, v < 0.5, centre 0.25, 0.25) smeared round its centre by the wheels' turn in a
+// frame (radians, per corner: rect = (spin, 0, 0, 8), runtime/web/r_web.c wheel_corners): 12 samples over the arc. The tyre's tread
+// and the rest of the page as is. tn.w0.x: the live blur scale (gpu/tune.ts).
+@fragment fn fs_wheel(i: VO) -> @location(0) vec4f {
+  let uv = i.uvq.xy / i.uvq.z;
+  let gx = dpdx(uv); let gy = dpdy(uv);
+  let d = uv - vec2f(0.25);
+  let ang = min(select(0.0, i.rect.x, i.rect.w == 8.0) * tn.w0.x, 2.6);
+  var t: vec4f;
+  if (ang > 0.02 && all(uv >= vec2f(0.0)) && all(uv <= vec2f(0.5)) && dot(d, d) < 0.0625) {
+    var acc = vec4f(0.0);
+    for (var k = 0; k < 12; k++) {
+      let a = ang * (f32(k) / 11.0 - 0.5);
+      let cs = cos(a); let sn = sin(a);
+      let p = vec2f(0.25) + vec2f(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+      acc += textureSampleGrad(tx, sm, clamp(p, vec2f(0.002), vec2f(0.498)), gx, gy);
+    }
+    t = acc / 12.0;
+  } else {
+    t = textureSampleGrad(tx, sm, uv, gx, gy);
+  }
+  var r = t * i.color;
+  if (dot(u.hf.xyz, u.hf.xyz) > 0.5) { r = vec4f(r.rgb + t.rgb * headlight(i) * tn.h4.x, r.a); }
+  // ?t_wheeldbg=1: the corner's turn as red (none: green), to see which rims the runtime matched
+  if (tn.w0.w > 0.0 && i.rect.w == 8.0) { r = vec4f(mix(vec3f(0.0, 0.6, 0.0), vec3f(1.0, 0.0, 0.0), clamp(i.rect.x * 2.0, 0.0, 1.0)), r.a); }
+  if (u.alphaRef > 0.0 && r.a < u.alphaRef) { discard; }
+  if (u.hard > 0.5) { r.a = 1.0; }
+  return vec4f(fog(r.rgb, i.uvq.z), r.a);
+}
 // ---- car paint (PC dx11_shaders.h PSMaterial car branch, shaders/material_core.inc mat_shade_car; [car_paint] values of dx11z.ini) ----
 const PI = 3.14159265;
 const P_METAL = 0.2; const P_GRAZING = 0.5; const P_FLAKE_SCALE = 1200.0; const P_FLAKE = 0.015; const P_SILVER = 0.5;
@@ -227,6 +374,11 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   // the knee washed them out on light paint (the user picked 0.85, 2026-11-26; ?seam=0 = off, ?seam=<0..3> to try)
   if (P_SEAM > 0.0) { rgb *= max(mix(1.0, clamp(1.0 - gv / 127.5, 0.0, 1.0), P_SEAM), 0.0); }
   rgb = mix(albedo.rgb * i.color.rgb, rgb, pk.r);   // texels the game does not paint keep the stock look
+  // HEAD2: the player's beams on the car: its colour lit (tn.h4.x), the lamps' spot in the clear coat by the paint's gloss (tn.h4.y)
+  if (dot(u.hf.xyz, u.hf.xyz) > 0.5) {
+    let hl = headAt(P, N, V, tn.h4.y * (0.25 + 0.75 * keep * pk.r) * 20.0, mix(0.35, 0.08, keep * pk.r));
+    rgb += albedo.rgb * hl.rgb * tn.h4.x + headCol() * hl.w;
+  }
   return vec4f(fog(rgb, i.uvq.z), a);
 }
 // ---- intact car glass (GLASS1; PC car editor's Glass material: roughness 0.02, specular 20, reflection 1, grazing 1, no env
@@ -262,7 +414,8 @@ const G_ROUGH = 0.02; const G_SPEC = 20.0; const G_REFL = 1.0; const G_F0 = 0.04
   let sun = SUN_COL * P_SUN_REFL * vis;
   let env = envGain(envK(N, V, G_ROUGH * MAXMIP, P_SUN_REFL * vis), u.x0.x);
   let spec = sun * G_SPEC * lum(i.color.rgb) * (D_GGX(NdotH, G_ROUGH) * G_Smith(NdotV, NdotL, G_ROUGH) * fresnel(vec3f(G_F0), VdotH)) / (4.0 * NdotV * NdotL + 0.001) * NdotL;
-  let refl = env * F * G_REFL + spec;
+  var refl = env * F * G_REFL + spec;
+  if (dot(u.hf.xyz, u.hf.xyz) > 0.5) { refl += headCol() * headAt(P, N, V, tn.h4.y * 20.0, 0.05).w; }
   // the fog hides the reflection as it hides the glass under it (that one is fogged already)
   let clear = fog(vec3f(1.0), i.uvq.z).r - fog(vec3f(0.0), i.uvq.z).r;   // 1 - the fog's share
   let out_ = vec4f(refl * clear, F * clear);
@@ -296,6 +449,65 @@ struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
   o.pos = vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0); o.uv = vec2f(x, y); return o;
 }
 @fragment fn fs(i: VO) -> @location(0) vec4f { return textureSampleLevel(tx, sm, i.uv, 0.0); }`;
+
+// LAMP1: light bloom. Every draw also writes a second target whose blend keeps only the additive draws (lamp and street
+// light glows, head/brake lights, flares: the game's own light sprites), opaque draws clear it (no halo through a wall),
+// alpha-blended ones dim it. At a present that target goes to a quarter-size chain: downsample, 9-tap blur both ways,
+// a wide horizontal streak (lens), then the composite adds both to the frame. ?bloom=0 off (gfx low: off), ?bloom=<k>.
+const BLOOM_WGSL = /* wgsl */`
+@group(0) @binding(0) var tx: texture_2d<f32>;
+@group(0) @binding(1) var sm: sampler;
+@group(0) @binding(2) var tb: texture_2d<f32>;
+@group(0) @binding(3) var ts: texture_2d<f32>;
+// live tuning (gpu/tune.ts): k.x overall, k.y halo, k.z streak, k.w wide halo; s.x streak threshold, s.y streak length
+struct BT { k: vec4f, s: vec4f };
+@group(0) @binding(4) var<uniform> bt: BT;
+struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var o: VO; let x = f32(i & 1u) * 2.0; let y = f32((i >> 1u) & 1u) * 2.0;
+  o.pos = vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0); o.uv = vec2f(x, y); return o;
+}
+fn px(t: texture_2d<f32>) -> vec2f { return 1.0 / vec2f(textureDimensions(t)); }
+// full-size glow -> quarter: 4 bilinear taps = a 4x4 box
+@fragment fn fs_down(i: VO) -> @location(0) vec4f {
+  let d = px(tx);
+  let t0 = textureSampleLevel(tx, sm, i.uv + d * vec2f(-1.0, -1.0), 0.0).rgb; let t1 = textureSampleLevel(tx, sm, i.uv + d * vec2f(1.0, -1.0), 0.0).rgb;
+  let t2 = textureSampleLevel(tx, sm, i.uv + d * vec2f(-1.0, 1.0), 0.0).rgb; let t3 = textureSampleLevel(tx, sm, i.uv + d * vec2f(1.0, 1.0), 0.0).rgb;
+  // half mean, half max: a lamp a few pixels wide keeps its strength in the quarter image
+  let c = 0.5 * (t0 + t1 + t2 + t3) * 0.25 + 0.5 * max(max(t0, t1), max(t2, t3));
+  return vec4f(c, 1.0);
+}
+fn blur(uv: vec2f, dir: vec2f, step: f32) -> vec4f {
+  let w = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+  var c = textureSampleLevel(tx, sm, uv, 0.0).rgb * w[0];
+  for (var k = 1; k < 5; k++) {
+    let o = dir * f32(k) * step;
+    c += (textureSampleLevel(tx, sm, uv + o, 0.0).rgb + textureSampleLevel(tx, sm, uv - o, 0.0).rgb) * w[k];
+  }
+  return vec4f(c, 1.0);
+}
+@fragment fn fs_bh(i: VO) -> @location(0) vec4f { return blur(i.uv, vec2f(px(tx).x, 0.0), 1.2); }
+@fragment fn fs_bv(i: VO) -> @location(0) vec4f { return blur(i.uv, vec2f(0.0, px(tx).y), 1.2); }
+// the wide pass adds a soft halo to the tight core (keeps the core: c + wide)
+@fragment fn fs_bh2(i: VO) -> @location(0) vec4f { return blur(i.uv, vec2f(px(tx).x, 0.0), 3.5); }
+@fragment fn fs_bv2(i: VO) -> @location(0) vec4f { return blur(i.uv, vec2f(0.0, px(tx).y), 3.5) * bt.k.w; }
+// the lens streak: a long thin horizontal smear of the brightest glow
+@fragment fn fs_streak(i: VO) -> @location(0) vec4f {
+  let d = px(tx).x;
+  var c = vec3f(0.0); var wsum = 0.0;
+  for (var k = -16; k <= 16; k++) {
+    let w = exp(-abs(f32(k)) / 6.0);
+    let t = textureSampleLevel(tx, sm, i.uv + vec2f(f32(k) * bt.s.y * d, 0.0), 0.0).rgb;
+    c += max(t - vec3f(bt.s.x), vec3f(0.0)) * w; wsum += w;
+  }
+  return vec4f(c / wsum * 3.0 * vec3f(0.75, 0.85, 1.0), 1.0);
+}
+@fragment fn fs_comp(i: VO) -> @location(0) vec4f {
+  let c = textureSampleLevel(tx, sm, i.uv, 0.0).rgb;
+  let b = (textureSampleLevel(tb, sm, i.uv, 0.0).rgb * bt.k.y + textureSampleLevel(ts, sm, i.uv, 0.0).rgb * bt.k.z) * bt.k.x;
+  // screen-style add: bright light never clips to a flat white patch
+  return vec4f(c + b * (vec3f(1.0) - c * 0.5), 1.0);
+}`;
 
 // GLASS1: the glass pass is premultiplied (its colour is the reflection, its alpha the share of what is under it that goes)
 const GLASS_BLEND: GPUBlendState = { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } };
@@ -353,6 +565,10 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   // threshold, survivors opaque", which the shader's hard cutout already does, so there is no coverage from alpha here.
   const msaaParam = Number(new URLSearchParams(location.search).get('msaa') ?? gfxSamples());
   const SAMPLES = msaaParam === 1 ? 1 : 4;
+  const bloomParam = new URLSearchParams(location.search).get('bloom');
+  const BLOOM = bloomParam === null ? gfxSamples() > 1 : Number(bloomParam) > 0;
+  loadTune();
+  if (new URLSearchParams(location.search).get('tune') === '1') mountTunePanel();
   const makeTargets = () => {
     const colorTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
     const msTex = SAMPLES > 1 ? device.createTexture({ size: [W, H], format: 'rgba8unorm', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
@@ -361,11 +577,31 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     return { colorTex, msTex, depthTex, colorView, depthView: depthTex.createView(), drawView: msTex ? msTex.createView() : colorView };
   };
   let { colorTex, msTex, depthTex, colorView, depthView, drawView } = makeTargets();
+  // LAMP1 targets: the glow (multisampled like the scene, resolved), the quarter chain, the composite the present shows
+  const makeBloom = () => {
+    if (!BLOOM) return null;
+    const RT = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
+    const glowTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: RT });
+    const msGlow = SAMPLES > 1 ? device.createTexture({ size: [W, H], format: 'rgba8unorm', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
+    const qw = Math.max(1, Math.ceil(W / 4)), qh = Math.max(1, Math.ceil(H / 4));
+    const q = () => device.createTexture({ size: [qw, qh], format: 'rgba16float', usage: RT });
+    const a = q(), b = q(), st = q(), w = q();
+    const finalTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: RT | GPUTextureUsage.COPY_SRC });
+    const glowView = glowTex.createView();
+    return { glowTex, msGlow, a, b, st, finalTex, glowView, glowDraw: msGlow ? msGlow.createView() : glowView,
+      av: a.createView(), bv: b.createView(), sv: st.createView(), wv: w.createView(), fv: finalTex.createView(),
+      all: [glowTex, a, b, st, w, finalTex, ...(msGlow ? [msGlow] : [])] };
+  };
+  let bloom = makeBloom();
+  let glowClear = true;
+  if (BLOOM) log(`[gpu] LAMP1 light bloom x${tune.bloom}`);
   log(`[gpu] MSAA x${SAMPLES}`);
   // the multisampled target into colorTex: an empty pass whose end resolves
   const resolve = (enc: GPUCommandEncoder) => {
     if (!msTex) return;
-    enc.beginRenderPass({ colorAttachments: [{ view: drawView, resolveTarget: colorView, loadOp: 'load', storeOp: 'store' }] }).end();
+    const att: GPURenderPassColorAttachment[] = [{ view: drawView, resolveTarget: colorView, loadOp: 'load', storeOp: 'store' }];
+    if (bloom && bloom.msGlow) att.push({ view: bloom.glowDraw, resolveTarget: bloom.glowView, loadOp: glowClear ? 'clear' : 'load', storeOp: 'store', clearValue: [0, 0, 0, 0] });
+    enc.beginRenderPass({ colorAttachments: att }).end();
   };
 
   // ?paintdbg=1..6: what the paint shader sees (1 paint mask: magenta paint, green stock; 2 normal; 3 environment; 4 vertex light; 5 keep/paint/sun visibility; 6 albedo)
@@ -384,11 +620,36 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   if (carBias >= -4 && carBias <= 2) code = code.replace('const P_CAR_BIAS = 0.0;', `const P_CAR_BIAS = ${carBias.toFixed(3)};`);
   const seamQ = Number(new URLSearchParams(location.search).get('seam') ?? NaN);
   if (seamQ >= 0 && seamQ <= 3) code = code.replace('const P_SEAM = 0.85;', `const P_SEAM = ${seamQ.toFixed(3)};`);
+  // ?wheelblur=<k>: the rim smear x k (0 off): gpu/tune.ts
+  // ?wheelspin=<radians>: a fixed smear for looks (the menus' cars stand still)
+  const spinQ = Number(new URLSearchParams(location.search).get('wheelspin') ?? NaN);
+  if (spinQ >= 0 && spinQ <= 3) code = code.replace('let ang = min(select(0.0, i.rect.x, i.rect.w == 8.0) * tn.w0.x, 2.6);', `let ang = ${spinQ.toFixed(3)};`);
   if (peelQ >= 0 && peelQ <= 2) code = code.replace('const P_PEEL = 0.5;', `const P_PEEL = ${peelQ.toFixed(3)};`);
+  if (BLOOM) {
+    for (const n of ['fs', 'fs_car', 'fs_glass', 'fs_mask', 'fs_wheel']) code = code.replace(`@fragment fn ${n}(i: VO) -> @location(0) vec4f {`, `fn ${n}_b(i: VO) -> vec4f {`);
+    code += `
+struct MRT { @location(0) c: vec4f, @location(1) g: vec4f };
+@fragment fn fs(i: VO) -> MRT { let c = fs_b(i); let far = i.uvq.z == 1.0 || i.uvq.z < 1.0 / 400.0; return MRT(c, select(c, c * tn.w0.y, far)); }
+@fragment fn fs_car(i: VO) -> MRT { let c = fs_car_b(i); return MRT(c, c); }
+@fragment fn fs_glass(i: VO) -> MRT { let c = fs_glass_b(i); return MRT(c, c); }
+@fragment fn fs_mask(i: VO) -> MRT { let c = fs_mask_b(i); return MRT(c, c); }
+@fragment fn fs_wheel(i: VO) -> MRT { let c = fs_wheel_b(i); return MRT(c, c); }`;
+  }
   const module = device.createShaderModule({ code });
   void module.getCompilationInfo().then(ci => { for (const m of ci.messages) log(`[gpu] shader ${m.type} line ${m.lineNum}: ${m.message}`); });
   const blitModule = device.createShaderModule({ code: BLIT });
-  const uboLayout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true } }] });
+  const uboLayout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }] });
+  // live tuning (gpu/tune.ts): written at every present
+  const tuneBuf = device.createBuffer({ size: 1024, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const tuneF = new Float32Array(24);
+  const writeTune = () => {
+    const t = tune;
+    tuneF.set([t.hl, 0, t.hlrange, t.hlwidth, t.hlcut, t.hlkick, t.hlsoft, t.hlhot, t.hlwrap, t.hlfringe, t.hlwarm, t.hlforce,
+      t.hlh, t.hlfwd, t.hlsep, t.hlvert, t.wheel, t.sun, t.hlsym, t.wheeldbg, t.hlcar, t.hlcarspec, t.hlshadow, 0], 0);
+    queue.writeBuffer(tuneBuf, 0, tuneF);
+  };
+  writeTune();
   const texLayout = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
     { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} }] });
@@ -397,7 +658,7 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const pipeLayout = device.createPipelineLayout({ bindGroupLayouts: [uboLayout, texLayout, cubeLayout] });
   const vbuf = device.createBuffer({ size: VERTEX_BUFFER, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
   const ubo = device.createBuffer({ size: UBO_SLOTS * UBO_ALIGN, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const uboGroup = device.createBindGroup({ layout: uboLayout, entries: [{ binding: 0, resource: { buffer: ubo, size: 192 } }] });
+  const uboGroup = device.createBindGroup({ layout: uboLayout, entries: [{ binding: 0, resource: { buffer: ubo, size: 256 } }, { binding: 1, resource: { buffer: tuneBuf } }] });
   const uboData = new ArrayBuffer(UBO_SLOTS * UBO_ALIGN);
   const uboF = new Float32Array(uboData);
 
@@ -415,6 +676,15 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     const keep: GPUBlendComponent = key & (1 << 13) ? { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' } : { srcFactor: 'zero', dstFactor: 'one' };
     return { color: base ? base.color : { srcFactor: 'one', dstFactor: 'zero' }, alpha: keep };
   };
+  // LAMP1: the glow target keeps the additive draws, opaque ones clear it, alpha-blended ones dim it
+  const GLOW_KEEP: GPUBlendState = { color: { srcFactor: 'zero', dstFactor: 'one' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } };
+  const GLOW_CLEAR: GPUBlendState = { color: { srcFactor: 'zero', dstFactor: 'zero' }, alpha: { srcFactor: 'zero', dstFactor: 'zero' } };
+  const GLOW_DIM: GPUBlendState = { color: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } };
+  const glowBlend = (key: number): GPUBlendState => {
+    if (key & (1 << 17)) return GLOW_KEEP;
+    const m = key & 7;
+    return m === 1 ? BLEND[1]! : m === 0 || m === 2 ? GLOW_DIM : m === 3 ? GLOW_KEEP : GLOW_CLEAR;
+  };
   const pipes = new Map<number, GPURenderPipeline>();
   const pipeline = (key: number) => {
     let p = pipes.get(key);
@@ -427,7 +697,8 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
         { shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x2' },
         { shaderLocation: 2, offset: 24, format: 'unorm8x4' }, { shaderLocation: 3, offset: 28, format: 'unorm8x4' },
         { shaderLocation: 4, offset: 32, format: 'float32x4' }] }] },
-      fragment: { module, entryPoint: cap ? 'fs_cap' : key & (1 << 15) ? 'fs_car' : key & (1 << 16) ? 'fs_mask' : key & (1 << 17) ? 'fs_glass' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 }] },
+      fragment: { module, entryPoint: cap ? 'fs_cap' : key & (1 << 18) ? 'fs_wheel' : key & (1 << 15) ? 'fs_car' : key & (1 << 16) ? 'fs_mask' : key & (1 << 17) ? 'fs_glass' : 'fs', targets: [{ format: cap ? CUBE_FORMAT : 'rgba8unorm', blend, writeMask: cw ? GPUColorWrite.ALL : 0 },
+        ...(BLOOM && !cap ? [{ format: 'rgba8unorm' as GPUTextureFormat, blend: glowBlend(key), writeMask: cw ? GPUColorWrite.ALL : 0 }] : [])] },
       primitive: { topology: TOPO[topo], cullMode: topo === 0 ? CULL[cull] : 'none', frontFace: 'cw' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: !!zwrite, depthCompare: DEPTH[zcmp] },
       multisample: { count: cap ? 1 : SAMPLES },
@@ -482,6 +753,49 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
   const genPipe = blitPipe('rgba8unorm'), presentPipe = blitPipe(canvasFormat), cubeMipPipe = blitPipe(CUBE_FORMAT);
   const makePresentGroup = () => device.createBindGroup({ layout: blitLayout, entries: [{ binding: 0, resource: colorView }, { binding: 1, resource: genSampler }] });
   let presentGroup = makePresentGroup();
+  // ?bloomdbg=1: the composite shows the bloom alone (2: the glow target as the scene left it)
+  const bloomDbg = Number(new URLSearchParams(location.search).get('bloomdbg') ?? 0);
+  let bloomCode = BLOOM_WGSL;
+  if (bloomDbg === 1) bloomCode = bloomCode.replace('return vec4f(c + b * (vec3f(1.0) - c * 0.5), 1.0);', 'return vec4f(b, 1.0);');
+  const bloomModule = BLOOM ? device.createShaderModule({ code: bloomCode }) : null;
+  if (bloomModule) void bloomModule.getCompilationInfo().then(ci => { for (const m of ci.messages) log(`[gpu] bloom shader ${m.type} line ${m.lineNum}: ${m.message}`); });
+  const bloomLayout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+    { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }] });
+  const bloomBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const bloomF = new Float32Array(8);
+  const bloomPipeLayout = device.createPipelineLayout({ bindGroupLayouts: [bloomLayout] });
+  const bloomPipe = (entry: string, format: GPUTextureFormat) => device.createRenderPipeline({ layout: bloomPipeLayout,
+    vertex: { module: bloomModule!, entryPoint: 'vs' }, fragment: { module: bloomModule!, entryPoint: entry, targets: [{ format }] }, primitive: { topology: 'triangle-list' } });
+  // the wide halo is added onto the tight blur (one, one)
+  const bloomPipeAdd = () => device.createRenderPipeline({ layout: bloomPipeLayout,
+    vertex: { module: bloomModule!, entryPoint: 'vs' }, fragment: { module: bloomModule!, entryPoint: 'fs_bv2', targets: [{ format: 'rgba16float',
+      blend: { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } } }] }, primitive: { topology: 'triangle-list' } });
+  const bp = bloomModule ? { down: bloomPipe('fs_down', 'rgba16float'), bh: bloomPipe('fs_bh', 'rgba16float'), bv: bloomPipe('fs_bv', 'rgba16float'),
+    bh2: bloomPipe('fs_bh2', 'rgba16float'), bv2: bloomPipe('fs_bv2', 'rgba16float'),
+    streak: bloomPipe('fs_streak', 'rgba16float'), comp: bloomPipe('fs_comp', 'rgba8unorm'), add: bloomPipeAdd() } : null;
+  const bg = (a: GPUTextureView, b?: GPUTextureView, c?: GPUTextureView) => device.createBindGroup({ layout: bloomLayout, entries: [
+    { binding: 0, resource: a }, { binding: 1, resource: genSampler }, { binding: 2, resource: b ?? a }, { binding: 3, resource: c ?? a }, { binding: 4, resource: { buffer: bloomBuf } }] });
+  const makeBloomGroups = () => bloom ? { down: bg(bloom.glowView), bh: bg(bloom.av), bv: bg(bloom.bv), streak: bg(bloom.av), wide: bg(bloom.wv),
+    comp: bloomDbg === 2 ? bg(bloom.glowView, bloom.glowView, bloom.glowView) : bg(colorView, bloom.av, bloom.sv), show: device.createBindGroup({ layout: blitLayout, entries: [{ binding: 0, resource: bloom.fv }, { binding: 1, resource: genSampler }] }) } : null;
+  let bloomGroups = makeBloomGroups();
+  const runBloom = (enc: GPUCommandEncoder) => {
+    if (!bloom || !bp || !bloomGroups) return;
+    bloomF.set([tune.bloom, tune.gain, tune.streak, tune.wide, tune.sthr, tune.slen, 0, 0]);
+    queue.writeBuffer(bloomBuf, 0, bloomF);
+    const step = (pipe: GPURenderPipeline, group: GPUBindGroup, view: GPUTextureView, load: GPULoadOp = 'clear') => {
+      const p = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: load, storeOp: 'store', clearValue: [0, 0, 0, 0] }] });
+      p.setPipeline(pipe); p.setBindGroup(0, group); p.draw(3); p.end();
+    };
+    step(bp.down, bloomGroups.down, bloom.av);           // glow -> a (quarter)
+    step(bp.streak, bloomGroups.streak, bloom.sv);       // a -> streak
+    step(bp.bh2, bloomGroups.bh, bloom.wv);              // a -> w (wide, horizontal)
+    step(bp.bh, bloomGroups.bh, bloom.bv);               // a -> b (tight, horizontal)
+    step(bp.bv, bloomGroups.bv, bloom.av);               // b -> a (tight)
+    step(bp.add, bloomGroups.wide, bloom.av, 'load');    // a += vertical(w) (wide halo)
+    step(bp.comp, bloomGroups.comp, bloom.fv);
+  };
   const genMips = (t: T) => {
     const enc = device.createCommandEncoder();
     for (let l = 1; l < t.levels; l++) {
@@ -530,6 +844,8 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     toFree.push(colorTex, depthTex); if (msTex) toFree.push(msTex);
     W = nw; H = nh; canvas.width = W; canvas.height = H;
     ({ colorTex, msTex, depthTex, colorView, depthView, drawView } = makeTargets());
+    if (bloom) toFree.push(...bloom.all);
+    bloom = makeBloom(); bloomGroups = makeBloomGroups(); glowClear = true;
     presentGroup = makePresentGroup();
     log(`[gpu] screen ${lw}x${lh} drawn at ${W}x${H}`);
   };
@@ -553,8 +869,10 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
       if (pass) return pass;
       const load: GPULoadOp = capFace >= 0 && capClear ? 'clear' : 'load';
       capClear = false;
+      const att: GPURenderPassColorAttachment[] = [{ view: capFace >= 0 ? cubeViews[capFace][0] : drawView, loadOp: load, storeOp: 'store', clearValue: [0, 0, 0, 0] }];
+      if (bloom && capFace < 0) { att.push({ view: bloom.glowDraw, loadOp: glowClear ? 'clear' : 'load', storeOp: 'store', clearValue: [0, 0, 0, 0] }); glowClear = false; }
       pass = enc.beginRenderPass({
-        colorAttachments: [{ view: capFace >= 0 ? cubeViews[capFace][0] : drawView, loadOp: load, storeOp: 'store', clearValue: [0, 0, 0, 0] }],
+        colorAttachments: att,
         depthStencilAttachment: { view: capFace >= 0 ? cubeDepthView : depthView, depthLoadOp: load, depthClearValue: 1, depthStoreOp: 'store' },
       });
       pass.setVertexBuffer(0, vbuf);
@@ -611,12 +929,14 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
         case C.UNIFORM: {
           if (ubos < UBO_SLOTS) {
             uboOff = ubos * UBO_ALIGN;
-            uboF.set(cf.subarray(i, i + 48), uboOff / 4);
+            uboF.set(cf.subarray(i, i + 64), uboOff / 4);
             ubos++;
             begin().setBindGroup(0, uboGroup, [uboOff]);
           }
-          i += 48;
+          i += 64;
           break; }
+        // HEAD2: the other cars' boxes for the beams' shadows, after the tuning in the tune buffer (renderer T.nb, T.bx)
+        case C.HEADBOX: queue.writeBuffer(tuneBuf, 96, cf, i, 4 + 192); i += 4 + 192; break;
         case C.DRAW: {
           const first = cmd[i++], count = cmd[i++], p = begin();
           if (bindDirty) { p.setBindGroup(1, group(curTex, curSampler, curPaint)); bindDirty = false; }
@@ -659,13 +979,18 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
     if (present) {
       const frame = ++stats.frames;
       const view = ctx.getCurrentTexture().createView();
+      // the race only (its mode is wider than the menus' 640 x 480): the showroom's light panels are large additive walls
+      writeTune();
+      const bloomNow = !!bloomGroups && lw > 640;
+      if (bloomNow) runBloom(enc);
       const out = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
-      out.setPipeline(presentPipe); out.setBindGroup(0, presentGroup); out.draw(3); out.end();
+      out.setPipeline(presentPipe); out.setBindGroup(0, bloomNow ? bloomGroups!.show : presentGroup); out.draw(3); out.end();
+      glowClear = true;
       if (shotSet.has(frame) || stats.shotNext) {
         stats.shotNext = false;
         const sw = W, sh = H, row = ((sw * 4 + 255) >> 8) << 8;
         const rb = device.createBuffer({ size: row * sh, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-        enc.copyTextureToBuffer({ texture: colorTex }, { buffer: rb, bytesPerRow: row }, [sw, sh]);
+        enc.copyTextureToBuffer({ texture: bloomNow ? bloom!.finalTex : colorTex }, { buffer: rb, bytesPerRow: row }, [sw, sh]);
         void queue.onSubmittedWorkDone().then(async () => {
           await rb.mapAsync(GPUMapMode.READ);
           const src = new Uint8Array(rb.getMappedRange()), px = new Uint8Array(sw * sh * 4);
@@ -748,13 +1073,15 @@ export async function attachRenderer(memory: WebAssembly.Memory, ptr: number, ca
       }
     }
   };
-  const onFrame = () => { requestAnimationFrame(onFrame); if (inflight < 3) drain(true); };
+  let lastRaf = performance.now();
+  const onFrame = () => { lastRaf = performance.now(); requestAnimationFrame(onFrame); if (inflight < 3) drain(true); };
   requestAnimationFrame(onFrame);
-  // uploads while no display frame comes, and a page in the background: rAF stops there, the game must not
+  // uploads while no display frame comes, and a page in the background: rAF stops there, the game must not. A visible page whose
+  // display frames stop too (a sleeping monitor under headless Chrome) presents from here after 250 ms without one.
   let lastPresentCheck = performance.now();
   setInterval(() => {
     const now = performance.now();
-    drain(document.hidden && now - lastPresentCheck > 100);
+    drain((document.hidden || now - lastRaf > 250) && now - lastPresentCheck > 100);
     if (now - lastPresentCheck > 100) lastPresentCheck = now;
   }, 4);
   return stats;

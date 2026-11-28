@@ -13,6 +13,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "decls.h"
+#include "pu_cars.h"
 
 uint32_t pu_guest_call(CPU *c, uint32_t fn, uint32_t ecx, const uint32_t *args, int n);
 extern int g_cam_capture;
@@ -276,6 +277,224 @@ static int glass_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
     if (glass_log_on()) fprintf(stderr, "[glass] upload %08x %dx%d fmt %d (built as %x): %u intact glass texels, %u drawn over (build match %.2f)\n", data, w, h, fmt, page->fmt, kept, broken, best);
     return (int)kept;
 }
+/* ---- WHEEL1: the rim's page (the builder's file 3, tpage4 128 x 128: the rim image whg/whf, 64 x 64 at (0, 0), on every car).
+ * Its upload becomes paint kind 4 (r_web.c): drawn by the renderer's fs_wheel, which smears the rim quarter round its centre by the
+ * wheels' turn in one frame (pu_wheel_spin). WHEELBLUR=0 off, WHEELLOG=1 the pages and the speed. ---- */
+#define WHEELS 64
+/* the rim quarter as the blit left it (the page's memory is used again before its upload): its texels in the build's format */
+static uint32_t g_wheel_bits[WHEELS], g_wheel_fmt[WHEELS], g_wheel_sig[WHEELS][64 * 64]; static int g_wheel_next;
+static int wheel_on(void){ static int on = -1; if (on < 0){ const char *e = getenv("WHEELBLUR"); on = !(e && *e == '0'); } return on; }
+static int wheel_log(void){ static int on = -1; if (on < 0){ const char *e = getenv("WHEELLOG"); on = e && *e && *e != '0'; } return on; }
+static void wheel_blit(uint32_t page, uint32_t image, uint32_t fmt, int x, int y){
+    const int stride = (int)MR32(page + 4);
+    const uint32_t bits = MR32(page + 0x28);
+    if (!bits || stride != 128 || (fmt != 0x613 && fmt != 0x115C && fmt != 0x20)) return;
+    int16_t w16, h16; memcpy(&w16, g_mem + image + 4, 2); memcpy(&h16, g_mem + image + 6, 2);
+    const int32_t pos = (int32_t)MR32(image + 0xC);
+    const int x0 = ((pos << 20) >> 20) + x, y0 = ((pos << 4) >> 20) + y;
+    if (w16 != 64 || h16 != 64 || x0 != 0 || y0 != 0) return;
+    /* kept by content: the page's memory goes to the next car's build too (another rim over the same bits), and a car's texture can
+     * go up again later (a reload): every rim seen stays matchable, one slot per different image */
+    const int f16 = fmt16((int)fmt);
+    static uint32_t sig[64 * 64];
+    for (int j = 0; j < 64; j++) for (int i = 0; i < 64; i++) sig[j * 64 + i] = raw_at(g_mem + bits + 0x10, f16, (size_t)j * 128u + (size_t)i);
+    for (int i = 0; i < WHEELS; i++) if (g_wheel_bits[i] && g_wheel_fmt[i] == fmt && !memcmp(g_wheel_sig[i], sig, sizeof sig)) return;
+    const int k = g_wheel_next; g_wheel_next = (g_wheel_next + 1) % WHEELS;
+    g_wheel_bits[k] = bits + 0x10; g_wheel_fmt[k] = fmt;
+    memcpy(g_wheel_sig[k], sig, sizeof sig);
+    if (wheel_log()) fprintf(stderr, "[wheel] rim page %08x fmt %x\n", bits + 0x10, fmt);
+}
+/* an upload whose top-left quarter is a rim as built */
+static int wheel_map(uint32_t data, int w, int h, int fmt){
+    if (w != 128 || h != 128) return 0;
+    int best = 0;
+    for (int i = 0; i < WHEELS; i++){
+        if (!g_wheel_bits[i] || !fmt_fits((int)g_wheel_fmt[i], fmt)) continue;
+        const int f16 = fmt16((int)g_wheel_fmt[i]);
+        int same = 0;
+        for (int t = 0; t < 64 * 64; t += 7) same += raw_at(g_mem + data, f16, (size_t)(t / 64) * 128u + (size_t)(t % 64)) == g_wheel_sig[i][t];
+        const int seen = (64 * 64 + 6) / 7;
+        if (same > best) best = same;
+        if (same * 100 >= seen * 95){
+            if (wheel_log()) fprintf(stderr, "[wheel] upload %08x = rim page %08x (%d of %d)\n", data, g_wheel_bits[i], same, seen);
+            return 1;                   /* kept: the same car's page goes up again after a reload */
+        }
+    }
+    if (wheel_log()) fprintf(stderr, "[wheel] upload %08x 128x128 fmt %d: no rim (best %d)\n", data, fmt, best);
+    return 0;
+}
+/* The wheels' turn in one frame (radians, renderer uniform x1.x), per wheel of every car. The sim car (racer / car lists) holds four wheel
+ * blocks at +7EC, step C4 (0, 1 front left / right, 2, 3 rear): +0 the hub's world position, +64 the wheel's drive (+) / brake (-) torque,
+ * +70 its spin, always the ground speed x -15.5 (the physics never lets a wheel slip or lock). So what the eye expects is made here:
+ * - a driven wheel (torque > 0) turns at least as fast as the engine says: rpm (+DB4) x the gear's ratio ([+760] + 190 + 4 x gear +D82)
+ *   x k, k learned per car while the wheels grip (the largest ground / engine ratio seen, slowly forgotten): a launch spins the tyres;
+ * - the hand brake (rear torque < -1 while the front ones brake not) stops the rear wheels.
+ * Speed over a 0.33 m tyre, x 1/90 s. WHEELLOG=1 logs the match. */
+#define WHEEL_SPIN_K 15.5f
+static float g_wheel_k[CARS_MAX];
+static float wheel_spin_of(uint32_t car, int slot, int w){
+    float spin, tq, tqf, rpm, gr = 0.0f;
+    const uint32_t b = car + 0x7ECu + 0xC4u * (uint32_t)w;
+    memcpy(&spin, g_mem + b + 0x70, 4); memcpy(&tq, g_mem + b + 0x64, 4);
+    memcpy(&tqf, g_mem + car + 0x7ECu + 0x64, 4);
+    float v = fabsf(spin) / WHEEL_SPIN_K;
+    if (!(v < 200.0f)) v = 0.0f;
+    if (w >= 2 && tq < -1.0f && tqf > -0.3f) return 0.0f;        /* hand brake */
+    memcpy(&rpm, g_mem + car + 0xDB4, 4);
+    const uint32_t tr = MR32(car + 0x760u); const int g = g_mem[car + 0xD82u];
+    if (tr && g >= 2 && g < 10) memcpy(&gr, g_mem + tr + 0x190u + 4u * (uint32_t)g, 4);
+    if (gr > 0.0f && gr < 1.0f && rpm > 0.0f && rpm < 20000.0f){
+        float *k = &g_wheel_k[slot];
+        if (*k <= 0.0f) *k = 0.045f;
+        const float e = rpm * gr;
+        /* the coupled speed per (rpm x ratio): learnt slowly from the samples near it; a slipping wheel (r below) and a gear change
+         * (the clutch open, rpm falling: r above) stay out */
+        if (v > 6.0f && e > 1.0f){ const float r = v / e; if (r > *k * 0.8f && r < *k * 1.25f) *k = *k * 0.998f + r * 0.002f; }
+        if (*k < 0.03f || *k > 0.08f) *k = 0.045f;
+        /* wheel spin: the engine turns the driven wheels faster than the ground (10 % margin for the sim's own slip) */
+        if (tq > 0.05f){ const float ve = e * *k; if (ve > v * 1.1f) v = ve; }
+    }
+    return v / 0.33f / 90.0f;
+}
+/* the render interpolation (pu_interp.c) draws a car's body between two simulation steps; the wheels and the beams go with the body
+ * as drawn (0.5 m off at 100 km/h otherwise: rims found no wheel, the beams jumped at the step rate) */
+int pu_interp_sim_xf(uint32_t position, float *pos, float *rot);
+/* a car's front and rear axle middles in its own frame (x right, y up, z forward). The hubs (+7EC) trail the body by a step or two
+ * (0.5 m at 70 km/h: the beams jumped at the step rate), so they are taken while the car stands (every car stands at the start) and
+ * kept: geometry. Until then, from the hubs as they are. */
+#define AXLE_SLOTS 64
+static struct { uint32_t car; float l[2][3]; int still; } g_axle[AXLE_SLOTS];
+static void axle_local(uint32_t car, float *front, float *rear){
+    float sp[3], sr[9], vel[3];
+    if (!pu_interp_sim_xf(car + 0x330u, sp, sr)){ memcpy(sp, g_mem + car + 0x330, 12); memcpy(sr, g_mem + car + 0x364, 36); }
+    memcpy(vel, g_mem + car + 0x33C, 12);
+    float l[2][3];
+    for (int a = 0; a < 2; a++){
+        const float *h0 = (const float *)(g_mem + car + 0x7ECu + 0xC4u * (uint32_t)(2 * a)), *h1 = (const float *)(g_mem + car + 0x7ECu + 0xC4u * (uint32_t)(2 * a + 1));
+        const float d[3] = { 0.5f * (h0[0] + h1[0]) - sp[0], 0.5f * (h0[1] + h1[1]) - sp[1], 0.5f * (h0[2] + h1[2]) - sp[2] };
+        for (int r = 0; r < 3; r++) l[a][r] = d[0] * sr[3 * r] + d[1] * sr[3 * r + 1] + d[2] * sr[3 * r + 2];
+    }
+    int slot = (int)((car >> 4) % AXLE_SLOTS);
+    for (int t = 0; t < AXLE_SLOTS && g_axle[slot].car && g_axle[slot].car != car; t++) slot = (slot + 1) % AXLE_SLOTS;
+    if (g_axle[slot].car != car){ g_axle[slot].car = car; g_axle[slot].still = 0; }
+    const float sp2 = vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2];
+    if (sp2 < 0.25f && fabsf(l[0][2] - l[1][2]) > 1.0f && fabsf(l[0][2] - l[1][2]) < 5.0f){
+        memcpy(g_axle[slot].l, l, sizeof l); g_axle[slot].still = 1;
+    }
+    const float (*o)[3] = g_axle[slot].still ? g_axle[slot].l : (const float (*)[3])l;
+    memcpy(front, o[0], 12); memcpy(rear, o[1], 12);
+}
+/* a guest pointer worth following: the cars' lists keep the last race's pointers while the next one loads (its loading screen
+ * draws in the race mode), and what they point at is freed by then: a pointer read there went past the wasm memory (HEAD2: the
+ * third race's start trapped) */
+static inline int head_ptr(uint32_t a){ return a >= 0x10000u && a < GUEST_END - 0x10000u; }
+/* every car for a rim draw (r_web.c wheel_corners): 16 floats each = the drawn position (3), the drawn rows +364/+370/+37C (9), the
+ * front and rear axles' forward offsets in the car's own frame, then nothing; and the four wheels' turns in spins[4 * car]. Count. */
+int pu_wheel_cars(float *out, float *spins, int max){
+    if (!wheel_on() || MR32(0x0065B928u)) return 0;
+    int n = (int)MR32(CARS_N_CARS), k = 0; if (n > CARS_MAX) n = CARS_MAX;
+    for (int i = 0; i < n && k < max; i++){
+        const uint32_t car = MR32(CARS_L_CARS + 4u * (uint32_t)i);
+        if (!head_ptr(car)) continue;
+        float *o = out + 16 * k;
+        memcpy(o, g_mem + car + 0x330, 12); memcpy(o + 3, g_mem + car + 0x364, 36);
+        for (int w = 0; w < 4; w++) spins[4 * k + w] = wheel_spin_of(car, i, w);
+        float fr[3], re[3]; axle_local(car, fr, re);
+        o[12] = fr[2]; o[13] = re[2]; o[14] = o[15] = 0.0f;
+        if (wheel_log() && i == 0){ static int kk; if (++kk % 3000 == 0) fprintf(stderr, "[wheel] car 0 spins %.3f %.3f %.3f %.3f k %.4f axles %.2f %.2f\n",
+                                                                          spins[0], spins[1], spins[2], spins[3], g_wheel_k[0], o[12], o[13]); }
+        k++;
+    }
+    return k;
+}
+
+/* HEAD1: the player's car for the renderer's headlight beams (r_web.c head_uniform): the front axle's middle (the hubs of wheel blocks
+ * 0 and 1), forward (+37C), up (+370), right = up x forward, all world; o[12] the night (1 / 0), o[13..15] left / right lamp, high
+ * beams (car+D87). 0 in the menus or with no car.
+ * HEADLIGHTS=0 off. */
+int pu_head_frame(float *o){
+    static int on = -1; if (on < 0){ const char *e = getenv("HEADLIGHTS"); on = !(e && *e == '0'); }
+    if (!on || MR32(0x0065B928u)) return 0;
+    const uint32_t n = MR32(CARS_N_RACERS), me = MR32(0x0065741Cu);
+    if (!n || me >= n || me >= CARS_MAX) return 0;
+    const uint32_t car = MR32(CARS_L_RACER + 4u * me);
+    if (!head_ptr(car)) return 0;
+    float fr[3], re[3], f[3], up[3], dp[3], dr[9];
+    axle_local(car, fr, re);
+    memcpy(dp, g_mem + car + 0x330, 12); memcpy(dr, g_mem + car + 0x364, 36);   /* the body as this frame draws it */
+    memcpy(up, g_mem + car + 0x370, 12); memcpy(f, g_mem + car + 0x37C, 12);
+    for (int k = 0; k < 3; k++){ o[k] = dp[k] + fr[0] * dr[k] + fr[1] * dr[3 + k] + fr[2] * dr[6 + k]; o[3 + k] = f[k]; o[9 + k] = up[k]; }
+    /* the world is left-handed (the camera's R = U x F): right = up x forward (= the car's row +364) */
+    o[6] = up[1] * f[2] - up[2] * f[1]; o[7] = up[2] * f[0] - up[0] * f[2]; o[8] = up[0] * f[1] - up[1] * f[0];
+    /* the night: the game's own flag (00628A28, the time variant of the track spec: its headlights on; the night Landstrasse 1, day
+     * tracks 0). The sky's ambient tells no night from a shaded day track (night Landstrasse 0.09..0.68, day Normandie 0.18..0.43). */
+    const float dark = MR32(0x00628A28u) ? 1.0f : 0.0f;
+    static int lg = -1; if (lg < 0){ const char *e = getenv("HEADLOG"); lg = e && *e == '1'; }
+    if (lg){ static int k; if (++k % 600 == 0) fprintf(stderr, "[head] night %d axle %.1f %.1f %.1f right %.2f %.2f %.2f\n",
+                                                     (int)dark, o[0], o[1], o[2], o[6], o[7], o[8]); }
+    o[12] = dark;
+    /* the car's lamps as the game draws their glows: the car's R3DCar (car+74C) keeps one byte per lamp at [+2D4] (levels at [+2D8]),
+     * set each frame by the lamp updater 00439360 from car+D87 and the damage; 0043D800 draws a lamp record's glow when its lamp's byte
+     * is set: the headlight record with lamp 0 (the car's left), its mirrored copy with lamp 1 (the right). A broken headlight's byte
+     * goes to 0 with its glow (front-left crushed: lamp 0 off, lamp 1 on). High beams: car+D87 bit 2 (action 15).
+     * DMGPANEL=<i> (test): damage panel i (car+4E4 + 4 i; 0 front-left, 1 front, 2 front-right) at 100. */
+    { static int tp = -2; if (tp == -2){ const char *e = getenv("DMGPANEL"); tp = e ? atoi(e) : -1; }
+      if (tp >= 0 && tp < 9 && MR32(0x00606AC4u) > 200){ const float full = 100.0f; memcpy(g_mem + car + 0x4E4 + 4 * tp, &full, 4); } }
+    const uint32_t r3d = MR32(car + 0x74Cu), lb = head_ptr(r3d) ? MR32(r3d + 0x2D4u) : 0;
+    if (!head_ptr(lb)) return 0;
+    o[13] = g_mem[lb] ? 1.0f : 0.0f; o[14] = g_mem[lb + 1] ? 1.0f : 0.0f;
+    o[15] = (g_mem[car + 0xD87u] & 4) ? 1.0f : 0.0f;
+    if (lg){ static int kp; if (++kp % 600 == 0){ float pd[3]; memcpy(pd, g_mem + car + 0x4E4, 12);
+        fprintf(stderr, "[head] lamps %.0f %.0f high %.0f (D87 %02x) panels %.0f %.0f %.0f" "\n", o[13], o[14], o[15], g_mem[car + 0xD87u], pd[0], pd[1], pd[2]); } }
+    /* the game's own headlights (LayerVertexLight@Headlights: track vertices lit per frame) give way to the beams: their apply method
+     * (vtable slot 0 of the three Headlights layer classes) becomes the base layer's empty one, 0044A0A0 (mov eax,[ecx+8]; ret 8) */
+    { static int patched; if (!patched){ patched = 1;
+        static const uint32_t vt[3] = { 0x005B3B70u, 0x005B3B44u, 0x005B3B9Cu };
+        for (int v = 0; v < 3; v++) if (MR32(vt[v]) == 0x00453110u || MR32(vt[v]) == 0x004535C0u) MR32(vt[v]) = 0x0044A0A0u; } }
+    for (int k = 0; k < 16; k++) if (!(o[k] == o[k]) || fabsf(o[k]) > 1e6f) return 0;
+    return 1;
+}
+
+/* HEAD2: the other cars as boxes for the beams' shadows (r_web.c head_boxes, renderer.ts headShadow), in the player's car frame of
+ * pu_head_frame (x right, y up, z forward from the front axle's middle): 12 floats each = centre (3), half width; its right axis (3),
+ * half height; its up axis (3), half length (forward = right x up in the shader; the slab test takes either sign). The box sits a
+ * little inside the body (the hubs' height - 0.15 .. + 0.85, the axles -0.7 / +0.7, half width 0.78): the light grazes the body's
+ * edges, and a lit car's own box never shades it (the shader skips a box that holds the lit point). Cars behind the lamps (-4 m), past
+ * 120 m or out to the side of the beams left out. Count. */
+int pu_head_boxes(float *out, int max){
+    float h[16];
+    if (!pu_head_frame(h)) return 0;
+    const uint32_t me = MR32(CARS_L_RACER + 4u * MR32(0x0065741Cu));
+    int n = (int)MR32(CARS_N_CARS), k = 0; if (n > CARS_MAX) n = CARS_MAX;
+    for (int i = 0; i < n && k < max; i++){
+        const uint32_t car = MR32(CARS_L_CARS + 4u * (uint32_t)i);
+        if (!head_ptr(car) || car == me) continue;
+        float p[3], r[9], fr[3], re[3];
+        memcpy(p, g_mem + car + 0x330, 12); memcpy(r, g_mem + car + 0x364, 36);   /* rows: right, up, forward */
+        axle_local(car, fr, re);
+        const float hub = 0.5f * (fr[1] + re[1]);
+        const float y0 = hub - 0.15f, y1 = hub + 0.85f, z0 = re[2] - 0.7f, z1 = fr[2] + 0.7f;
+        if (!(z1 - z0 > 1.5f && z1 - z0 < 8.0f)) continue;
+        const float cl[3] = { 0.0f, 0.5f * (y0 + y1), 0.5f * (z0 + z1) };
+        float cw[3];
+        for (int a = 0; a < 3; a++) cw[a] = p[a] + r[a] * cl[0] + r[3 + a] * cl[1] + r[6 + a] * cl[2] - h[a];
+        #define PL(v, o) do { (o)[0] = (v)[0] * h[6] + (v)[1] * h[7] + (v)[2] * h[8]; (o)[1] = (v)[0] * h[9] + (v)[1] * h[10] + (v)[2] * h[11]; \
+                              (o)[2] = (v)[0] * h[3] + (v)[1] * h[4] + (v)[2] * h[5]; } while (0)
+        float *o = out + 12 * k;
+        PL(cw, o); PL(r, o + 4); PL(r + 3, o + 8);
+        #undef PL
+        if (o[2] < -4.0f || o[2] > 120.0f || fabsf(o[0]) > 0.9f * o[2] + 8.0f) continue;
+        o[3] = 0.78f; o[7] = 0.5f * (y1 - y0); o[11] = 0.5f * (z1 - z0);
+        int bad = 0; for (int a = 0; a < 12; a++) if (!(o[a] == o[a]) || fabsf(o[a]) > 1e5f) bad = 1;
+        if (!bad) k++;
+    }
+    { static int lg = -1; if (lg < 0){ const char *e = getenv("HEADLOG"); lg = e && *e == '1'; }
+      if (lg){ static int kk; if (++kk % 600 == 0){ fprintf(stderr, "[head] boxes %d", k);
+          for (int j = 0; j < k && j < 3; j++) fprintf(stderr, "  (%.1f %.1f %.1f | %.2f %.2f %.2f)", out[12 * j], out[12 * j + 1], out[12 * j + 2], out[12 * j + 3], out[12 * j + 7], out[12 * j + 11]);
+          fprintf(stderr, "\n"); } } }
+    return k;
+}
+
 /* 00443F60, the page builder: thiscall(file, page, fmt) ret 0C */
 void sub_00443f60(CPU *restrict c){
     const int outer = g_file;
@@ -302,6 +521,7 @@ void sub_00444130(CPU *restrict c){
         c->eax = eax; c->ecx = ecx; c->edx = edx;
         return;
     }
+    if (g_file == 2 && wheel_on()){ wheel_blit(a[0], a[1], a[3], (int)a[5], (int)a[6]); return; }
     if (g_file != 0) return;            /* the exterior page only ([car_paint] files=1) */
     const uint32_t eax = c->eax, ecx = c->ecx, edx = c->edx;
     record(c, a[0], a[1], a[2], a[3], a[4], (int)a[5], (int)a[6]);
@@ -311,6 +531,7 @@ static int paint_map_page(uint32_t data, int w, int h, int fmt, uint8_t *rg);
 /* r_web.c r_tupdate: the map of an upload (w x h, two bytes a texel): 1 a paint page, 2 a glass page, 0 none */
 int paint_map(uint32_t data, int w, int h, int fmt, uint8_t *rg){
     if (paint_map_page(data, w, h, fmt, rg)) return 1;
+    if (wheel_map(data, w, h, fmt)){ for (size_t t = 0; t < (size_t)w * h; t++){ rg[t * 2] = 0; rg[t * 2 + 1] = 128; } return 4; }
     return glass_on() && glass_map(data, w, h, fmt, rg) ? 2 : 0;
 }
 static int paint_map_page(uint32_t data, int w, int h, int fmt, uint8_t *rg){
@@ -483,4 +704,7 @@ void sub_00446530(CPU *restrict c){
 void sub_00443f60(CPU *restrict c){ sub_00443f60_orig(c); }
 void sub_00444130(CPU *restrict c){ sub_00444130_orig(c); }
 void sub_00446530(CPU *restrict c){ sub_00446530_orig(c); }
+int pu_wheel_cars(float *out, float *spins, int max){ (void)out; (void)spins; (void)max; return 0; }
+int pu_head_frame(float *o){ (void)o; return 0; }
+int pu_head_boxes(float *o, int max){ (void)o; (void)max; return 0; }
 #endif

@@ -370,3 +370,14 @@ void pu_interp_restore(void){
     }
     g_napplied = 0;
 }
+/* the simulation's own transform of a blended part while a frame draws (HEAD1/WHEEL1 move points the frame does not blend, the wheel
+ * hubs, with their car): 1 and pos/rot (rows +364, +370, +37C) when the part at that position address is drawn blended now */
+int pu_interp_sim_xf(uint32_t position, float *pos, float *rot){
+    for (int i = 0; i < g_napplied; i++){
+        const Applied *e = &g_applied[i];
+        if (e->watch_only || e->track->position != position) continue;
+        memcpy(pos, e->saved.pos, 12); memcpy(rot, e->saved.rot, 36);
+        return 1;
+    }
+    return 0;
+}

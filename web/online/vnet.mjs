@@ -29,6 +29,10 @@ const CTL_PORT = 9443;              // ON2: text lines between the server and th
 const K_UDP = 1, K_ICMP = 5, K_HELLO = 0x40;
 const MAX_FRAME = 8192;                // the game's datagrams are at most 1472 bytes + the 16-byte header
 const MAX_TABS = 500, MAX_TABS_PER_IP = 16;
+// A browser that vanished without closing (phone asleep, network switch) leaves an idle socket nobody notices: the
+// server pings every PING_S and drops a tab silent for IDLE_S (browsers answer pings by themselves). Without it the
+// dead tabs pile up until their IP hits MAX_TABS_PER_IP (429 for everyone behind that address).
+const PING_S = 30, IDLE_S = 95;
 const NAME_MAX = 15;                   // the join's info field: "<persona>~<version>~<version>" in 24 bytes
 const ipText = v => `${v >>> 24}.${(v >>> 16) & 255}.${(v >>> 8) & 255}.${v & 255}`;
 const ipNum = t => t.split('.').reduce((a, b) => ((a << 8) | (+b & 255)) >>> 0, 0);
@@ -115,6 +119,14 @@ export function createOnline({ dataDir, carsJson, udpPort = 0, logDir, verbose =
     },
   });
   const timer = setInterval(() => ng.tick(), 1000);
+  const sweep = setInterval(() => {
+    const now = Date.now();
+    for (const tab of [...tabs.values()]) {
+      if (now - tab.heard > IDLE_S * 1000) tab.close('silent');
+      else tab.ping();
+    }
+  }, PING_S * 1000);
+  if (sweep.unref) sweep.unref();
 
   function onFrame(tab, b) {
     if (b.length < 16) return;
@@ -187,7 +199,8 @@ export function createOnline({ dataDir, carsJson, udpPort = 0, logDir, verbose =
     let host = nextHost++;
     while (tabs.has((0x0A4D0100 + host) >>> 0)) host = nextHost++;
     const tab = {
-      vip: (0x0A4D0000 + 0x100 + (host % 0xFEFF)) >>> 0, open: true, account,
+      vip: (0x0A4D0000 + 0x100 + (host % 0xFEFF)) >>> 0, open: true, account, heard: Date.now(),
+      ping() { if (this.open) socket.write(Buffer.from([0x89, 0])); },
       send(data) {
         if (!this.open) return;
         const n = data.length;
@@ -208,7 +221,9 @@ export function createOnline({ dataDir, carsJson, udpPort = 0, logDir, verbose =
       log(`tab ${ipText(tab.vip)} gone (${why}); ${tabs.size} tabs`);
       socket.destroy();
     };
+    tab.close = close;
     socket.on('data', d => {
+      tab.heard = Date.now();
       buf = buf.length ? Buffer.concat([buf, d]) : d;
       for (;;) {
         if (buf.length < 2) return;
@@ -239,6 +254,6 @@ export function createOnline({ dataDir, carsJson, udpPort = 0, logDir, verbose =
     udp.bind(udpPort, '0.0.0.0', () => log(`PC players: UDP on 0.0.0.0:${udpPort}`));
   }
   log(`online service up, log ${logFile}`);
-  return { upgrade, netgather: ng, status: () => ({ tabs: tabs.size, ...ng.status() }), tabs, close() { clearInterval(timer); if (udp) udp.close(); }, log };
+  return { upgrade, netgather: ng, status: () => ({ tabs: tabs.size, ...ng.status() }), tabs, close() { clearInterval(timer); clearInterval(sweep); if (udp) udp.close(); }, log };
 }
 export { ipText, ipNum };
