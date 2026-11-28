@@ -451,6 +451,46 @@ int pu_head_frame(float *o){
     return 1;
 }
 
+/* HEAD2: the other cars as boxes for the beams' shadows (r_web.c head_boxes, renderer.ts headShadow), in the player's car frame of
+ * pu_head_frame (x right, y up, z forward from the front axle's middle): 12 floats each = centre (3), half width; its right axis (3),
+ * half height; its up axis (3), half length (forward = right x up in the shader; the slab test takes either sign). The box sits a
+ * little inside the body (the hubs' height - 0.15 .. + 0.85, the axles -0.7 / +0.7, half width 0.78): the light grazes the body's
+ * edges, and a lit car's own box never shades it (the shader skips a box that holds the lit point). Cars behind the lamps (-4 m), past
+ * 120 m or out to the side of the beams left out. Count. */
+int pu_head_boxes(float *out, int max){
+    float h[16];
+    if (!pu_head_frame(h)) return 0;
+    const uint32_t me = MR32(CARS_L_RACER + 4u * MR32(0x0065741Cu));
+    int n = (int)MR32(CARS_N_CARS), k = 0; if (n > CARS_MAX) n = CARS_MAX;
+    for (int i = 0; i < n && k < max; i++){
+        const uint32_t car = MR32(CARS_L_CARS + 4u * (uint32_t)i);
+        if (!car || car == me) continue;
+        float p[3], r[9], fr[3], re[3];
+        memcpy(p, g_mem + car + 0x330, 12); memcpy(r, g_mem + car + 0x364, 36);   /* rows: right, up, forward */
+        axle_local(car, fr, re);
+        const float hub = 0.5f * (fr[1] + re[1]);
+        const float y0 = hub - 0.15f, y1 = hub + 0.85f, z0 = re[2] - 0.7f, z1 = fr[2] + 0.7f;
+        if (!(z1 - z0 > 1.5f && z1 - z0 < 8.0f)) continue;
+        const float cl[3] = { 0.0f, 0.5f * (y0 + y1), 0.5f * (z0 + z1) };
+        float cw[3];
+        for (int a = 0; a < 3; a++) cw[a] = p[a] + r[a] * cl[0] + r[3 + a] * cl[1] + r[6 + a] * cl[2] - h[a];
+        #define PL(v, o) do { (o)[0] = (v)[0] * h[6] + (v)[1] * h[7] + (v)[2] * h[8]; (o)[1] = (v)[0] * h[9] + (v)[1] * h[10] + (v)[2] * h[11]; \
+                              (o)[2] = (v)[0] * h[3] + (v)[1] * h[4] + (v)[2] * h[5]; } while (0)
+        float *o = out + 12 * k;
+        PL(cw, o); PL(r, o + 4); PL(r + 3, o + 8);
+        #undef PL
+        if (o[2] < -4.0f || o[2] > 120.0f || fabsf(o[0]) > 0.9f * o[2] + 8.0f) continue;
+        o[3] = 0.78f; o[7] = 0.5f * (y1 - y0); o[11] = 0.5f * (z1 - z0);
+        int bad = 0; for (int a = 0; a < 12; a++) if (!(o[a] == o[a]) || fabsf(o[a]) > 1e5f) bad = 1;
+        if (!bad) k++;
+    }
+    { static int lg = -1; if (lg < 0){ const char *e = getenv("HEADLOG"); lg = e && *e == '1'; }
+      if (lg){ static int kk; if (++kk % 600 == 0){ fprintf(stderr, "[head] boxes %d", k);
+          for (int j = 0; j < k && j < 3; j++) fprintf(stderr, "  (%.1f %.1f %.1f | %.2f %.2f %.2f)", out[12 * j], out[12 * j + 1], out[12 * j + 2], out[12 * j + 3], out[12 * j + 7], out[12 * j + 11]);
+          fprintf(stderr, "\n"); } } }
+    return k;
+}
+
 /* 00443F60, the page builder: thiscall(file, page, fmt) ret 0C */
 void sub_00443f60(CPU *restrict c){
     const int outer = g_file;
@@ -662,4 +702,5 @@ void sub_00444130(CPU *restrict c){ sub_00444130_orig(c); }
 void sub_00446530(CPU *restrict c){ sub_00446530_orig(c); }
 int pu_wheel_cars(float *out, float *spins, int max){ (void)out; (void)spins; (void)max; return 0; }
 int pu_head_frame(float *o){ (void)o; return 0; }
+int pu_head_boxes(float *o, int max){ (void)o; (void)max; return 0; }
 #endif

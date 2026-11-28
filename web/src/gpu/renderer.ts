@@ -3,7 +3,7 @@
 //
 // Ring (bytes): magic 0, seg_count 4, published 8, consumed 12, presents_pub 16, presents_done 20, segments 24 (32 bytes each:
 // ready, cmd_words, vtx_bytes, up_bytes, has_present, cmd, vtx, up).
-const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14, PAINT: 15 };
+const C = { VIDEO: 1, TEX_CREATE: 2, TEX_DESTROY: 3, TEX_WRITE: 4, TEX_GENMIPS: 5, SCISSOR: 6, PIPE: 7, BIND: 8, UNIFORM: 9, DRAW: 10, PRESENT: 11, READRECT: 12, TARGET: 13, CUBE_MIPS: 14, PAINT: 15, HEADBOX: 16 };
 const VSIZE = 48, VERTEX_BUFFER = 24 << 20, UBO_ALIGN = 256, UBO_SLOTS = 65536 / 256 * 64;
 
 import { gfxLines, gfxSamples } from '../quality';
@@ -11,11 +11,13 @@ import { tune, loadTune, mountTunePanel } from './tune';
 
 const SHADER = /* wgsl */`
 struct U { screen: vec2f, alphaRef: f32, depthBias: f32, fogColor: vec4f, fogDensity: f32, fogScale: f32, hard: f32, lodBias: f32, em: vec4f,
-  camR: vec4f, camU: vec4f, camF: vec4f, proj: vec4f, vp: vec4f, sun: vec4f, x0: vec4f, x1: vec4f };
+  camR: vec4f, camU: vec4f, camF: vec4f, proj: vec4f, vp: vec4f, sun: vec4f, x0: vec4f, x1: vec4f,
+  hp: vec4f, hf: vec4f, hr: vec4f, hu: vec4f };
 @group(0) @binding(0) var<uniform> u: U;
 // live tuning (gpu/tune.ts): h0 intensity, force, range, spread; h1 cutoff, step-up, softness, hot spot; h2 wrap, fringe, warm, -;
-// h3 lamp height, ahead, spacing, vertical spread; w0 rim blur, sun glow, symmetry, rim debug
-struct T { h0: vec4f, h1: vec4f, h2: vec4f, h3: vec4f, w0: vec4f };
+// h3 lamp height, ahead, spacing, vertical spread; w0 rim blur, sun glow, symmetry, rim debug; h4 on cars, cars' shine, shadows, -.
+// nb.x: the other cars' boxes in bx (3 each, runtime/web/r_web.c head_boxes): written once a frame by C.HEADBOX
+struct T { h0: vec4f, h1: vec4f, h2: vec4f, h3: vec4f, w0: vec4f, h4: vec4f, nb: vec4f, bx: array<vec4f, 48> };
 @group(0) @binding(1) var<uniform> tn: T;
 @group(1) @binding(0) var tx: texture_2d<f32>;
 @group(1) @binding(1) var sm: sampler;
@@ -68,21 +70,22 @@ fn shade(i: VO) -> vec4f {
   }
   let t = textureSampleBias(tx, sm, uv, u.lodBias);
   var r = t * i.color;
-  if (u.x1.w > 0.0) { r = vec4f(r.rgb + t.rgb * headlight(i), r.a); }
+  if (dot(u.hf.xyz, u.hf.xyz) > 0.5) { r = vec4f(r.rgb + t.rgb * headlight(i), r.a); }
   if (u.alphaRef > 0.0 && r.a < u.alphaRef) { discard; }
   if (u.hard > 0.5) { r.a = 1.0; }
   return vec4f(fog(r.rgb, i.uvq.z), r.a);
 }
-// HEAD1: the player's headlights as two projector beams on what the track draws (runtime/web/r_web.c head_uniform: the front axle's
-// middle in camera space camR.xyz, the car's forward camU, right camF, up sun; x1.z the night's darkness, x1.w on). The pixel back in
-// camera space (ray x depth 1/q), its normal from the screen derivatives. A beam: wide falloff + a hot spot under a sharp cutoff that
-// steps up to the kerb side (a European low beam), a blue lens fringe on the cutoff line, 1/(1 + (d/range)^2), wrapped N.L.
-fn beam(P: vec3f, N: vec3f, L0: vec3f, hi: f32) -> vec2f {
+// HEAD1: the player's headlights as two projector beams on what the track draws, HEAD2 on the cars' paint, glass and rims
+// (runtime/web/r_web.c head_fill: the front axle's middle in camera space hp.xyz, the car's forward hf, right hr, up hu; the lamps
+// hp.w (left), hf.w (right), high beams hr.w, the night hu.w). The pixel back in camera space (ray x depth 1/q). A beam: wide falloff
+// + a hot spot under a sharp cutoff that steps up to the kerb side (a European low beam), a blue lens fringe on the cutoff line,
+// 1/(1 + (d/range)^2), wrapped N.L. x: the light (x N.L), y: the fringe (x N.L), z: the light alone (the cars' shine).
+fn beam(P: vec3f, N: vec3f, L0: vec3f, hi: f32) -> vec3f {
   let d = P - L0;
-  let f = dot(d, u.camU.xyz);
-  if (f < 0.3) { return vec2f(0.0); }
-  let h = dot(d, u.camF.xyz) / f;
-  let v = dot(d, u.sun.xyz) / f;
+  let f = dot(d, u.hf.xyz);
+  if (f < 0.3) { return vec3f(0.0); }
+  let h = dot(d, u.hr.xyz) / f;
+  let v = dot(d, u.hu.xyz) / f;
   // the kerb-side step-up: European asymmetric (right side only) .. mirrored to both sides (tn.w0.z symmetry); high beams lift the
   // cutoff above the horizon
   let kick = mix(clamp(h, 0.0, 0.35), clamp(abs(h), 0.0, 0.35), tn.w0.z) * tn.h1.y;
@@ -104,7 +107,74 @@ fn beam(P: vec3f, N: vec3f, L0: vec3f, hi: f32) -> vec2f {
   let att = 1.0 / (1.0 + d2 / max(rng * rng, 1.0));
   let L = -d * inverseSqrt(max(d2, 1e-4));
   let ndl = clamp((dot(N, L) + tn.h2.x) / (1.0 + tn.h2.x), 0.0, 1.0);
-  return vec2f((spread + hot) * mask * att * ndl, fringe * att * ndl);
+  let e = (spread + hot) * mask * att;
+  return vec3f(e * ndl, fringe * att * ndl, e);
+}
+// HEAD2: the share of a lamp's light (Ll, in the car's frame: right, up, forward from the axle) that reaches Pl past the other cars'
+// boxes: the metres the ray runs inside a box, soft over the first 0.3 m (the box's edges). A box that holds Pl (with 0.25 m around
+// it) is the lit car's own: skipped.
+fn headShadow(Pl: vec3f, Ll: vec3f) -> f32 {
+  let n = min(i32(tn.nb.x), 16);
+  let D = Pl - Ll;
+  let len = length(D);
+  var vis = 1.0;
+  for (var k = 0; k < n; k++) {
+    let c = tn.bx[3 * k]; let ax = tn.bx[3 * k + 1]; let ay = tn.bx[3 * k + 2];
+    let az = cross(ax.xyz, ay.xyz);
+    let e = vec3f(c.w, ax.w, ay.w);
+    let rp = Pl - c.xyz;
+    if (all(abs(vec3f(dot(rp, ax.xyz), dot(rp, ay.xyz), dot(rp, az))) < e + vec3f(0.25))) { continue; }
+    let ro = Ll - c.xyz;
+    let o = vec3f(dot(ro, ax.xyz), dot(ro, ay.xyz), dot(ro, az));
+    var dd = vec3f(dot(D, ax.xyz), dot(D, ay.xyz), dot(D, az));
+    dd = select(dd, vec3f(1e-6), abs(dd) < vec3f(1e-6));
+    let t1 = (-e - o) / dd; let t2 = (e - o) / dd;
+    let tmin = min(t1, t2); let tmax = max(t1, t2);
+    let a = max(max(max(tmin.x, tmin.y), tmin.z), 0.0);
+    let b = min(min(min(tmax.x, tmax.y), tmax.z), 1.0);
+    vis *= 1.0 - smoothstep(0.0, 0.3, (b - a) * len);
+    if (vis < 0.01) { break; }
+  }
+  return vis;
+}
+// the warm / xenon tint of the beams
+fn headCol() -> vec3f {
+  let warm = tn.h2.z;
+  return select(mix(vec3f(1.0, 0.97, 0.9), vec3f(1.0, 0.82, 0.55), -warm), mix(vec3f(1.0, 0.97, 0.9), vec3f(0.82, 0.9, 1.0), warm), warm >= 0.0);
+}
+// both lamps at P (camera space) with the normal N: rgb the light, w the shine (a GGX spot of the lamp in the surface, rough, ks its
+// strength; 0 = none). Nothing on the player's own car for the cars' draws (from the axle: -6 .. +1.2 m, 1.1 m to the sides).
+fn headAt(P: vec3f, N: vec3f, V: vec3f, ks: f32, rough: f32) -> vec4f {
+  if (dot(u.hf.xyz, u.hf.xyz) < 0.5) { return vec4f(0.0); }
+  let dP = P - u.hp.xyz;
+  let Pl = vec3f(dot(dP, u.hr.xyz), dot(dP, u.hu.xyz), dot(dP, u.hf.xyz));
+  if (ks > 0.0 && Pl.z < 1.2 && Pl.z > -6.0 && abs(Pl.x) < 1.1 && Pl.y > -0.2 && Pl.y < 1.6) { return vec4f(0.0); }
+  // each lamp as the car has it (the game's lamp byte: on, broken or switched off = 0; high beams); forced beams light both by day
+  // only: at night the lamp bytes decide (a broken lamp stays dark)
+  let f = select(0.0, 1.0, tn.h2.w > 0.0 && u.hu.w <= 0.0);
+  let hi = u.hr.w;
+  var acc = vec3f(0.0);
+  for (var l = 0; l < 2; l++) {
+    let sd = select(1.0, -1.0, l == 0);
+    let on = max(select(u.hf.w, u.hp.w, l == 0), f);
+    if (on <= 0.0) { continue; }
+    let Ll = vec3f(sd * 0.7 * tn.h3.z, tn.h3.x, tn.h3.y);
+    let L0 = u.hp.xyz + u.hr.xyz * Ll.x + u.hu.xyz * Ll.y + u.hf.xyz * Ll.z;
+    let b = beam(P, N, L0, hi);
+    if (b.x + b.y + b.z * ks < 1e-4) { continue; }
+    var sh = 1.0;
+    if (tn.h4.z > 0.0) { sh = mix(1.0, headShadow(Pl, Ll), tn.h4.z); }
+    var sp = 0.0;
+    if (ks > 0.0) {
+      let L = normalize(L0 - P); let H = normalize(V + L);
+      let nl = max(dot(N, L), 0.0); let nv = max(dot(N, V), 0.001);
+      sp = b.z * ks * D_GGX(max(dot(N, H), 0.0), rough) * fresnel(vec3f(0.04), max(dot(V, H), 0.0)).x / (4.0 * nv * nl + 0.001) * nl;
+    }
+    acc += vec3f(b.x, b.y, sp) * (sh * on);
+  }
+  // hu.w: the game's night flag (00628A28, its headlights on), tn.h2.w forces the beams by day
+  let s = max(u.hu.w, tn.h2.w) * tn.h0.x;
+  return vec4f((headCol() * acc.x + vec3f(0.35, 0.55, 1.0) * acc.y) * s, acc.z * s);
 }
 fn headlight(i: VO) -> vec3f {
   let q = max(i.uvq.z, 1e-6);
@@ -113,18 +183,7 @@ fn headlight(i: VO) -> vec3f {
   if (i.uvq.z == 1.0 || dot(Nx, Nx) < 1e-12 || -P.z > 200.0) { return vec3f(0.0); }
   var N = normalize(Nx);
   if (dot(N, P) > 0.0) { N = -N; }
-  let base = u.camR.xyz + u.sun.xyz * tn.h3.x + u.camU.xyz * tn.h3.y;
-  let side = u.camF.xyz * (0.7 * tn.h3.z);
-  // each lamp as the car has it (the game's lamp byte: on, broken or switched off = 0; high beams); forced beams light both by day
-  // only: at night the lamp bytes decide (a broken lamp stays dark)
-  let f = select(0.0, 1.0, tn.h2.w > 0.0 && u.x1.z <= 0.0);
-  let hi = u.x0.z;
-  let e = beam(P, N, base - side, hi) * max(u.x0.x, f) + beam(P, N, base + side, hi) * max(u.x0.y, f);
-  let warm = tn.h2.z;
-  let col = select(mix(vec3f(1.0, 0.97, 0.9), vec3f(1.0, 0.82, 0.55), -warm), mix(vec3f(1.0, 0.97, 0.9), vec3f(0.82, 0.9, 1.0), warm), warm >= 0.0);
-  // x1.z: the game's night flag (00628A28, its headlights on), tn.h2.w forces the beams by day
-  let s = max(u.x1.z, tn.h2.w) * tn.h0.x;
-  return (col * e.x + vec3f(0.35, 0.55, 1.0) * e.y) * s;
+  return headAt(P, N, -normalize(P), 0.0, 1.0).rgb;
 }
 @fragment fn fs(i: VO) -> @location(0) vec4f { return shade(i); }
 // WHEEL1: the rim (the car's tpage4, its quarter u, v < 0.5, centre 0.25, 0.25) smeared round its centre by the wheels' turn in a
@@ -149,6 +208,7 @@ fn headlight(i: VO) -> vec3f {
     t = textureSampleGrad(tx, sm, uv, gx, gy);
   }
   var r = t * i.color;
+  if (dot(u.hf.xyz, u.hf.xyz) > 0.5) { r = vec4f(r.rgb + t.rgb * headlight(i) * tn.h4.x, r.a); }
   // ?t_wheeldbg=1: the corner's turn as red (none: green), to see which rims the runtime matched
   if (tn.w0.w > 0.0 && i.rect.w == 8.0) { r = vec4f(mix(vec3f(0.0, 0.6, 0.0), vec3f(1.0, 0.0, 0.0), clamp(i.rect.x * 2.0, 0.0, 1.0)), r.a); }
   if (u.alphaRef > 0.0 && r.a < u.alphaRef) { discard; }
@@ -314,6 +374,11 @@ fn shade_car(Nb: vec3f, Nc: vec3f, N: vec3f, V: vec3f, L: vec3f, base: vec3f, df
   // the knee washed them out on light paint (the user picked 0.85, 2026-11-26; ?seam=0 = off, ?seam=<0..3> to try)
   if (P_SEAM > 0.0) { rgb *= max(mix(1.0, clamp(1.0 - gv / 127.5, 0.0, 1.0), P_SEAM), 0.0); }
   rgb = mix(albedo.rgb * i.color.rgb, rgb, pk.r);   // texels the game does not paint keep the stock look
+  // HEAD2: the player's beams on the car: its colour lit (tn.h4.x), the lamps' spot in the clear coat by the paint's gloss (tn.h4.y)
+  if (dot(u.hf.xyz, u.hf.xyz) > 0.5) {
+    let hl = headAt(P, N, V, tn.h4.y * (0.25 + 0.75 * keep * pk.r) * 20.0, mix(0.35, 0.08, keep * pk.r));
+    rgb += albedo.rgb * hl.rgb * tn.h4.x + headCol() * hl.w;
+  }
   return vec4f(fog(rgb, i.uvq.z), a);
 }
 // ---- intact car glass (GLASS1; PC car editor's Glass material: roughness 0.02, specular 20, reflection 1, grazing 1, no env
@@ -349,7 +414,8 @@ const G_ROUGH = 0.02; const G_SPEC = 20.0; const G_REFL = 1.0; const G_F0 = 0.04
   let sun = SUN_COL * P_SUN_REFL * vis;
   let env = envGain(envK(N, V, G_ROUGH * MAXMIP, P_SUN_REFL * vis), u.x0.x);
   let spec = sun * G_SPEC * lum(i.color.rgb) * (D_GGX(NdotH, G_ROUGH) * G_Smith(NdotV, NdotL, G_ROUGH) * fresnel(vec3f(G_F0), VdotH)) / (4.0 * NdotV * NdotL + 0.001) * NdotL;
-  let refl = env * F * G_REFL + spec;
+  var refl = env * F * G_REFL + spec;
+  if (dot(u.hf.xyz, u.hf.xyz) > 0.5) { refl += headCol() * headAt(P, N, V, tn.h4.y * 20.0, 0.05).w; }
   // the fog hides the reflection as it hides the glass under it (that one is fogged already)
   let clear = fog(vec3f(1.0), i.uvq.z).r - fog(vec3f(0.0), i.uvq.z).r;   // 1 - the fog's share
   let out_ = vec4f(refl * clear, F * clear);
@@ -575,12 +641,12 @@ struct MRT { @location(0) c: vec4f, @location(1) g: vec4f };
   const uboLayout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true } },
     { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }] });
   // live tuning (gpu/tune.ts): written at every present
-  const tuneBuf = device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const tuneF = new Float32Array(64);
+  const tuneBuf = device.createBuffer({ size: 1024, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const tuneF = new Float32Array(24);
   const writeTune = () => {
     const t = tune;
     tuneF.set([t.hl, 0, t.hlrange, t.hlwidth, t.hlcut, t.hlkick, t.hlsoft, t.hlhot, t.hlwrap, t.hlfringe, t.hlwarm, t.hlforce,
-      t.hlh, t.hlfwd, t.hlsep, t.hlvert, t.wheel, t.sun, t.hlsym, t.wheeldbg], 0);
+      t.hlh, t.hlfwd, t.hlsep, t.hlvert, t.wheel, t.sun, t.hlsym, t.wheeldbg, t.hlcar, t.hlcarspec, t.hlshadow, 0], 0);
     queue.writeBuffer(tuneBuf, 0, tuneF);
   };
   writeTune();
@@ -592,7 +658,7 @@ struct MRT { @location(0) c: vec4f, @location(1) g: vec4f };
   const pipeLayout = device.createPipelineLayout({ bindGroupLayouts: [uboLayout, texLayout, cubeLayout] });
   const vbuf = device.createBuffer({ size: VERTEX_BUFFER, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
   const ubo = device.createBuffer({ size: UBO_SLOTS * UBO_ALIGN, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const uboGroup = device.createBindGroup({ layout: uboLayout, entries: [{ binding: 0, resource: { buffer: ubo, size: 192 } }, { binding: 1, resource: { buffer: tuneBuf } }] });
+  const uboGroup = device.createBindGroup({ layout: uboLayout, entries: [{ binding: 0, resource: { buffer: ubo, size: 256 } }, { binding: 1, resource: { buffer: tuneBuf } }] });
   const uboData = new ArrayBuffer(UBO_SLOTS * UBO_ALIGN);
   const uboF = new Float32Array(uboData);
 
@@ -863,12 +929,14 @@ struct MRT { @location(0) c: vec4f, @location(1) g: vec4f };
         case C.UNIFORM: {
           if (ubos < UBO_SLOTS) {
             uboOff = ubos * UBO_ALIGN;
-            uboF.set(cf.subarray(i, i + 48), uboOff / 4);
+            uboF.set(cf.subarray(i, i + 64), uboOff / 4);
             ubos++;
             begin().setBindGroup(0, uboGroup, [uboOff]);
           }
-          i += 48;
+          i += 64;
           break; }
+        // HEAD2: the other cars' boxes for the beams' shadows, after the tuning in the tune buffer (renderer T.nb, T.bx)
+        case C.HEADBOX: queue.writeBuffer(tuneBuf, 96, cf, i, 4 + 192); i += 4 + 192; break;
         case C.DRAW: {
           const first = cmd[i++], count = cmd[i++], p = begin();
           if (bindDirty) { p.setBindGroup(1, group(curTex, curSampler, curPaint)); bindDirty = false; }
